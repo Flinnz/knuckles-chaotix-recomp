@@ -72,12 +72,26 @@ unresolved. Code found so far is 1.3% of the ROM, which is expected at this
 stage: most of the cartridge is compressed art, and the engine is reached
 through data-driven tables that the next pass needs to follow.
 
-**M3 — SH-2 → C recompiler**
+**M3 — SH-2 → C recompiler** 🔵 *core done, coverage pending*
 
-Emit one C function per discovered function, registers in a context struct,
-memory through inlined accessors. Delay slots and the `T` bit are the two things
-that must be modelled exactly. Start with the SH-2 because it is small and its
-correctness is easy to check against an emulator trace.
+All 208 discovered SH-2 functions translate to C with no unhandled constructs,
+and the result compiles clean for arm64 under `-Wall`. Semantics are checked
+end to end by `tools/test_recomp.py`: an SH-2 test program is assembled,
+recompiled, built for this machine, executed, and its answers compared against
+values derived independently of any SH-2 model. All 8 cases pass, covering the
+divide step, delay-slot ordering, carry propagation and shift kinds.
+
+Still open before this milestone closes:
+
+* **14 escaping branches.** A branch whose target lands in a block owned by
+  another function falls back to indirect dispatch. Correct, but it defeats
+  inlining and hides a real control-flow edge.
+* **The PR model.** Calls become native calls and `rts` becomes `return`, with
+  PR still set to the true return address so save/restore round-trips. Code
+  that *computes* a return address to skip inline data is outside this model.
+  No such site is known in this game, but nothing detects one yet.
+* **Literal pool loads go through memory.** Correct, and leaves the constants
+  patchable, but they are the obvious first optimisation.
 
 **M4 — runtime skeleton**
 

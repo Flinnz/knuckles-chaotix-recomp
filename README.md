@@ -42,6 +42,9 @@ python3 tools/disasm68k.py discover           # find 68000 code
 python3 tools/disasm68k.py fn 0x3f0           # disassemble one 68000 function
 python3 tools/disasm68k.py emit --verify      # emit 68000 listing, prove round-trip
 python3 tools/validate_m68k.py                # 68000 decoder vs m68k-elf-objdump
+
+python3 tools/recompile.py --build            # SH-2 -> C, then compile it
+python3 tools/test_recomp.py                  # run recompiled SH-2, check answers
 ```
 
 ## How correctness is established
@@ -71,10 +74,13 @@ mis-rendered operand, or literal pool mistaken for code would break them.
 
 ## Status
 
-Front ends only — nothing is recompiled or runnable yet.
+Front ends are complete; the SH-2 recompiler produces running native code.
+There is no runtime or hardware emulation yet, so the game does not boot.
 
-- SH-2 **complete**: 208 functions, 1,772 blocks, 15 dispatch tables
-- 68000 **complete**: 368 functions, 2,957 blocks, whole-ROM round-trip
+- SH-2 front end **complete**: 208 functions, 1,772 blocks, 15 dispatch tables
+- 68000 front end **complete**: 368 functions, 2,957 blocks, whole-ROM round-trip
+- SH-2 **recompiler** running: all 208 functions translate to C and compile for
+  arm64; 8/8 semantics tests pass on natively executed output
 - 50 indirect transfers unresolved across both CPUs, mostly runtime function
   pointers needing interprocedural dataflow
 - Next: follow the engine's data-driven tables to raise 68000 coverage, then
