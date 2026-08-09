@@ -66,6 +66,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             headless_frames = atoi(argv[i + 1]);
+        else if (!strcmp(argv[i], "--trace"))
+            mars.trace = 1;
 
     FILE *f = fopen(rompath, "rb");
     if (!f) { perror(rompath); return 1; }
@@ -97,11 +99,13 @@ int main(int argc, char **argv) {
     /* Master init. It ends by waiting for a command, which the watchdog turns
      * into an unwind rather than a hang. */
     printf("SH-2 slave init  (sp=0x%08X) ...\n", slave.r[15]);
-    mars_reset_budget();
+    mars_reset_budget(); mars_trace_reset();
     if (setjmp(mars_bail) == 0) sh2_call(&slave, SLAVE_RESET);
+    if (mars.trace) mars_trace_dump("after slave init");
     printf("SH-2 master init ...\n");
-    mars_reset_budget();
+    mars_reset_budget(); mars_trace_reset();
     if (setjmp(mars_bail) == 0) sh2_call(&sh2, MASTER_RESET);
+    if (mars.trace) mars_trace_dump("after master init");
     printf("  bitmap mode 0x%04X, fb control 0x%04X\n",
            mars.bitmap_mode, mars.fbctl);
     printf("  comm: %04X %04X %04X %04X  (want M_OK / S_OK)\n",

@@ -146,20 +146,31 @@ also subsumes the 14 escaping branches previously noted under M3 — they are
 tail transfers, not indirect dispatches. All 8 recompiler semantics tests still
 pass under the new calling convention.
 
-**It did not unblock the handshake.** The 68000 still spins at 0x88099E and
-neither ready word is posted. Two observations, neither yet explained:
+**It did not unblock the handshake**, and the trace hook (`--trace`) then
+found why in one run. Because every function entry passes through the dispatch
+loop, tail transfers included, the trace needed no instrumentation in the
+generated code at all.
 
-* The depth bound still trips twice per run, but it can no longer be tail-call
-  recursion — only real calls nest now. So there is a genuine `bsr`/`jsr` cycle
-  somewhere, which is a different defect than the one just fixed.
-* Comm 0-1 now reads 0000 rather than the 0xFFFF the master's boot writes,
-  so the trampoline changed which path init takes. Whether that is progress or
-  regression is not yet established.
+The slave's idle handler at 0x060002F6 burns a short delay loop and then does
+`bt 0x060002D4` — branching back to the dispatch loop head **instead of
+executing `rts`**. It is reached by `bsrf` from that same loop, so every poll
+iteration enters a handler that never returns.
 
-Next: trace which functions the master and slave actually execute during init
-and where the call cycle closes, rather than inferring it from end state. The
-recompiler should grow an optional trace hook for this; guessing from
-after-the-fact register values has stopped being productive.
+That is ordinary SH-2 practice and costs nothing on hardware: `bsr`/`jsr` only
+write PR, they do not push a stack frame, so abandoning the return address is
+free. The recompiler models a call as a *nested C call*, which does create a
+frame, and it never unwinds — 256 iterations deep and the bound trips.
+
+**The fix is to model calls the way the hardware does.** SH-2 has no call
+stack, only PR, so the flat trampoline should cover calls too:
+
+* `bsr`/`jsr target` -> `c->pr = ret; return target;`
+* `rts` -> `return c->pr;`
+
+Everything becomes one loop with no C recursion at all, and code that saves and
+restores PR around a call keeps working because PR is just a context field.
+This is the M3 "PR model" caveat, now confirmed as hit in practice rather than
+hypothetical, and it subsumes the depth bound entirely.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

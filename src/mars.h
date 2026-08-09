@@ -32,6 +32,7 @@ typedef struct {
     uint32_t unknown;        /* accesses outside the modelled map */
     uint32_t missing;        /* indirect transfers with no recompiled target */
     uint32_t deep;           /* dispatch recursion that hit the depth bound */
+    int      trace;          /* record every function entry */
 
     uint16_t cmds[MARS_MAX_CMDS];
     unsigned ncmd, cmd_at;
@@ -63,6 +64,8 @@ void mars_post_command(uint16_t cmd);
 int mars_reg_read_sh2(uint32_t a, uint32_t *out);
 int mars_reg_write_sh2(uint32_t a, uint32_t v, int size);
 void mars_reset_budget(void);
+void mars_trace_dump(const char *why);
+void mars_trace_reset(void);
 void mars_tick_budget(void);
 
 /* The SH-2 polls hardware in loops that only a real machine would break out of.
