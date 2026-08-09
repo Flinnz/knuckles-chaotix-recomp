@@ -20,6 +20,18 @@ docs/             architecture findings and roadmap
 
 ## Setup
 
+Third-party dependencies (not vendored):
+
+```bash
+brew install sdl2
+git clone --depth 1 https://github.com/kstenerud/Musashi.git third_party/musashi
+make run
+```
+
+Musashi (MIT, Karl Stenerud) provides the 68000 interpreter; `src/m68kconf.h`
+overrides its config down to a bare 68000 so the vendored copy stays untouched.
+
+
 `m68k-elf-binutils` comes from Homebrew; `sh-elf` is built locally because no
 bottle exists for it.
 
@@ -82,10 +94,13 @@ implemented yet.
 - 68000 front end **complete**: 368 functions, 2,957 blocks, whole-ROM round-trip
 - SH-2 **recompiler** running: all 208 functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output
-- **Runtime** boots the recompiled master SH-2 against the 32X memory map
-  (`make run`): video init completes, framebuffer line table is correct, no
-  unmapped accesses. No picture yet — the 68000 that drives all drawing is not
-  implemented
+- **Runtime** runs both CPUs: Musashi drives the 68000, the recompiled code
+  drives the master SH-2, output goes to an SDL window. The 68000 boots, clears
+  the 32X adapter checks and takes control of the 32X VDP, with 9 unmapped
+  accesses across a 600-frame run
+- **Blocked on the SH-2 ready handshake**: the 68000 spins waiting for `"M_OK"`
+  and `"S_OK"` in the comm registers, which the master and slave SH-2s post when
+  their init completes. The slave is not running yet
 - 50 indirect transfers unresolved across both CPUs, mostly runtime function
   pointers needing interprocedural dataflow
 - Next: follow the engine's data-driven tables to raise 68000 coverage, then

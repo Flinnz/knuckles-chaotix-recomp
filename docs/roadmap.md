@@ -117,8 +117,23 @@ register 0. Polling loops that a real machine would exit are handled by a
 free-running counter behind the VDP status bits, plus a watchdog that unwinds
 instead of hanging.
 
-Remaining before this closes: the 68000. Either wire in an interpreter
-(Musashi) or recompile it, then the existing SH-2 side should start drawing.
+The 68000 is now present: Musashi (MIT) interprets it, `src/m68kconf.h` trims
+it to a bare 68000, and `src/gen68k.c` supplies its address space — cartridge
+windows, work RAM, I/O, a Genesis VDP modelled far enough not to stall, and the
+32X registers, which are shared with the SH-2 view so there is one
+implementation of the 32X VDP and its status bits.
+
+The 68000 boots from the cartridge reset vector, passes the `"MARS"` signature
+and adapter-enable checks, and takes control of the 32X VDP. Routing the 32X
+VDP registers to both CPUs took unmapped accesses from ~756,000 per 60 frames
+to 9 across 600 frames.
+
+**Where it stops:** at 0x8809A6 the 68000 waits for `"M_OK"` in comm 0-1 and
+`"S_OK"` in comm 2-3 — the ready words the master and slave SH-2s post once
+their init completes. The master currently unwinds at its command wait before
+posting, and the slave SH-2 is not being run at all, so the handshake never
+finishes and the 68000 spins in the loop at 0x88099E. Running the slave and
+letting the master reach its post is the next concrete step.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

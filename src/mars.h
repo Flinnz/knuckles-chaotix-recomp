@@ -36,7 +36,31 @@ typedef struct {
     unsigned ncmd, cmd_at;
 } Mars;
 
+/* The Mega Drive side. */
+typedef struct {
+    uint8_t  ram[64 * 1024];
+    uint8_t  vram[64 * 1024];
+    uint16_t cram[64], vsram[40];
+    uint8_t  vdpreg[32];
+    uint32_t vdp_addr;
+    uint8_t  vdp_code, vdp_pending;
+    uint16_t io[16];
+    uint16_t dreq_ctl;
+    uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
+} Gen;
+
 extern Mars mars;
+extern Gen gen;
+
+/* Queue a command for the SH-2 side. The 68000 posts these through the comm
+ * registers; the SH-2 picks one up each time it acknowledges the previous. */
+void mars_post_command(uint16_t cmd);
+
+/* The 32X registers are visible from both CPUs — 0x4000/0x4100/0x4200 on the
+ * SH-2 side, 0xA15100/0xA15180/0xA15200 on the 68000 side. Both go through
+ * these so there is one implementation of the VDP and its status bits. */
+int mars_reg_read_sh2(uint32_t a, uint32_t *out);
+int mars_reg_write_sh2(uint32_t a, uint32_t v, int size);
 
 /* The SH-2 polls hardware in loops that only a real machine would break out of.
  * When nothing is left to feed it, unwind rather than spin forever. */

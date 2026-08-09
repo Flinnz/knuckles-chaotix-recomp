@@ -59,7 +59,7 @@ static void autofill(void) {
 /* ------------------------------------------------------------- dispatch ---
  * Returns 1 if the access was handled as a register, 0 if it is plain memory.
  */
-static int reg_write(uint32_t a, uint32_t v, int size) {
+int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
     if (a >= 0x4000 && a < 0x4100) {          /* system registers */
         switch (a & 0xFE) {
         case 0x00: mars.adapter = (uint16_t)v; return 1;
@@ -69,10 +69,10 @@ static int reg_write(uint32_t a, uint32_t v, int size) {
         case 0x1C: case 0x1E: return 1;       /* interrupt clears */
         case 0x20:                            /* comm 0: the 68000 rendezvous */
             mars.comm[0] = (uint16_t)v;
-            if (v == 0 && mars.ncmd > 0) {
+            if (v == 0 && mars.cmd_at < mars.ncmd) {
                 /* The handler acknowledged; hand it the next queued command. */
-                mars.comm[0] = mars.cmds[mars.cmd_at];
-                if (++mars.cmd_at >= mars.ncmd) mars.ncmd = 0;
+                mars.comm[0] = mars.cmds[mars.cmd_at++];
+                if (mars.cmd_at >= mars.ncmd) mars.cmd_at = mars.ncmd = 0;
             }
             return 1;
         default:
@@ -103,7 +103,7 @@ static int reg_write(uint32_t a, uint32_t v, int size) {
     return 0;
 }
 
-static int reg_read(uint32_t a, uint32_t *out) {
+int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
     if (a >= 0x4000 && a < 0x4100) {
         switch (a & 0xFE) {
         case 0x00: *out = mars.adapter; return 1;
@@ -168,7 +168,7 @@ static int is_overwrite(uint32_t a) {
 uint8_t sh2_r8(SH2 *c, uint32_t a) {
     (void)c; a = canon(a);
     uint32_t v;
-    if (a < 0x10000u && reg_read(a, &v)) return (uint8_t)((a & 1) ? v : v >> 8);
+    if (a < 0x10000u && mars_reg_read_sh2(a, &v)) return (uint8_t)((a & 1) ? v : v >> 8);
     uint8_t *p = resolve(a, 1);
     if (p) return *p;
     trap("r8", a);
@@ -177,7 +177,7 @@ uint8_t sh2_r8(SH2 *c, uint32_t a) {
 uint16_t sh2_r16(SH2 *c, uint32_t a) {
     (void)c; a = canon(a);
     uint32_t v;
-    if (a < 0x10000u && reg_read(a, &v)) return (uint16_t)v;
+    if (a < 0x10000u && mars_reg_read_sh2(a, &v)) return (uint16_t)v;
     uint8_t *p = resolve(a, 2);
     if (p) return (uint16_t)((p[0] << 8) | p[1]);
     trap("r16", a);
@@ -187,7 +187,7 @@ uint32_t sh2_r32(SH2 *c, uint32_t a) {
     (void)c; a = canon(a);
     if (a < 0x10000u) {
         uint32_t hi, lo;
-        if (reg_read(a, &hi) && reg_read(a + 2, &lo)) return (hi << 16) | lo;
+        if (mars_reg_read_sh2(a, &hi) && mars_reg_read_sh2(a + 2, &lo)) return (hi << 16) | lo;
     }
     uint8_t *p = resolve(a, 4);
     if (p) return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
@@ -197,7 +197,7 @@ uint32_t sh2_r32(SH2 *c, uint32_t a) {
 }
 void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
     (void)c; uint32_t ra = canon(a);
-    if (ra < 0x10000u && reg_write(ra, v, 1)) return;
+    if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 1)) return;
     if (is_overwrite(ra) && v == 0) return;
     uint8_t *p = resolve(ra, 1);
     if (p) { if (ra < 0x02000000u || ra >= 0x03000000u) *p = v; return; }
@@ -205,7 +205,7 @@ void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
 }
 void sh2_w16(SH2 *c, uint32_t a, uint16_t v) {
     (void)c; uint32_t ra = canon(a);
-    if (ra < 0x10000u && reg_write(ra, v, 2)) return;
+    if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 2)) return;
     uint8_t *p = resolve(ra, 2);
     if (p) {
         if (is_overwrite(ra)) {
@@ -237,6 +237,10 @@ void sh2_call_indirect(SH2 *c, uint32_t addr) {
 void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {
     (void)c;
     fprintf(stderr, "  [sh2] unimplemented at 0x%08X: %s\n", addr, what);
+}
+
+void mars_post_command(uint16_t cmd) {
+    if (mars.ncmd < MARS_MAX_CMDS) mars.cmds[mars.ncmd++] = cmd;
 }
 
 void mars_set_commands(const uint16_t *cmds, unsigned n) {
