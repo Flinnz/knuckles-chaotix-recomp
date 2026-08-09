@@ -48,17 +48,19 @@ void sh2_w32(SH2 *c, uint32_t a, uint32_t v) {
     }
 }
 
-typedef struct { uint32_t addr; void (*fn)(SH2 *); } SH2Entry;
+typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;
 extern const SH2Entry sh2_functions[];
 extern const unsigned sh2_function_count;
 
-void sh2_call_indirect(SH2 *c, uint32_t addr) {
-    if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
-    for (unsigned i = 0; i < sh2_function_count; i++) {
-        if (sh2_functions[i].addr == addr) { sh2_functions[i].fn(c); return; }
+void sh2_call(SH2 *c, uint32_t addr) {
+    while (addr) {
+        if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
+        uint32_t (*fn)(SH2 *) = 0;
+        for (unsigned i = 0; i < sh2_function_count; i++)
+            if (sh2_functions[i].addr == addr) { fn = sh2_functions[i].fn; break; }
+        if (!fn) { fprintf(stderr, "no recompiled function at 0x%08X\n", addr); exit(2); }
+        addr = fn(c);
     }
-    fprintf(stderr, "no recompiled function at 0x%08X\n", addr);
-    exit(2);
 }
 
 void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {
@@ -77,7 +79,7 @@ int main(int argc, char **argv) {
     SH2 c;
     memset(&c, 0, sizeof c);
     c.r[15] = 0x06040000u;          /* stack at the top of SDRAM */
-    sh2_call_indirect(&c, BASE);
+    sh2_call(&c, BASE);
 
     int n = atoi(argv[2]);
     for (int i = 0; i < n; i++)

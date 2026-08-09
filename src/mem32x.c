@@ -231,24 +231,33 @@ void sh2_w32(SH2 *c, uint32_t a, uint32_t v) {
 }
 
 /* ------------------------------------------------------------ transfers --- */
-typedef struct { uint32_t addr; void (*fn)(SH2 *); } SH2Entry;
+typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;
 extern const SH2Entry sh2_functions[];
 extern const unsigned sh2_function_count;
 
-void sh2_call_indirect(SH2 *c, uint32_t addr) {
-    /* `jmp` is translated as call-then-return, so a hardware dispatch loop -
-     * which on real silicon never returns - becomes unbounded C recursion here
-     * and overflows the native stack. Bound it until the codegen models tail
-     * transfers properly. */
-    static unsigned depth;
-    if (depth > 2000) { mars.deep++; longjmp(mars_bail, MARS_BAIL_DEPTH); }
-    addr = canon(addr);
+static uint32_t (*lookup(uint32_t addr))(SH2 *) {
     for (unsigned i = 0; i < sh2_function_count; i++)
-        if (sh2_functions[i].addr == addr) {
-            depth++; sh2_functions[i].fn(c); depth--; return;
+        if (sh2_functions[i].addr == addr) return sh2_functions[i].fn;
+    return 0;
+}
+
+void sh2_call(SH2 *c, uint32_t addr) {
+    /* Only genuine calls nest; tail transfers stay in this loop. */
+    static unsigned depth;
+    if (depth > 256) { mars.deep++; longjmp(mars_bail, MARS_BAIL_DEPTH); }
+    depth++;
+    while (addr) {
+        if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
+        uint32_t (*fn)(SH2 *) = lookup(addr);
+        if (!fn) {
+            if (mars.missing++ < 16)
+                fprintf(stderr, "  [call] no recompiled function at 0x%08X\n", addr);
+            break;
         }
-    if (mars.missing++ < 16)
-        fprintf(stderr, "  [call] no recompiled function at 0x%08X\n", addr);
+        mars_tick_budget();
+        addr = fn(c);
+    }
+    depth--;
 }
 
 void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {

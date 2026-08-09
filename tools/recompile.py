@@ -32,11 +32,11 @@ def main():
 
     body, protos = [], []
     for a in entries:
-        protos.append(f"void {fname(a)}(SH2 *c);")
+        protos.append(f"uint32_t {fname(a)}(SH2 *c);")
         body += cg.function(az.funcs[a]) + [""]
 
     # Address -> function table, so an indirect transfer can find its target.
-    table = ["typedef struct { uint32_t addr; void (*fn)(SH2 *); } SH2Entry;",
+    table = ["typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;",
              "const SH2Entry sh2_functions[] = {"]
     table += [f"    {{ 0x{a:08X}u, {fname(a)} }}," for a in entries]
     table += ["};",
@@ -51,7 +51,7 @@ def main():
         f.write("\n".join(table) + "\n")
 
     print(f"{len(entries)} functions -> {args.out}")
-    print(f"  escapes to other functions : {cg.escapes}")
+    print(f"  tail transfers out         : {cg.escapes}")
     print(f"  unhandled constructs       : {len(cg.notes)}")
     for a, why in cg.notes[:10]:
         print(f"    0x{a:08X}  {why}")

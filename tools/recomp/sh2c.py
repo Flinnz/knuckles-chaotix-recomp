@@ -10,12 +10,17 @@ as: capture inputs into temporaries, run the delay slot, then transfer. Getting
 this backwards is invisible until a delay slot happens to clobber the register
 its branch jumps through.
 
-**Calls become native calls.** `bsr`/`jsr` emit a C call and `rts` emits
-`return`, with PR still set to the real return address so that code which saves
-and restores it around a call still round-trips. Code that *computes* a new
-return address (the `sts pr,rN` / `add #k,rN` / `jmp @rN` trick for skipping
-inline data) is outside this model; such sites are counted and reported rather
-than silently mistranslated.
+**Calls nest, tail transfers do not.** `bsr`/`jsr` really do return, so they
+emit a nested call. `jmp` and a `bra` that leaves the function do *not* return —
+on hardware they are the last thing the function does — so instead of calling
+the target, the generated function **returns its address** and the runtime
+trampoline continues there. That distinction is what keeps a hardware dispatch
+loop, which never returns, from becoming unbounded C recursion.
+
+PR is still set to the true return address so that code saving and restoring it
+around a call round-trips. Code that *computes* a new return address (the
+`sts pr,rN` / `add #k,rN` / `jmp @rN` trick for skipping inline data) remains
+outside this model.
 """
 
 from sh2.decode import (BRANCH, JUMP, JUMP_IND, CALL, CALL_IND, RET, INVALID)
@@ -42,7 +47,7 @@ class Codegen:
         self.az = az
         self.img = img
         self.notes = []          # (addr, reason) for things outside the model
-        self.escapes = 0         # branches leaving the owning function
+        self.escapes = 0         # branches leaving the owning function (tail transfers)
 
     # ------------------------------------------------------------------
     def value_at(self, addr, size):
@@ -279,20 +284,19 @@ class Codegen:
 
     # ------------------------------------------------------------------
     def _goto(self, target, fn, indent):
-        """Transfer to `target`: a local label, a tail call, or a dispatch."""
+        """Transfer to `target`: a local label, or a tail transfer out."""
         pad = " " * indent
         if target in fn.blocks:
             return [f"{pad}goto {lname(target)};"]
+        # Leaving the function: hand the address back to the trampoline rather
+        # than calling, so control continues there instead of nesting.
         self.escapes += 1
-        if target in self.az.func_entries:
-            return [f"{pad}{fname(target)}(c); return;"]
-        return [f"{pad}sh2_call_indirect(c, 0x{target:08X}u); return;"]
+        return [f"{pad}return 0x{target:08X}u;"]
 
     def _call(self, target, ret, indent):
         pad = " " * indent
-        body = (f"{fname(target)}(c);" if target in self.az.func_entries
-                else f"sh2_call_indirect(c, 0x{target:08X}u);")
-        return [f"{pad}c->pr = 0x{ret:08X}u;", f"{pad}{body}"]
+        return [f"{pad}c->pr = 0x{ret:08X}u;",
+                f"{pad}sh2_call(c, 0x{target:08X}u);"]
 
     def transfer(self, ins, ds, fn):
         """Emit a control transfer plus its delay slot, in the right order."""
@@ -339,9 +343,9 @@ class Codegen:
             out += ["    " + s for s in ds_stmts]
             if ins.kind == CALL_IND:
                 out.append(f"        c->pr = 0x{ret:08X}u;")
-                out.append("        sh2_call_indirect(c, _t);")
+                out.append("        sh2_call(c, _t);")
             else:
-                out.append("        sh2_call_indirect(c, _t); return;")
+                out.append("        return _t;")      # tail transfer
             out.append("    }")
             return out
 
@@ -349,7 +353,7 @@ class Codegen:
             if ins.mnem == "rte":
                 out.append("    /* rte */")
             out += ds_stmts
-            out.append("    return;")
+            out.append("    return 0;")
             return out
 
         out.append(f"    /* UNHANDLED transfer {ins.mnem} */")
@@ -360,7 +364,7 @@ class Codegen:
     def function(self, fn):
         lines = [f"/* 0x{fn.start:08X}  {fn.size()} bytes, "
                  f"{len(fn.blocks)} block(s) */",
-                 f"void {fname(fn.start)}(SH2 *c) {{"]
+                 f"uint32_t {fname(fn.start)}(SH2 *c) {{"]
         for b in sorted(fn.blocks.values(), key=lambda b: b.start):
             lines.append(f"{lname(b.start)}: ;")
             i = 0
@@ -375,6 +379,6 @@ class Codegen:
                     lines.append("    " + s)
                 i += 1
         # A block that ends by falling off the end of the function returns.
-        lines.append("    return;")
+        lines.append("    return 0;")
         lines.append("}")
         return lines

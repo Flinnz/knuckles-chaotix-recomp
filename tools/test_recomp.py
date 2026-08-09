@@ -71,10 +71,10 @@ def main():
     cg = Codegen(az, img)
     entries = sorted(az.funcs)
     lines = ['#include "sh2.h"', ""]
-    lines += [f"void {fname(a)}(SH2 *c);" for a in entries] + [""]
+    lines += [f"uint32_t {fname(a)}(SH2 *c);" for a in entries] + [""]
     for a in entries:
         lines += cg.function(az.funcs[a]) + [""]
-    lines += ["typedef struct { uint32_t addr; void (*fn)(SH2 *); } SH2Entry;",
+    lines += ["typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;",
               "const SH2Entry sh2_functions[] = {"]
     lines += [f"    {{ 0x{a:08X}u, {fname(a)} }}," for a in entries]
     lines += ["};", f"const unsigned sh2_function_count = {len(entries)};"]

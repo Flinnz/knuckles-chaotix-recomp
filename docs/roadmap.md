@@ -138,17 +138,28 @@ not SDRAM, which fits the routine the slave copies there at boot.
 still spins at 0x88099E and comm 0-1 holds only the 0xFFFF the master's boot
 writes.
 
-**The blocker is now identified as the codegen limitation, not a missing
-piece.** `jmp` is translated as call-then-return, so a hardware dispatch loop —
-which on real silicon never returns — becomes unbounded C recursion. The slave's
-dispatch loop overflowed the native stack and segfaulted. A depth bound now
-contains it (and fires, twice per run, confirming it is real), but bounding it
-also cuts the init short, which is the likeliest reason the post functions are
-never reached.
+**Tail transfers are now modelled properly.** A generated function returns the
+address of a `jmp`, or of a branch that leaves the function, and `sh2_call`
+loops on that; only genuine `bsr`/`jsr` calls nest. A hardware dispatch loop is
+therefore an iteration rather than a recursion, and the segfault is gone. This
+also subsumes the 14 escaping branches previously noted under M3 — they are
+tail transfers, not indirect dispatches. All 8 recompiler semantics tests still
+pass under the new calling convention.
 
-Next: model tail transfers properly in the recompiler — a `jmp` to another
-function should continue in that function rather than nesting a call inside it.
-That is the same fix as the 14 escaping branches noted under M3.
+**It did not unblock the handshake.** The 68000 still spins at 0x88099E and
+neither ready word is posted. Two observations, neither yet explained:
+
+* The depth bound still trips twice per run, but it can no longer be tail-call
+  recursion — only real calls nest now. So there is a genuine `bsr`/`jsr` cycle
+  somewhere, which is a different defect than the one just fixed.
+* Comm 0-1 now reads 0000 rather than the 0xFFFF the master's boot writes,
+  so the trampoline changed which path init takes. Whether that is progress or
+  regression is not yet established.
+
+Next: trace which functions the master and slave actually execute during init
+and where the call cycle closes, rather than inferring it from end state. The
+recompiler should grow an optional trace hook for this; guessing from
+after-the-fact register values has stopped being productive.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

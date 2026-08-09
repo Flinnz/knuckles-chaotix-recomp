@@ -26,9 +26,10 @@
 #define SCALE 2
 #define CYCLES_PER_FRAME 127840      /* 7.67 MHz / 60 */
 
-void f_060001A0(SH2 *c);             /* master reset */
-void f_060008F2(SH2 *c);             /* master command dispatch loop */
-void f_060001A4(SH2 *c);             /* slave reset */
+/* Entered through sh2_call so tail transfers trampoline rather than nest. */
+#define MASTER_RESET 0x060001A0u
+#define MASTER_DISPATCH 0x060008F2u
+#define SLAVE_RESET 0x060001A4u
 
 static uint32_t be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
@@ -97,10 +98,10 @@ int main(int argc, char **argv) {
      * into an unwind rather than a hang. */
     printf("SH-2 slave init  (sp=0x%08X) ...\n", slave.r[15]);
     mars_reset_budget();
-    if (setjmp(mars_bail) == 0) f_060001A4(&slave);
+    if (setjmp(mars_bail) == 0) sh2_call(&slave, SLAVE_RESET);
     printf("SH-2 master init ...\n");
     mars_reset_budget();
-    if (setjmp(mars_bail) == 0) f_060001A0(&sh2);
+    if (setjmp(mars_bail) == 0) sh2_call(&sh2, MASTER_RESET);
     printf("  bitmap mode 0x%04X, fb control 0x%04X\n",
            mars.bitmap_mode, mars.fbctl);
     printf("  comm: %04X %04X %04X %04X  (want M_OK / S_OK)\n",
@@ -140,7 +141,7 @@ int main(int argc, char **argv) {
         while (mars.cmd_at < mars.ncmd) {
             unsigned before = mars.cmd_at;
             mars_reset_budget();
-            if (setjmp(mars_bail) == 0) f_060008F2(&sh2);
+            if (setjmp(mars_bail) == 0) sh2_call(&sh2, MASTER_DISPATCH);
             serviced++;
             if (mars.cmd_at == before) break;     /* made no progress */
         }

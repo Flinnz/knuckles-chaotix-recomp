@@ -32,8 +32,13 @@ void     sh2_w8(SH2 *c, uint32_t a, uint8_t v);
 void     sh2_w16(SH2 *c, uint32_t a, uint16_t v);
 void     sh2_w32(SH2 *c, uint32_t a, uint32_t v);
 
-/* Transfer to an address that was not statically known. */
-void     sh2_call_indirect(SH2 *c, uint32_t addr);
+/* Enter recompiled code at `addr` and run until it returns.
+ *
+ * Generated functions return the address of a tail transfer (a `jmp`, or a
+ * branch that leaves the function) or 0 for a real return, so this is a loop
+ * rather than a recursion: a hardware dispatch loop that never returns becomes
+ * an iteration here instead of overflowing the native stack. */
+void     sh2_call(SH2 *c, uint32_t addr);
 void     sh2_unimplemented(SH2 *c, uint32_t addr, const char *what);
 
 /* --- status register packing ------------------------------------------- */
