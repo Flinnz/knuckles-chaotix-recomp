@@ -128,12 +128,27 @@ and adapter-enable checks, and takes control of the 32X VDP. Routing the 32X
 VDP registers to both CPUs took unmapped accesses from ~756,000 per 60 frames
 to 9 across 600 frames.
 
+The slave SH-2 now runs too. It needs its own vector table at 0x06000080, and
+its stack pointer comes out as 0xC0000800 — inside the **cache data array**,
+not SDRAM, which fits the routine the slave copies there at boot.
+
 **Where it stops:** at 0x8809A6 the 68000 waits for `"M_OK"` in comm 0-1 and
-`"S_OK"` in comm 2-3 — the ready words the master and slave SH-2s post once
-their init completes. The master currently unwinds at its command wait before
-posting, and the slave SH-2 is not being run at all, so the handshake never
-finishes and the 68000 spins in the loop at 0x88099E. Running the slave and
-letting the master reach its post is the next concrete step.
+`"S_OK"` in comm 2-3. Neither is posted: the functions that write them
+(0x06001250 and 0x06000308) are not reached by either init path, so the 68000
+still spins at 0x88099E and comm 0-1 holds only the 0xFFFF the master's boot
+writes.
+
+**The blocker is now identified as the codegen limitation, not a missing
+piece.** `jmp` is translated as call-then-return, so a hardware dispatch loop —
+which on real silicon never returns — becomes unbounded C recursion. The slave's
+dispatch loop overflowed the native stack and segfaulted. A depth bound now
+contains it (and fires, twice per run, confirming it is real), but bounding it
+also cuts the init short, which is the likeliest reason the post functions are
+never reached.
+
+Next: model tail transfers properly in the recompiler — a `jmp` to another
+function should continue in that function rather than nesting a call inside it.
+That is the same fix as the 14 escaping branches noted under M3.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

@@ -21,9 +21,14 @@ static inline uint32_t canon(uint32_t a) {
     return a < 0x40000000u ? (a & 0x1FFFFFFFu) : a;
 }
 
+/* Every SH-2 memory access ticks this. Hooking only the VDP status register
+ * was not enough: the slave's dispatch loop polls a comm byte and never touches
+ * the VDP, so it spun forever in native code with nothing to unwind it. */
 void mars_tick_budget(void) {
-    if (++budget > 400000000u) longjmp(mars_bail, MARS_BAIL_BUDGET);
+    if (++budget > 20000000u) longjmp(mars_bail, MARS_BAIL_BUDGET);
 }
+
+void mars_reset_budget(void) { budget = 0; idle_reads = 0; }
 
 static void trap(const char *what, uint32_t a) {
     if (mars.unknown++ < 16)
@@ -34,7 +39,6 @@ static void trap(const char *what, uint32_t a) {
  * its own, so a free-running counter stands in for the passage of time and
  * lets those loops terminate. */
 static uint16_t vdp_status(void) {
-    mars_tick_budget();
     uint32_t t = mars.ticks++;
     uint16_t s = 0;
     if ((t & 0x3F) < 0x08) s |= 0x8000;      /* VBLK */
@@ -166,6 +170,7 @@ static int is_overwrite(uint32_t a) {
 }
 
 uint8_t sh2_r8(SH2 *c, uint32_t a) {
+    mars_tick_budget();
     (void)c; a = canon(a);
     uint32_t v;
     if (a < 0x10000u && mars_reg_read_sh2(a, &v)) return (uint8_t)((a & 1) ? v : v >> 8);
@@ -175,6 +180,7 @@ uint8_t sh2_r8(SH2 *c, uint32_t a) {
     return 0;
 }
 uint16_t sh2_r16(SH2 *c, uint32_t a) {
+    mars_tick_budget();
     (void)c; a = canon(a);
     uint32_t v;
     if (a < 0x10000u && mars_reg_read_sh2(a, &v)) return (uint16_t)v;
@@ -184,6 +190,7 @@ uint16_t sh2_r16(SH2 *c, uint32_t a) {
     return 0;
 }
 uint32_t sh2_r32(SH2 *c, uint32_t a) {
+    mars_tick_budget();
     (void)c; a = canon(a);
     if (a < 0x10000u) {
         uint32_t hi, lo;
@@ -196,6 +203,7 @@ uint32_t sh2_r32(SH2 *c, uint32_t a) {
     return 0;
 }
 void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
+    mars_tick_budget();
     (void)c; uint32_t ra = canon(a);
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 1)) return;
     if (is_overwrite(ra) && v == 0) return;
@@ -204,6 +212,7 @@ void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
     trap("w8", ra);
 }
 void sh2_w16(SH2 *c, uint32_t a, uint16_t v) {
+    mars_tick_budget();
     (void)c; uint32_t ra = canon(a);
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 2)) return;
     uint8_t *p = resolve(ra, 2);
@@ -227,9 +236,17 @@ extern const SH2Entry sh2_functions[];
 extern const unsigned sh2_function_count;
 
 void sh2_call_indirect(SH2 *c, uint32_t addr) {
+    /* `jmp` is translated as call-then-return, so a hardware dispatch loop -
+     * which on real silicon never returns - becomes unbounded C recursion here
+     * and overflows the native stack. Bound it until the codegen models tail
+     * transfers properly. */
+    static unsigned depth;
+    if (depth > 2000) { mars.deep++; longjmp(mars_bail, MARS_BAIL_DEPTH); }
     addr = canon(addr);
     for (unsigned i = 0; i < sh2_function_count; i++)
-        if (sh2_functions[i].addr == addr) { sh2_functions[i].fn(c); return; }
+        if (sh2_functions[i].addr == addr) {
+            depth++; sh2_functions[i].fn(c); depth--; return;
+        }
     if (mars.missing++ < 16)
         fprintf(stderr, "  [call] no recompiled function at 0x%08X\n", addr);
 }

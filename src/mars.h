@@ -31,6 +31,7 @@ typedef struct {
     uint32_t ticks;          /* stands in for elapsed time when polling */
     uint32_t unknown;        /* accesses outside the modelled map */
     uint32_t missing;        /* indirect transfers with no recompiled target */
+    uint32_t deep;           /* dispatch recursion that hit the depth bound */
 
     uint16_t cmds[MARS_MAX_CMDS];
     unsigned ncmd, cmd_at;
@@ -61,12 +62,15 @@ void mars_post_command(uint16_t cmd);
  * these so there is one implementation of the VDP and its status bits. */
 int mars_reg_read_sh2(uint32_t a, uint32_t *out);
 int mars_reg_write_sh2(uint32_t a, uint32_t v, int size);
+void mars_reset_budget(void);
+void mars_tick_budget(void);
 
 /* The SH-2 polls hardware in loops that only a real machine would break out of.
  * When nothing is left to feed it, unwind rather than spin forever. */
 extern jmp_buf mars_bail;
 #define MARS_BAIL_IDLE  1
 #define MARS_BAIL_BUDGET 2
+#define MARS_BAIL_DEPTH  3
 
 void mars_set_commands(const uint16_t *cmds, unsigned n);
 

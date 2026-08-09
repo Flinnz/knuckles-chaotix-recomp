@@ -28,6 +28,7 @@
 
 void f_060001A0(SH2 *c);             /* master reset */
 void f_060008F2(SH2 *c);             /* master command dispatch loop */
+void f_060001A4(SH2 *c);             /* slave reset */
 
 static uint32_t be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
@@ -79,18 +80,31 @@ int main(int argc, char **argv) {
     printf("rom %u bytes; sdram image 0x%06X -> 0x%08X (%u)\n",
            mars.rom_size, src, 0x06000000u + dst, size);
 
-    SH2 sh2;
+    SH2 sh2, slave;
     memset(&sh2, 0, sizeof sh2);
     sh2.r[15] = 0x06040000u;
     sh2.vbr = 0x06000000u;
     sh2.pc = start;
 
+    /* The slave has its own vector table at 0x06000080; entry 1 is its stack
+     * pointer, exactly as entry 1 of the master's table is the master's. */
+    memset(&slave, 0, sizeof slave);
+    slave.slave = 1;
+    slave.vbr = 0x06000080u;
+    slave.r[15] = sh2_r32(&slave, 0x06000084u);
+
     /* Master init. It ends by waiting for a command, which the watchdog turns
      * into an unwind rather than a hang. */
+    printf("SH-2 slave init  (sp=0x%08X) ...\n", slave.r[15]);
+    mars_reset_budget();
+    if (setjmp(mars_bail) == 0) f_060001A4(&slave);
     printf("SH-2 master init ...\n");
+    mars_reset_budget();
     if (setjmp(mars_bail) == 0) f_060001A0(&sh2);
     printf("  bitmap mode 0x%04X, fb control 0x%04X\n",
            mars.bitmap_mode, mars.fbctl);
+    printf("  comm: %04X %04X %04X %04X  (want M_OK / S_OK)\n",
+           mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3]);
 
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
@@ -125,6 +139,7 @@ int main(int argc, char **argv) {
 
         while (mars.cmd_at < mars.ncmd) {
             unsigned before = mars.cmd_at;
+            mars_reset_budget();
             if (setjmp(mars_bail) == 0) f_060008F2(&sh2);
             serviced++;
             if (mars.cmd_at == before) break;     /* made no progress */
@@ -156,8 +171,8 @@ int main(int argc, char **argv) {
     unsigned nz = 0;
     for (unsigned i = 0; i < MARS_FB; i++) if (mars.fb[i]) nz++;
     printf("  framebuffer: %u/%u bytes non-zero\n", nz, MARS_FB);
-    printf("  unmapped: 68k r=%u w=%u, sh2=%u\n",
-           gen.unknown_r, gen.unknown_w, mars.unknown);
+    printf("  unmapped: 68k r=%u w=%u, sh2=%u; dispatch depth bails %u\n",
+           gen.unknown_r, gen.unknown_w, mars.unknown, mars.deep);
 
     if (headless_frames) {
         render(px);
