@@ -6,20 +6,24 @@ reach them via `mov.l @(disp,pc),Rn`. Two consequences drive this module:
 
   1. Those pool words sit *inside* functions and must not be disassembled as
      code, so a plain linear sweep produces garbage.
-  2. Almost every indirect call is `mov.l @(disp,pc),Rn` followed by `jsr @Rn`,
-     so tracking literal loads is what recovers the call graph.
+  2. Almost every non-local call is `mov.l @(disp,pc),Rn` + `jsr @Rn`, or the
+     PC-relative `bsrf`, so tracking literal loads recovers the call graph.
 
-We therefore walk the code recursively from known entry points, propagate
-constants within each basic block, and record pool words as data.
+Discovery runs in two phases. Phase one traces reachable instructions and
+records basic-block leaders; phase two cuts the instruction stream at those
+leaders to build blocks and group them into functions. Doing it in that order
+matters: a backward branch into the middle of an already-traced run has to
+*split* that run, and a single-pass walk would instead emit two overlapping
+copies of the same code.
 """
 
-import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
 
-from .decode import (decode, Insn, NORMAL, BRANCH, JUMP, JUMP_IND, CALL,
-                     CALL_IND, RET, INVALID)
+from .decode import (decode, BRANCH, JUMP, JUMP_IND, CALL, CALL_IND, RET,
+                     INVALID)
+
+MASK32 = 0xFFFFFFFF
 
 
 @dataclass
@@ -34,9 +38,8 @@ class Block:
 class Function:
     start: int
     blocks: dict = field(default_factory=dict)
-    callers: set = field(default_factory=set)
     callees: set = field(default_factory=set)
-    unresolved: list = field(default_factory=list)  # indirect jumps we could not follow
+    unresolved: list = field(default_factory=list)
 
     @property
     def end(self):
@@ -46,11 +49,19 @@ class Function:
         return sum(b.end - b.start for b in self.blocks.values())
 
 
+@dataclass
+class Table:
+    """A recovered dispatch table."""
+    dispatch: int
+    base: int
+    kind: str          # 'long' absolute | 'word'/'byte' offset from dispatch+4
+    entries: list      # (address_of_entry, target)
+
+
 class Image:
     """Flat view over the address ranges that hold SH-2 code.
 
-    `norm` collapses the SH-2 cache-region mirrors (the same memory is visible
-    at several addresses depending on the top three bits) onto one canonical
+    `norm` collapses the SH-2 cached/cache-through mirrors onto one canonical
     address, so a pointer fetched as 0x22000000-based resolves like 0x02000000.
     """
 
@@ -72,15 +83,19 @@ class Image:
         s = self._find(addr)
         return s is not None and self.norm(addr) + n <= s[0] + len(s[1])
 
-    def u16(self, addr):
+    def _slice(self, addr, n):
         base, data = self._find(addr)
         o = self.norm(addr) - base
-        return int.from_bytes(data[o:o + 2], "big")
+        return data[o:o + n]
+
+    def u8(self, addr):
+        return self._slice(addr, 1)[0]
+
+    def u16(self, addr):
+        return int.from_bytes(self._slice(addr, 2), "big")
 
     def u32(self, addr):
-        base, data = self._find(addr)
-        o = self.norm(addr) - base
-        return int.from_bytes(data[o:o + 4], "big")
+        return int.from_bytes(self._slice(addr, 4), "big")
 
     def s16(self, addr):
         v = self.u16(addr)
@@ -90,246 +105,418 @@ class Image:
 class Analyzer:
     def __init__(self, image: Image, is_code_addr=None):
         self.img = image
-        self.funcs = {}
-        self.code = set()        # every address that is the first byte of an insn
-        self.data = set()        # literal-pool words
-        self.pool_refs = defaultdict(set)
+        self.insns = {}                  # addr -> Insn, the authoritative decode
+        self.code = set()                # instruction start addresses
+        self.leaders = set()             # basic-block leaders
+        self.func_entries = set()
+        self.block_ends = {}             # end address -> (kind, target) of its branch
+        self.data = {}                   # addr -> ('long'|'short'|'byte')
+        self.data_firm = set()           # data proven by an instruction reference
+        self.tables = {}                 # dispatch addr -> Table
         self.xrefs = defaultdict(set)
-        self.tables = {}      # dispatch address -> recovered target list
-        # Which addresses are plausible code targets — lets us reject junk.
+        self.entry_reasons = {}
+        self.indirect = []               # (addr, mnem) we could not resolve
         self.is_code_addr = is_code_addr or (lambda a: image.readable(a, 2))
-        self._pending = []
+        self._blocks_todo = []
+        self._traced = set()
 
-    # ------------------------------------------------------------------
-    def add_entry(self, addr, why=""):
-        if addr & 1:
+    # -- seeding -------------------------------------------------------
+    def add_function(self, addr, why=""):
+        addr &= MASK32
+        if addr & 1 or not self.is_code_addr(addr):
+            return False
+        self.func_entries.add(addr)
+        self.entry_reasons.setdefault(addr, why)
+        self._add_block(addr)
+        return True
+
+    def _add_block(self, addr):
+        addr &= MASK32
+        if addr & 1 or not self.is_code_addr(addr):
             return
-        if self.is_code_addr(addr):
-            self._pending.append((addr, why))
+        self.leaders.add(addr)
+        if addr not in self._traced:
+            self._blocks_todo.append(addr)
 
-    def run(self, max_funcs=100000):
-        seen = set()
-        while self._pending:
-            addr, why = self._pending.pop()
-            if addr in seen or len(self.funcs) >= max_funcs:
-                continue
-            seen.add(addr)
-            try:
-                self._walk_function(addr)
-            except (TypeError, IndexError, KeyError):
-                # Ran off the end of a mapped span — the target was not code.
-                self.funcs.pop(addr, None)
+    # -- phase 1: trace ------------------------------------------------
+    def run(self):
+        while True:
+            while self._blocks_todo:
+                self._trace(self._blocks_todo.pop())
+            if not self._retry_indirect():
+                break
+        self._build_functions()
         return self.funcs
 
-    # ------------------------------------------------------------------
-    def _indirect_target(self, ins, regs):
-        """Resolve a register-indirect transfer, if the register is known.
+    def _retry_indirect(self):
+        """Re-attempt unresolved dispatches now that more code is decoded."""
+        added = 0
+        still = []
+        for addr, mnem in self.indirect:
+            ins = self.insns.get(addr)
+            tbl = self._recover_table(ins, []) if ins else None
+            if tbl:
+                self.tables[addr] = tbl
+                for _, tgt in tbl.entries:
+                    self.xrefs[tgt].add(addr)
+                    if self.add_function(tgt, "table"):
+                        added += 1
+            else:
+                still.append((addr, mnem))
+        self.indirect = still
+        return added
 
-        `jmp`/`jsr` take an absolute address, but `braf`/`bsrf` add the register
-        to PC+4 — that is how SH-2 code reaches anything outside a 12-bit
-        displacement, so it is the dominant far-call form.
-        """
-        if ins.rn is None:
-            return None
-        v = regs.get(ins.rn)
-        if v is None:
-            return None
-        if ins.mnem in ("braf", "bsrf"):
-            return (ins.addr + 4 + v) & 0xFFFFFFFF
-        return v & 0xFFFFFFFF
+    def mark_data(self, addr, kind, size, firm=True):
+        """Record a span as data, so the emitter never disassembles it."""
+        self._mark_data(addr, kind, size, firm)
 
-    # ------------------------------------------------------------------
-    def _recover_jump_table(self, ins, blk):
-        """Recover the targets of a table-driven jump.
+    def _mark_data(self, addr, kind, size, firm=True):
+        for k in range(size):
+            self.data[addr + k] = kind if k == 0 else None
+            if firm:
+                self.data_firm.add(addr + k)
 
-        Both dispatch idioms this game uses start by materialising the table
-        base with `mova` and then indexing it:
+    def _trace(self, start):
+        if start in self._traced:
+            return
+        self._traced.add(start)
+        addr = start
+        regs = {}          # register -> known constant, within this straight run
+        recent = []        # sliding window, for recognising dispatch idioms
 
-            mova  @(d,pc),r0        ! table base
-            mov.l @(r0,rM),rN       ! absolute entry   -> jmp @rN
-            mova  @(d,pc),r0
-            mov.w @(r0,rM),r0       ! 16-bit offset    -> bsrf/braf r0
+        while True:
+            if not self.img.readable(addr, 2):
+                return
+            # Reaching another leader ends this run; it continues as its own block.
+            if addr != start and addr in self.leaders:
+                self._add_block(addr)
+                return
 
-        So we scan back through the block for the `mova` and the indexed load
-        that feeds the transfer register, then read entries until one stops
-        looking like code.
-        """
-        base = None
-        entry_size = None
-        want = ins.rn
-        for prev in reversed(blk.insns[:-1]):
-            if entry_size is None:
-                # mov.l @(r0,rM),rN = 0x0nmE ; mov.w @(r0,rM),rN = 0x0nmD
-                hi = prev.word & 0xF00F
-                if hi in (0x000E, 0x000D) and prev.rn == want:
-                    entry_size = 4 if hi == 0x000E else 2
-                    continue
-                if prev.writes and want in [w for w in prev.writes if isinstance(w, int)]:
-                    return []          # register redefined some other way
+            ins = self.insns.get(addr) or decode(self.img.u16(addr), addr)
+            self.insns[addr] = ins
+            self.code.add(addr)
+            recent.append(ins)
+            del recent[:-16]
+
+            self._track_const(ins, regs)
+
+            if ins.kind == INVALID:
+                self.block_ends[addr + 2] = (INVALID, None)
+                return
+
+            end = addr + 2
+            if ins.delay and self.img.readable(addr + 2, 2):
+                ds = self.insns.get(addr + 2) or decode(self.img.u16(addr + 2), addr + 2)
+                self.insns[addr + 2] = ds
+                self.code.add(addr + 2)
+                if ds.pool:
+                    self._note_pool(ds)
+                end = addr + 4
+
+            if ins.kind == BRANCH:
+                self.block_ends[end] = (BRANCH, ins.target)
+                self.xrefs[ins.target].add(addr)
+                self._add_block(ins.target)
+                self._add_block(end)
+                return
+            if ins.kind == JUMP:
+                self.block_ends[end] = (JUMP, ins.target)
+                self.xrefs[ins.target].add(addr)
+                self._add_block(ins.target)
+                return
+            if ins.kind == CALL:
+                self.xrefs[ins.target].add(addr)
+                self.add_function(ins.target, "bsr")
+                addr = end
                 continue
+            if ins.kind == CALL_IND:
+                self._resolve_indirect(ins, regs, recent, is_call=True)
+                addr = end
+                continue
+            if ins.kind == JUMP_IND:
+                self.block_ends[end] = (JUMP_IND, None)
+                self._resolve_indirect(ins, regs, recent, is_call=False)
+                return
+            if ins.kind == RET:
+                self.block_ends[end] = (RET, None)
+                return
+            addr = end
+
+    def _note_pool(self, ins):
+        paddr, psz = ins.pool
+        if self.img.readable(paddr, psz):
+            self._mark_data(paddr, "long" if psz == 4 else "short", psz)
+            self.xrefs[paddr].add(ins.addr)
+
+    def _track_const(self, ins, regs):
+        if ins.pool:
+            paddr, psz = ins.pool
+            if self.img.readable(paddr, psz):
+                self._note_pool(ins)
+                regs[ins.rn] = self.img.u32(paddr) if psz == 4 else self.img.s16(paddr)
+                return
+        if ins.mnem == "mov" and ins.imm is not None and ins.rn is not None:
+            regs[ins.rn] = ins.imm
+        elif ins.mnem == "mova":
+            regs[0] = ins.imm
+        else:
+            for w in ins.writes:
+                if isinstance(w, int):
+                    regs.pop(w, None)
+
+    # -- indirect transfers --------------------------------------------
+    def _resolve_indirect(self, ins, regs, recent, is_call):
+        v = regs.get(ins.rn) if ins.rn is not None else None
+        if v is not None:
+            # jmp/jsr take an absolute address; braf/bsrf add the register to PC+4.
+            tgt = (ins.addr + 4 + v) & MASK32 if ins.mnem in ("braf", "bsrf") else v & MASK32
+            if self.is_code_addr(tgt):
+                self.xrefs[tgt].add(ins.addr)
+                self.add_function(tgt, ins.mnem)
+                return
+        tbl = self._recover_table(ins, recent)
+        if tbl:
+            self.tables[ins.addr] = tbl
+            for entry_addr, tgt in tbl.entries:
+                self.xrefs[tgt].add(ins.addr)
+                self.add_function(tgt, "table")
+            return
+        self.indirect.append((ins.addr, ins.mnem))
+
+    def _backward_window(self, addr, n=16):
+        """The instructions immediately preceding `addr` in memory.
+
+        The dispatch idioms are a fixed *layout* — `mova` then an indexed load
+        then the branch — so the window must come from the instruction stream,
+        not from the trace path. Otherwise a table is recoverable or not
+        depending on which edge discovery happened to arrive on.
+        """
+        out = []
+        a = addr - 2
+        while len(out) < n and a >= 0 and a in self.code:
+            out.append(self.insns[a])
+            a -= 2
+        out.reverse()
+        return out
+
+    def _recover_table(self, ins, recent):
+        """Recognise the three dispatch idioms this game uses.
+
+        A  mova Lbase,r0 ; mov.l @(r0,rM),rN ; jmp/jsr @rN     32-bit absolute
+        B  mova Lbase,r0 ; mov.w @(r0,rM),rN ; braf/bsrf rN    16-bit offsets
+        C  mov.l Lp,rB   ; mov.b @(r0,rB),rT ; braf/bsrf rT     8-bit offsets
+
+        In A and B `mova` gives the table address exactly. In C the literal is
+        an indexing origin that sits before the real entries, so instead we use
+        the fact that the entries are laid out immediately after the dispatch's
+        delay slot.
+        """
+        want = ins.rn
+        if want is None:
+            return None
+        window = self._backward_window(ins.addr)
+        if len(window) < len(recent) - 1:
+            window = recent[:-1]
+        load = None
+        for prev in reversed(window):
+            hi = prev.word & 0xF00F
+            if hi in (0x000E, 0x000D, 0x000C) and prev.rn == want:
+                load = {0x000E: "long", 0x000D: "word", 0x000C: "byte"}[hi]
+                break
+            if want in [w for w in prev.writes if isinstance(w, int)]:
+                return None          # register redefined some other way
+        if load is None:
+            return None
+
+        base = None
+        for prev in reversed(window):
             if prev.mnem == "mova":
                 base = prev.imm
                 break
-        if base is None or entry_size is None:
-            return []
+        if load == "byte" or base is None:
+            # Offset tables are emitted straight after the branch's delay slot.
+            base = ins.addr + 4
+        if not self.is_code_addr(base) and not self.img.readable(base, 1):
+            return None
 
-        targets = []
-        for i in range(512):
-            a = base + i * entry_size
-            if not self.img.readable(a, entry_size):
+        size = {"long": 4, "word": 2, "byte": 1}[load]
+        entries = []
+        limit = None
+        a = base
+        for _ in range(1024):
+            if not self.img.readable(a, size) or a in self.code:
                 break
-            if entry_size == 4:
+            if limit is not None and a >= limit:
+                break
+            if load == "long":
                 tgt = self.img.u32(a)
+            elif load == "word":
+                tgt = (ins.addr + 4 + self.img.s16(a)) & MASK32
             else:
-                tgt = (ins.addr + 4 + self.img.s16(a)) & 0xFFFFFFFF
+                tgt = (ins.addr + 4 + self.img.u8(a)) & MASK32
             if not self.is_code_addr(tgt) or not self.img.readable(tgt, 2):
                 break
             if decode(self.img.u16(tgt), tgt).kind == INVALID:
                 break
-            # The table cannot extend into code we already decoded.
-            if a in self.code:
-                break
-            targets.append(tgt)
-            for k in range(entry_size):
-                self.data.add(a + k)
-        return targets
+            entries.append((a, tgt))
+            # An offset table cannot run past the first thing it points at.
+            if load != "long" and base > ins.addr:
+                limit = tgt if limit is None else min(limit, tgt)
+            a += size
+        if not entries:
+            return None
+        for entry_addr, _ in entries:
+            self._mark_data(entry_addr, {"long": "long", "word": "short",
+                                         "byte": "byte"}[load], size)
+        return Table(dispatch=ins.addr, base=base, kind=load, entries=entries)
 
-    # ------------------------------------------------------------------
-    def _walk_function(self, entry):
-        if entry in self.funcs:
-            return self.funcs[entry]
-        fn = Function(start=entry)
-        self.funcs[entry] = fn
+    # -- pointer tables in data ----------------------------------------
+    def looks_like_code(self, addr, max_insns=64, min_insns=4):
+        """Conservative test that `addr` starts a real instruction sequence.
 
-        worklist = [entry]
-        visited = set()
-        while worklist:
-            baddr = worklist.pop()
-            if baddr in visited or not self.img.readable(baddr, 2):
+        Decoding must reach a terminator without hitting an invalid encoding or
+        a branch that leaves mapped memory. Both guards matter: constant fill
+        such as 0xAAAA decodes as a lone `bra` to nowhere, which would otherwise
+        pass instantly on the very first instruction.
+        """
+        if addr & 1 or not self.is_code_addr(addr):
+            return False
+        a = addr
+        for i in range(max_insns):
+            if not self.img.readable(a, 2):
+                return False
+            ins = decode(self.img.u16(a), a)
+            if ins.kind == INVALID:
+                return False
+            if ins.target is not None and not self.is_code_addr(ins.target):
+                return False
+            if ins.kind in (RET, JUMP, JUMP_IND):
+                return i + 1 >= min_insns
+            a += 2
+        return False
+
+    def scan_pointer_tables(self, lo, hi, min_run=2, min_insns=1):
+        """Seed functions from arrays of code pointers sitting in data.
+
+        Handler tables reached as `mov.l @(r0,rX),rY` where rX came from memory
+        are invisible to the mova-based idioms, but they are still recognisable
+        by shape: a run of aligned words that each point at plausible code.
+        Requiring a run of at least `min_run` keeps stray constants out.
+        """
+        added = 0
+        run = []
+
+        def flush():
+            nonlocal added
+            if len(run) >= min_run:
+                for a, v in run:
+                    self._mark_data(a, "long", 4, firm=False)
+                    if v not in self.func_entries and self.add_function(v, "ptr table"):
+                        added += 1
+            run.clear()
+
+        a = lo + (-lo % 4)
+        while a + 4 <= hi:
+            if a in self.code or a in self.data:
+                flush()
+                a += 4
                 continue
-            visited.add(baddr)
-            blk = Block(start=baddr)
-            regs = {}          # register -> known constant, within this block
-            addr = baddr
-            guard = 0
+            v = self.img.u32(a)
+            # A run of consecutive valid pointers is itself strong evidence, so
+            # short handlers (a bare `rts` stub) are acceptable candidates here.
+            if self.looks_like_code(v, min_insns=min_insns):
+                run.append((a, v))
+            else:
+                flush()
+            a += 4
+        flush()
+        return added
 
-            while True:
-                guard += 1
-                if guard > 20000 or not self.img.readable(addr, 2):
-                    break
-                ins = decode(self.img.u16(addr), addr)
-                self.code.add(addr)
-                blk.insns.append(ins)
+    def scan_after_returns(self):
+        """Seed functions that begin immediately after another one ends.
 
-                # Resolve a literal-pool load and remember the value.
-                if ins.pool:
-                    paddr, psz = ins.pool
-                    if self.img.readable(paddr, psz):
-                        val = self.img.u32(paddr) if psz == 4 else self.img.s16(paddr)
-                        regs[ins.rn] = val
-                        for k in range(psz):
-                            self.data.add(paddr + k)
-                        self.pool_refs[paddr].add(addr)
-                elif ins.mnem == "mov" and ins.imm is not None and ins.rn is not None:
-                    regs[ins.rn] = ins.imm
-                elif ins.mnem == "mova":
-                    regs[0] = ins.imm
-                elif ins.writes:
-                    for w in ins.writes:
-                        if isinstance(w, int):
-                            regs.pop(w, None)
+        Handlers only ever reached through a register callback have no visible
+        xref, but the compiler still lays them out end to end, so the address
+        after an `rts` is a strong candidate.
+        """
+        added = 0
+        for end, (kind, _) in list(self.block_ends.items()):
+            if kind != RET or end in self.code or end in self.data:
+                continue
+            if self.looks_like_code(end) and self.add_function(end, "after rts"):
+                added += 1
+        return added
 
-                if ins.kind == INVALID:
-                    blk.end = addr + 2
-                    break
+    # -- phase 2: blocks and functions ---------------------------------
+    def _build_functions(self):
+        """Cut the traced instruction stream into blocks at the recorded leaders."""
+        self.blocks = {}
+        ordered = sorted(self.code)
+        cur = None
+        for addr in ordered:
+            contiguous = cur is not None and addr == cur.end
+            if cur is not None and (not contiguous or addr in self.leaders):
+                if contiguous:
+                    cur.succs.add(addr)      # ran straight into a branch target
+                cur = None
+            if cur is None:
+                cur = Block(start=addr)
+                self.blocks[addr] = cur
+            ins = self.insns[addr]
+            cur.insns.append(ins)
+            cur.end = addr + 2
+            # `block_ends` is keyed by end address, so a delayed branch closes
+            # its block only after the delay slot has been added, while the
+            # successor edges still come from the branch itself.
+            if cur.end in self.block_ends:
+                kind, target = self.block_ends[cur.end]
+                if kind == BRANCH:
+                    cur.succs |= {target, cur.end}
+                elif kind == JUMP:
+                    cur.succs.add(target)
+                cur = None
 
-                # A delayed branch executes the following instruction first.
-                if ins.delay and self.img.readable(addr + 2, 2):
-                    ds = decode(self.img.u16(addr + 2), addr + 2)
-                    self.code.add(addr + 2)
-                    blk.insns.append(ds)
-                    if ds.pool:
-                        paddr, psz = ds.pool
-                        if self.img.readable(paddr, psz):
-                            for k in range(psz):
-                                self.data.add(paddr + k)
-                            self.pool_refs[paddr].add(addr + 2)
-                    end = addr + 4
-                else:
-                    end = addr + 2
-
-                if ins.kind in (BRANCH,):
-                    blk.end = end
-                    self.xrefs[ins.target].add(addr)
-                    blk.succs |= {ins.target, end}
-                    worklist += [ins.target, end]
-                    break
-                if ins.kind == JUMP:
-                    blk.end = end
-                    self.xrefs[ins.target].add(addr)
-                    blk.succs.add(ins.target)
-                    worklist.append(ins.target)
-                    break
-                if ins.kind == CALL:
-                    self.xrefs[ins.target].add(addr)
-                    fn.callees.add(ins.target)
-                    self.add_entry(ins.target, "bsr")
-                    addr = end
+        self.funcs = {}
+        for entry in sorted(self.func_entries):
+            if entry not in self.blocks:
+                continue
+            fn = Function(start=entry)
+            seen = set()
+            stack = [entry]
+            while stack:
+                b = stack.pop()
+                if b in seen or b not in self.blocks:
                     continue
-                if ins.kind == CALL_IND:
-                    tgt = self._indirect_target(ins, regs)
-                    if tgt is not None and self.is_code_addr(tgt):
-                        fn.callees.add(tgt)
-                        self.xrefs[tgt].add(addr)
-                        self.add_entry(tgt, ins.mnem)
-                    else:
-                        tbl = self._recover_jump_table(ins, blk)
-                        if tbl:
-                            self.tables[addr] = tbl
-                            for t in tbl:
-                                fn.callees.add(t)
-                                self.xrefs[t].add(addr)
-                                self.add_entry(t, "table")
-                        else:
-                            fn.unresolved.append((addr, ins.mnem))
-                    addr = end
+                # Do not absorb another function's body.
+                if b != entry and b in self.func_entries:
                     continue
-                if ins.kind == JUMP_IND:
-                    blk.end = end
-                    tgt = self._indirect_target(ins, regs)
-                    if tgt is not None and self.is_code_addr(tgt):
-                        # A tail call through a register: treat as its own function.
-                        fn.callees.add(tgt)
-                        self.xrefs[tgt].add(addr)
-                        self.add_entry(tgt, "jmp")
-                    else:
-                        tbl = self._recover_jump_table(ins, blk)
-                        if tbl:
-                            self.tables[addr] = tbl
-                            for t in tbl:
-                                fn.callees.add(t)
-                                self.xrefs[t].add(addr)
-                                self.add_entry(t, "table")
-                        else:
-                            fn.unresolved.append((addr, ins.mnem))
-                    break
-                if ins.kind == RET:
-                    blk.end = end
-                    break
-                addr = end
+                seen.add(b)
+                blk = self.blocks[b]
+                fn.blocks[b] = blk
+                stack.extend(blk.succs)
+            self.funcs[entry] = fn
+        for addr, kind in self.indirect:
+            owner = self._owner(addr)
+            if owner:
+                self.funcs[owner].unresolved.append((addr, kind))
+        return self.funcs
 
-            if blk.end == 0:
-                blk.end = addr + 2
-            fn.blocks[baddr] = blk
-        return fn
+    def _owner(self, addr):
+        best = None
+        for e, fn in self.funcs.items():
+            for b in fn.blocks.values():
+                if b.start <= addr < b.end:
+                    return e
+        return best
 
     # ------------------------------------------------------------------
     def stats(self):
-        code_bytes = len(self.code) * 2
         return {
-            "functions": len(self.funcs),
+            "functions": len(getattr(self, "funcs", {})),
+            "blocks": len(getattr(self, "blocks", {})),
             "code_insns": len(self.code),
-            "code_bytes": code_bytes,
-            "pool_bytes": len(self.data),
-            "unresolved": sum(len(f.unresolved) for f in self.funcs.values()),
+            "code_bytes": len(self.code) * 2,
+            "data_bytes": len(self.data),
+            "tables": len(self.tables),
+            "unresolved": len(self.indirect),
         }

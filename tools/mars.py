@@ -49,11 +49,20 @@ M68K_VDP     = (0xC00000, 0xC00020)   # Genesis VDP
 M68K_RAM     = (0xFF0000, 0x1000000)  # 64 KB work RAM
 
 
+# The SH-2 splits its address space into areas by the top bits: 0x00000000 is
+# cached and 0x20000000 is cache-through, and those two are mirrors of the same
+# memory. The higher areas are *not* mirrors — 0x60000000 is the cache address
+# array and 0xC0000000 the cache data array, both real distinct storage. This
+# game copies a routine into the cache data array and executes it there, so
+# collapsing those would alias real code onto the boot ROM.
+SH2_CACHE_ARRAY = (0xC0000000, 0xC0001000)   # cache data array, 4 KB
+
+
 def sh2_phys(addr: int) -> int:
-    """Collapse SH-2 cache-region mirrors to a canonical address."""
-    if addr >= SH2_ONCHIP[0]:
-        return addr
-    return addr & SH2_CACHE_MASK
+    """Collapse the cached/cache-through mirrors to a canonical address."""
+    if addr < 0x40000000:
+        return addr & SH2_CACHE_MASK
+    return addr
 
 
 def sh2_region(addr: int) -> str:

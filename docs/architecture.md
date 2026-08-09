@@ -27,10 +27,10 @@ The 32X is a Mega Drive with an add-on board, and a game runs on all of it:
 | Z80 | 3.58 MHz | Sound sub-CPU |
 
 **The single most important structural finding:** the SH-2 program is only
-36,864 bytes total. Knuckles' Chaotix is a 68000 Sonic-engine game that uses the
-32X as a video co-processor, not an SH-2 game. The 68000 is therefore the
-primary decompilation target; the SH-2 side is a comparatively small, tractable
-appendix.
+37,888 bytes total (a 36 KB SDRAM image plus a 1 KB overlay). Knuckles' Chaotix
+is a 68000 Sonic-engine game that uses the 32X as a video co-processor, not an
+SH-2 game. The 68000 is therefore the primary decompilation target; the SH-2
+side is a comparatively small, tractable appendix.
 
 ## MARS header (cartridge offset 0x3C0)
 
@@ -99,23 +99,87 @@ poll comm register `0x20004020`, look the command up in a table, and dispatch.
 
 So the control relationship is: **the 68000 drives; the SH-2s serve commands.**
 
+## The cache-array overlay
+
+The SH-2 program is not only the SDRAM image. The slave's init routine at
+`0x06000284` copies 0x100 longs from cartridge offset `0x07FC00` into
+`0xC0000000` — the SH-2 **cache data array** — and then calls into it. Running
+from the cache array avoids cartridge wait states, and the 32X allows the cache
+to be used as directly addressable RAM.
+
+This matters for the address model: the SH-2 encodes cache behaviour in the top
+address bits, but only `0x00000000` (cached) and `0x20000000` (cache-through)
+are mirrors of each other. `0x60000000` (cache address array) and `0xC0000000`
+(cache data array) are distinct storage. Collapsing all of them — as a naive
+`addr & 0x1FFFFFFF` does — aliases this routine onto the boot ROM.
+
+The overlay has its own header of `bra` stubs, one per entry point, mirroring
+the SDRAM image's layout at `0x060001A0`. Its tail is `0xAAAA`/`0xFFFF` fill.
+
+## Dispatch idioms
+
+Three forms account for essentially all table-driven control flow, and
+recognising them is what makes discovery work at all:
+
+| | Shape | Entries |
+|---|---|---|
+| A | `mova Lbase,r0` ; `mov.l @(r0,rM),rN` ; `jmp @rN` | 32-bit absolute addresses |
+| B | `mova Lbase,r0` ; `mov.w @(r0,rM),rN` ; `braf rN` | 16-bit offsets from PC+4 |
+| C | `mov.l Lp,rB` ; `mov.b @(r0,rB),rT` ; `braf rT` | 8-bit offsets from PC+4 |
+
+In A and B the `mova` names the table exactly. In C the literal is an indexing
+*origin* that sits before the real entries, so the table is instead located
+immediately after the branch's delay slot, and it is bounded by the lowest
+target it points at — a table cannot extend into the code it dispatches to.
+
+Note also that `bsrf`/`braf` compute `PC + 4 + Rn` rather than jumping to `Rn`.
+That is the standard far-call form, so treating the register as an absolute
+address stops discovery at the very first one.
+
 ## Code discovery status (SH-2)
 
 `python3 tools/disasm.py discover`
 
 ```
-functions found : 193      (all in SDRAM; none executed from cartridge)
-instructions    : 8,744    (17,488 bytes)
-literal pool    : 1,758 bytes
-SDRAM blob      : 52.2% classified as code or literal pool
-jump tables     : 14 recovered
-unresolved      : 9 indirect transfers
+functions       : 208
+basic blocks    : 1,772
+instructions    : 9,243    (18,486 bytes)
+data (pool+tbl) : 2,448 bytes
+dispatch tables : 15 recovered
+unresolved      : 8 indirect transfers
+SDRAM blob      : 55.4% classified;  overlay: 488/1,024 bytes
 ```
 
-No SH-2 code is executed from the cartridge window — the 36 KB SDRAM image is
-the whole SH-2 program. The uncovered ~48% of the blob is a mix of data tables
-and uninitialised scratch space; the two largest gaps (`0x06005FD4`, 5,628 bytes
-and `0x06007DA0`, 4,704 bytes) sit where buffers would be expected.
+Of the 16,432 unclassified bytes in the SDRAM blob, only ~190 still decode as
+plausible code; the rest are data tables and buffers. The blob is a mixed
+code+data image, so full byte coverage is not the goal — the goal is that every
+byte is either understood or provably not code.
+
+The 8 remaining unresolved transfers are genuine runtime function pointers
+(`jsr @r12`, `jsr @r14`), where the callee is chosen by the caller at run time.
+Resolving them needs interprocedural dataflow, not better local pattern
+matching.
+
+## Verification
+
+`python3 tools/emit_asm.py --verify` emits a full listing and reassembles it
+with `sh-elf-as`:
+
+```
+sh2_sdram             36,864 bytes identical
+sh2_overlay_c0000000   1,024 bytes identical
+```
+
+Both hold for the JU and E images. This is the front end's correctness gate: if
+a single instruction were decoded wrongly, an operand mis-rendered, or a literal
+pool mistaken for code, the bytes would not match.
+
+One caveat the round-trip cannot catch: bytes are bytes, so misclassifying data
+*as* code still reassembles. Recursive descent does walk into literal pools via
+architecturally-valid but semantically unreachable fallthrough edges — at
+`0x0600540E` a `bf` falls into a pool, because the preceding `bt.s` already
+consumed the T-set case. Data proven by an instruction reference therefore
+outranks a code claim that arrived only by fallthrough.
 
 ## ROM layout
 

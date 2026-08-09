@@ -42,13 +42,21 @@ ROM verified and mapped, MARS header decoded, SH-2 decoder validated exhaustivel
 against `sh-elf-objdump` (all 53,752 valid encodings agree), recursive-descent
 discovery with literal-pool and jump-table recovery, 193 SH-2 functions found.
 
-**M1 — finish the SH-2 front end**
+**M1 — finish the SH-2 front end** ✅ *done*
 
-Resolve the remaining 9 indirect transfers, classify the rest of the 36 KB blob,
-split basic blocks properly (discovery currently re-walks overlapping blocks —
-fine for finding code, not for codegen), and emit a reassemblable listing.
-*Gate:* assembling the emitted listing with `sh-elf-as` reproduces the original
-36 KB byte for byte.
+Two-phase CFG construction (leaders, then blocks) so backward branches split
+runs instead of duplicating them; all three dispatch idioms recovered; the
+cache-array overlay found and disassembled; function-pointer tables in data
+swept; and a reassemblable listing emitted.
+
+*Gate met:* `python3 tools/emit_asm.py --verify` reassembles the listing with
+`sh-elf-as` to bytes identical to the cartridge — 36,864 + 1,024 bytes, on both
+the JU and E images.
+
+208 functions, 1,772 blocks, 15 dispatch tables. 8 indirect transfers remain
+unresolved; all are runtime function pointers whose callee the caller picks, so
+they need interprocedural dataflow rather than better pattern matching. Of the
+unclassified remainder, ~190 bytes still look like code.
 
 **M2 — 68000 front end**
 
