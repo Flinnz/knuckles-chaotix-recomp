@@ -10,17 +10,17 @@ as: capture inputs into temporaries, run the delay slot, then transfer. Getting
 this backwards is invisible until a delay slot happens to clobber the register
 its branch jumps through.
 
-**Calls nest, tail transfers do not.** `bsr`/`jsr` really do return, so they
-emit a nested call. `jmp` and a `bra` that leaves the function do *not* return —
-on hardware they are the last thing the function does — so instead of calling
-the target, the generated function **returns its address** and the runtime
-trampoline continues there. That distinction is what keeps a hardware dispatch
-loop, which never returns, from becoming unbounded C recursion.
+**Nothing nests.** The SH-2 has no call stack — `bsr`/`jsr` only write PR — so
+a "call" is modelled as exactly that: set PR, then transfer. `rts` transfers to
+PR. Every control transfer returns its destination to the runtime trampoline,
+which loops. There is no C recursion anywhere, so a handler that branches away
+instead of returning (ordinary SH-2 practice, and what the slave's idle handler
+does) costs nothing here either.
 
-PR is still set to the true return address so that code saving and restoring it
-around a call round-trips. Code that *computes* a new return address (the
-`sts pr,rN` / `add #k,rN` / `jmp @rN` trick for skipping inline data) remains
-outside this model.
+The consequence is that a return address must be dispatchable, so the
+instruction after a call starts a block, and a function can be entered at any
+of its blocks via the `entry` parameter. Code that *computes* a return address
+now works too, since PR is just a context field.
 """
 
 from sh2.decode import (BRANCH, JUMP, JUMP_IND, CALL, CALL_IND, RET, INVALID)
@@ -284,19 +284,18 @@ class Codegen:
 
     # ------------------------------------------------------------------
     def _goto(self, target, fn, indent):
-        """Transfer to `target`: a local label, or a tail transfer out."""
+        """Transfer to `target`: a local label, or out to the trampoline."""
         pad = " " * indent
         if target in fn.blocks:
             return [f"{pad}goto {lname(target)};"]
-        # Leaving the function: hand the address back to the trampoline rather
-        # than calling, so control continues there instead of nesting.
         self.escapes += 1
         return [f"{pad}return 0x{target:08X}u;"]
 
     def _call(self, target, ret, indent):
+        """A call is a PR write plus a transfer — there is no stack frame."""
         pad = " " * indent
         return [f"{pad}c->pr = 0x{ret:08X}u;",
-                f"{pad}sh2_call(c, 0x{target:08X}u);"]
+                f"{pad}return 0x{target:08X}u;"]
 
     def transfer(self, ins, ds, fn):
         """Emit a control transfer plus its delay slot, in the right order."""
@@ -341,19 +340,20 @@ class Codegen:
             out.append("    {")
             out.append(f"        uint32_t _t = {expr};")
             out += ["    " + s for s in ds_stmts]
-            if ins.kind == CALL_IND:
-                out.append(f"        c->pr = 0x{ret:08X}u;")
-                out.append("        sh2_call(c, _t);")
-            else:
-                out.append("        return _t;")      # tail transfer
+            out.append(f"        c->pr = 0x{ret:08X}u;" if ins.kind == CALL_IND
+                       else "        /* jump */")
+            out.append("        return _t;")
             out.append("    }")
             return out
 
         if ins.kind == RET:
-            if ins.mnem == "rte":
-                out.append("    /* rte */")
             out += ds_stmts
-            out.append("    return 0;")
+            if ins.mnem == "rte":
+                # rte resumes from the stacked PC, not PR; no interrupt is
+                # delivered to recompiled code yet, so this ends the run.
+                out.append("    return 0;")
+            else:
+                out.append("    return c->pr;")
             return out
 
         out.append(f"    /* UNHANDLED transfer {ins.mnem} */")
@@ -362,10 +362,21 @@ class Codegen:
 
     # ------------------------------------------------------------------
     def function(self, fn):
+        blocks = sorted(fn.blocks.values(), key=lambda b: b.start)
         lines = [f"/* 0x{fn.start:08X}  {fn.size()} bytes, "
                  f"{len(fn.blocks)} block(s) */",
-                 f"uint32_t {fname(fn.start)}(SH2 *c) {{"]
-        for b in sorted(fn.blocks.values(), key=lambda b: b.start):
+                 f"uint32_t {fname(fn.start)}(SH2 *c, uint32_t entry) {{"]
+        # Control can arrive at any block: through PR on return from a call, or
+        # through a tail transfer from another function.
+        if len(blocks) > 1:
+            lines.append("    switch (entry) {")
+            for b in blocks[1:]:
+                lines.append(f"    case 0x{b.start:08X}u: goto {lname(b.start)};")
+            lines.append("    default: break;")
+            lines.append("    }")
+        else:
+            lines.append("    (void)entry;")
+        for b in blocks:
             lines.append(f"{lname(b.start)}: ;")
             i = 0
             while i < len(b.insns):

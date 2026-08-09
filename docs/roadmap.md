@@ -161,16 +161,34 @@ write PR, they do not push a stack frame, so abandoning the return address is
 free. The recompiler models a call as a *nested C call*, which does create a
 frame, and it never unwinds — 256 iterations deep and the bound trips.
 
-**The fix is to model calls the way the hardware does.** SH-2 has no call
-stack, only PR, so the flat trampoline should cover calls too:
+**Calls now work the way the hardware does.** The SH-2 has no call stack, only
+PR, so `bsr`/`jsr` set PR and transfer, and `rts` transfers to PR. Every control
+transfer returns its destination to one flat trampoline loop; nothing recurses.
 
-* `bsr`/`jsr target` -> `c->pr = ret; return target;`
-* `rts` -> `return c->pr;`
+Two consequences had to be handled: a return address is mid-function, so the
+instruction after a call now starts a basic block (1,772 -> 1,920 blocks, with
+the whole-image round-trip still byte-exact), and a function can be entered at
+any of its blocks through an `entry` parameter, so the dispatch table is keyed
+by block rather than by function.
 
-Everything becomes one loop with no C recursion at all, and code that saves and
-restores PR around a call keeps working because PR is just a context field.
-This is the M3 "PR model" caveat, now confirmed as hit in practice rather than
-hypothetical, and it subsumes the depth bound entirely.
+The recursion is gone — the depth bound now trips zero times, and it is
+unnecessary rather than merely tolerated. All 8 semantics tests pass under the
+new calling convention.
+
+It also caught a latent bug in the test program itself, which made a call and
+then returned without ever preserving PR. The old nested-call model masked it;
+the faithful one spun. Real SH-2 code always saves PR around a call, and the
+test now does too.
+
+**The slave is no longer misbehaving.** It idles on its handler at 0x060002F6 —
+burn a delay loop, return to the dispatch head, read a command byte, repeat —
+which is what a slave with nothing to do is supposed to do. The master gets
+substantially further into init than before.
+
+Still unresolved: neither ready word is posted, so the 68000 keeps spinning at
+0x88099E. The slave's command byte at 0x20004005 always reads 0 because nothing
+writes it, and the master's init does not reach 0x06001250. Tracing the master's
+path against a reference emulator is the way to settle where it diverges.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

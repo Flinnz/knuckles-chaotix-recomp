@@ -48,18 +48,18 @@ void sh2_w32(SH2 *c, uint32_t a, uint32_t v) {
     }
 }
 
-typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;
+typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *, uint32_t); } SH2Entry;
 extern const SH2Entry sh2_functions[];
 extern const unsigned sh2_function_count;
 
 void sh2_call(SH2 *c, uint32_t addr) {
     while (addr) {
         if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
-        uint32_t (*fn)(SH2 *) = 0;
+        uint32_t (*fn)(SH2 *, uint32_t) = 0;
         for (unsigned i = 0; i < sh2_function_count; i++)
             if (sh2_functions[i].addr == addr) { fn = sh2_functions[i].fn; break; }
-        if (!fn) { fprintf(stderr, "no recompiled function at 0x%08X\n", addr); exit(2); }
-        addr = fn(c);
+        if (!fn) { fprintf(stderr, "no recompiled block at 0x%08X\n", addr); exit(2); }
+        addr = fn(c, addr);
     }
 }
 

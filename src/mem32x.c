@@ -231,7 +231,7 @@ void sh2_w32(SH2 *c, uint32_t a, uint32_t v) {
 }
 
 /* ------------------------------------------------------------ transfers --- */
-typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;
+typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *, uint32_t); } SH2Entry;
 extern const SH2Entry sh2_functions[];
 extern const unsigned sh2_function_count;
 
@@ -245,8 +245,6 @@ extern const unsigned sh2_function_count;
 #define TRACE_MAXFN 1024
 static struct { uint32_t addr; uint16_t depth; uint8_t tail; } tring[TRACE_RING];
 static unsigned tring_n;                       /* total entries, may exceed ring */
-static uint32_t tstack[512];
-static unsigned tdepth;
 static uint32_t tcount[TRACE_MAXFN];
 
 void mars_trace_reset(void) { tring_n = 0; memset(tcount, 0, sizeof tcount); }
@@ -260,36 +258,27 @@ static void trace_enter(uint32_t addr, unsigned depth, int tail) {
 
 void mars_trace_dump(const char *why) {
     fprintf(stderr, "\n== trace: %s ==\n", why);
-    fprintf(stderr, "call stack, %u deep (outermost first, last 20 shown):\n",
-            tdepth);
-    unsigned from = tdepth > 20 ? tdepth - 20 : 0;
-    for (unsigned i = from; i < tdepth; i++)
-        fprintf(stderr, "   [%3u] 0x%08X\n", i, tstack[i]);
-
-    /* A call cycle shows up as the same address repeating down the stack. */
-    if (tdepth >= 4) {
-        for (unsigned period = 1; period <= 8 && period * 3 <= tdepth; period++) {
-            int same = 1;
-            for (unsigned k = 0; k < period * 2 && same; k++)
-                if (tstack[tdepth - 1 - k] != tstack[tdepth - 1 - k - period])
-                    same = 0;
-            if (same) {
-                fprintf(stderr, "  cycle of %u frame(s):", period);
-                for (unsigned k = 0; k < period; k++)
-                    fprintf(stderr, " 0x%08X", tstack[tdepth - period + k]);
-                fprintf(stderr, "\n");
-                break;
-            }
+    /* A spin shows up as a repeating run of addresses in the entry ring. */
+    unsigned have = tring_n < TRACE_RING ? tring_n : TRACE_RING;
+    for (unsigned period = 1; period <= 12 && period * 3 <= have; period++) {
+        int same = 1;
+        for (unsigned k = 0; k < period * 2 && same; k++)
+            if (tring[(tring_n - 1 - k) % TRACE_RING].addr !=
+                tring[(tring_n - 1 - k - period) % TRACE_RING].addr) same = 0;
+        if (same) {
+            fprintf(stderr, "  spinning on %u address(es):", period);
+            for (unsigned k = 0; k < period; k++)
+                fprintf(stderr, " 0x%08X",
+                        tring[(tring_n - period + k) % TRACE_RING].addr);
+            fprintf(stderr, "\n");
+            break;
         }
     }
 
     unsigned shown = tring_n < 16 ? tring_n : 16;
-    fprintf(stderr, "last %u entries (T = tail transfer):\n", shown);
-    for (unsigned i = tring_n - shown; i < tring_n; i++) {
-        unsigned k = i % TRACE_RING;
-        fprintf(stderr, "   %s d%-3u 0x%08X\n",
-                tring[k].tail ? "T" : " ", tring[k].depth, tring[k].addr);
-    }
+    fprintf(stderr, "last %u block entries:\n", shown);
+    for (unsigned i = tring_n - shown; i < tring_n; i++)
+        fprintf(stderr, "   0x%08X\n", tring[i % TRACE_RING].addr);
 
     /* Hottest functions, which is usually where a runaway loop lives. */
     unsigned top[5] = {0}, ntop = 0;
@@ -306,39 +295,38 @@ void mars_trace_dump(const char *why) {
     fprintf(stderr, "total entries: %u\n", tring_n);
 }
 
+/* The table is sorted by address, so binary search it. It lists every basic
+ * block, not just function entries: a return goes to the instruction after a
+ * call, which is mid-function. */
 static int lookup(uint32_t addr) {
-    for (unsigned i = 0; i < sh2_function_count; i++)
-        if (sh2_functions[i].addr == addr) return (int)i;
+    unsigned lo = 0, hi = sh2_function_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (sh2_functions[mid].addr == addr) return (int)mid;
+        if (sh2_functions[mid].addr < addr) lo = mid + 1; else hi = mid;
+    }
     return -1;
 }
 
 void sh2_call(SH2 *c, uint32_t addr) {
-    /* Only genuine calls nest; tail transfers stay in this loop. */
-    if (tdepth > 256) {
-        mars.deep++;
-        if (mars.trace) mars_trace_dump("call depth exceeded");
-        longjmp(mars_bail, MARS_BAIL_DEPTH);
-    }
-    unsigned entered = 0;
+    /* Flat: calls, returns and jumps are all just a new address. Nothing
+     * recurses, so a handler that branches away instead of returning - which
+     * is ordinary SH-2 practice - costs nothing here either. */
     while (addr) {
         if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
         int i = lookup(addr);
         if (i < 0) {
             if (mars.missing++ < 16)
-                fprintf(stderr, "  [call] no recompiled function at 0x%08X\n", addr);
+                fprintf(stderr, "  [call] no recompiled block at 0x%08X\n", addr);
             break;
         }
         if (mars.trace) {
-            trace_enter(addr, tdepth, entered > 0);
+            trace_enter(addr, 0, 0);
             if (i < TRACE_MAXFN) tcount[i]++;
         }
-        if (!entered) { tstack[tdepth < 512 ? tdepth : 511] = addr; tdepth++; }
-        else if (tdepth) tstack[(tdepth - 1) < 512 ? tdepth - 1 : 511] = addr;
-        entered++;
         mars_tick_budget();
-        addr = sh2_functions[i].fn(c);
+        addr = sh2_functions[i].fn(c, addr);
     }
-    if (entered && tdepth) tdepth--;
 }
 
 void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {

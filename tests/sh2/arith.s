@@ -7,6 +7,10 @@
 	.section .text
 	.align 2
 start:
+	! This routine makes a call, so it must preserve PR itself: on SH-2 a
+	! call only writes PR, and rts jumps to whatever PR holds. Without this
+	! the final rts would return to the address the jsr below left there.
+	sts.l	pr,@-r15
 	mov.l	res_base,r14
 
 	! -- 1. unsigned divide, 1000 / 7 -> 142 remainder 6 --------------
@@ -71,6 +75,7 @@ lp:
 	shlr	r13
 	mov.l	r13,@(28,r14)
 
+	lds.l	@r15+,pr
 	rts
 	nop
 

@@ -227,12 +227,14 @@ class Analyzer:
             if ins.kind == CALL:
                 self.xrefs[ins.target].add(addr)
                 self.add_function(ins.target, "bsr")
-                addr = end
-                continue
+                self.block_ends[end] = (CALL, ins.target)
+                self._add_block(end)
+                return
             if ins.kind == CALL_IND:
                 self._resolve_indirect(ins, regs, recent, is_call=True)
-                addr = end
-                continue
+                self.block_ends[end] = (CALL_IND, None)
+                self._add_block(end)
+                return
             if ins.kind == JUMP_IND:
                 self.block_ends[end] = (JUMP_IND, None)
                 self._resolve_indirect(ins, regs, recent, is_call=False)
@@ -474,6 +476,10 @@ class Analyzer:
                     cur.succs |= {target, cur.end}
                 elif kind == JUMP:
                     cur.succs.add(target)
+                elif kind in (CALL, CALL_IND):
+                    # Not a jump edge, but the return point belongs to this
+                    # function and must be grouped with it.
+                    cur.succs.add(cur.end)
                 cur = None
 
         self.funcs = {}

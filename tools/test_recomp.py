@@ -71,13 +71,14 @@ def main():
     cg = Codegen(az, img)
     entries = sorted(az.funcs)
     lines = ['#include "sh2.h"', ""]
-    lines += [f"uint32_t {fname(a)}(SH2 *c);" for a in entries] + [""]
+    lines += [f"uint32_t {fname(a)}(SH2 *c, uint32_t entry);" for a in entries] + [""]
     for a in entries:
         lines += cg.function(az.funcs[a]) + [""]
-    lines += ["typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *); } SH2Entry;",
+    lines += ["typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *, uint32_t); } SH2Entry;",
               "const SH2Entry sh2_functions[] = {"]
-    lines += [f"    {{ 0x{a:08X}u, {fname(a)} }}," for a in entries]
-    lines += ["};", f"const unsigned sh2_function_count = {len(entries)};"]
+    blocks = sorted((b, a) for a in entries for b in az.funcs[a].blocks)
+    lines += [f"    {{ 0x{b:08X}u, {fname(a)} }}," for b, a in blocks]
+    lines += ["};", f"const unsigned sh2_function_count = {len(blocks)};"]
     cfile = os.path.join(OUT, "arith_recomp.c")
     with open(cfile, "w") as f:
         f.write("\n".join(lines) + "\n")
