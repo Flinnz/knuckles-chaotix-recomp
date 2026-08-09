@@ -1,0 +1,8 @@
+build/
+toolchain/build/
+toolchain/sh-elf/
+roms/*.32x
+roms/*.bin
+__pycache__/
+*.pyc
+.DS_Store
