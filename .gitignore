@@ -4,6 +4,8 @@ toolchain/sh-elf/
 third_party/
 roms/*.32x
 roms/*.bin
+roms/*.log
+roms/*.ram
 __pycache__/
 *.pyc
 .DS_Store

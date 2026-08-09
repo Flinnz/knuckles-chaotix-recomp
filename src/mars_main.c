@@ -111,6 +111,18 @@ int main(int argc, char **argv) {
     printf("  comm: %04X %04X %04X %04X  (want M_OK / S_OK)\n",
            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3]);
 
+    /* The 32X BIOS, which runs on both SH-2s out of the adapter's own boot ROM
+     * at 0x00000000, performs a ready handshake with the 68000 before cartridge
+     * code takes over: it posts "M_OK" and "S_OK" into the comm registers, and
+     * the 68000 spins at 0x8809A6 until it sees them. We have no BIOS image and
+     * start the SH-2s at the cartridge entry points instead, so the handshake
+     * is supplied here. Confirmed against a reference trace, where those words
+     * are written by the slave executing at 0x000001C0 - BIOS space, not SDRAM.
+     */
+    mars.comm[0] = 0x4D5F; mars.comm[1] = 0x4F4B;   /* M_OK */
+    mars.comm[2] = 0x535F; mars.comm[3] = 0x4F4B;   /* S_OK */
+    printf("posted BIOS handshake: M_OK / S_OK\n");
+
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();

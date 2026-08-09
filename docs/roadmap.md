@@ -185,10 +185,27 @@ burn a delay loop, return to the dispatch head, read a command byte, repeat —
 which is what a slave with nothing to do is supposed to do. The master gets
 substantially further into init than before.
 
-Still unresolved: neither ready word is posted, so the 68000 keeps spinning at
-0x88099E. The slave's command byte at 0x20004005 always reads 0 because nothing
-writes it, and the master's init does not reach 0x06001250. Tracing the master's
-path against a reference emulator is the way to settle where it diverges.
+A reference trace of the JU ROM then settled two questions at once. The logs
+carry every CPU — SHM, SHS, the 68000 and the Z80 — one line per instruction
+with full register state before it executes, which is exactly the oracle this
+project needed.
+
+**The ready words come from the 32X BIOS, not from the cartridge.** `M_OK` is
+written by the slave executing at 0x000001C0, inside the adapter's own boot ROM,
+so the cartridge function at 0x06001250 that also holds that literal is a red
+herring and never runs. We have no BIOS image and start the SH-2s at the
+cartridge entry points, so the handshake is now supplied directly by the runtime
+— a high-level stand-in for BIOS code we do not have.
+
+**Our 68000 diverges before it ever reaches the handshake.** The reference run
+never executes 0x88099E, the loop ours spins in. Its path is
+0x8807E2 `movem.l (a6),...` -> 0x880800 `bcc` -> 0x88081E -> `tst.w d0` ->
+0x880824 `bpl 0x8809A6`. Ours takes a different branch somewhere upstream and
+lands in code the real machine never runs.
+
+Next: diff our 68000's execution against the reference line by line to find the
+first divergent PC. That is a mechanical comparison now that the oracle exists,
+rather than the inference this had been relying on.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It
