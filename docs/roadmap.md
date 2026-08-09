@@ -58,11 +58,19 @@ unresolved; all are runtime function pointers whose callee the caller picks, so
 they need interprocedural dataflow rather than better pattern matching. Of the
 unclassified remainder, ~190 bytes still look like code.
 
-**M2 — 68000 front end**
+**M2 — 68000 front end** ✅ *done*
 
-The same pipeline for 68000: decoder validated against `m68k-elf-objdump`,
-discovery seeded from the reset vector and exception table. This is the larger
-job — variable-length encoding, and the engine is spread across banked ROM.
+Decoder validated exhaustively against `m68k-elf-objdump` (100% of 45,496
+comparable opcodes), discovery seeded from the exception vector table, and the
+PC-relative indexed jump table — the engine's dispatch idiom — recovered.
+
+*Gate met:* `python3 tools/disasm68k.py emit --verify` reassembles the **entire
+3,145,728-byte cartridge** byte for byte, on both the JU and E images.
+
+368 functions, 2,957 blocks, 11,655 instructions. 42 indirect transfers remain
+unresolved. Code found so far is 1.3% of the ROM, which is expected at this
+stage: most of the cartridge is compressed art, and the engine is reached
+through data-driven tables that the next pass needs to follow.
 
 **M3 — SH-2 → C recompiler**
 
