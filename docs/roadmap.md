@@ -93,11 +93,37 @@ Still open before this milestone closes:
 * **Literal pool loads go through memory.** Correct, and leaves the constants
   patchable, but they are the obvious first optimisation.
 
-**M4 — runtime skeleton**
+**M4 — runtime skeleton** 🔵 *SH-2 half running, 68000 half absent*
 
-Memory map, 32X VDP framebuffer, palette, SDL window and input. Enough to see
-output. Boot the recompiled SH-2 against an interpreted 68000 (Musashi) so there
-is a running system long before the 68000 recompiler exists.
+`make run` boots the recompiled master SH-2 against a real 32X memory map:
+SDRAM, cartridge, framebuffer with its overwrite image, palette, the 32X system
+and VDP registers, the cache-array overlay, and the SH-2 on-chip peripheral
+block. Zero unmapped accesses and zero missing call targets on a full boot.
+
+The master runs its init and reaches its command dispatch loop, where it
+selects packed-pixel mode and writes the framebuffer line table: 256 entries,
+512-byte stride, line 0 starting immediately after the table. That is exactly
+what correct 32X video initialisation produces, and it is checkable rather than
+merely non-empty.
+
+**There is no picture yet, and that is the honest state.** In this game the
+68000 is the engine — it decides what to draw and posts commands to the SH-2s.
+With no 68000, the SH-2 initialises video and then waits, so the framebuffer
+holds a line table and nothing else, and the palette is never uploaded.
+
+Two stand-ins keep the SH-2 moving where it would rendezvous with the 68000:
+the "REDY" handshake word in SDRAM, and a scripted command queue on comm
+register 0. Polling loops that a real machine would exit are handled by a
+free-running counter behind the VDP status bits, plus a watchdog that unwinds
+instead of hanging.
+
+Remaining before this closes: the 68000. Either wire in an interpreter
+(Musashi) or recompile it, then the existing SH-2 side should start drawing.
+
+Also outstanding: `jmp` is translated as call-then-return, so a hardware
+dispatch loop that never returns becomes a finite call chain that unwinds. It
+is why the master "returns" at all. Harmless here, wrong in general, and worth
+fixing when the 68000 starts driving real work.
 
 **M5 — first pixels**
 
