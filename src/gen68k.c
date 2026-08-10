@@ -111,7 +111,9 @@ static void vdp_data(uint16_t v) {
     case 1: gen.vram[a & 0xFFFEu] = (uint8_t)(v >> 8);
             gen.vram[(a & 0xFFFEu) + 1] = (uint8_t)v; break;
     case 3: gen.cram[(a >> 1) & 0x3F] = v; break;
-    case 5: gen.vsram[(a >> 1) & 0x27] = v; break;
+    /* 40 entries; & 0x27 keeps four scattered bits, so entries 16
+     * apart aliased onto each other instead of wrapping. */
+    case 5: gen.vsram[(a >> 1) % 40] = v; break;
     default: break;
     }
     gen.vdp_addr += gen.vdpreg[15];

@@ -342,12 +342,63 @@ table's own bytes as pixel indices, which is exactly the rainbow stripes that
 first showed up over the picture. `--layers` switches each layer off
 independently, which is how that was pinned down.
 
-So the next thing is the SH-2 side of the same treatment the 68000 got: the logs
-carry SHM and SHS lines in the same format, and `tools/diff68k.py` is most of a
-`diff sh2` already. The remaining 68000 work is interrupt timing — the reference
-takes 102 vblanks in the traced window on real timing where we inject one per
-frame at a fixed point, and that is what stops the post-boot comparison from
-being useful.
+### Next: the same treatment for the SH-2
+
+The mechanical diff is the most productive thing this project has built. It
+turned the 68000 from a hunt into a lookup and found five bugs in one pass, and
+the unknowns are now all on the other CPU — where they matter more, because the
+SH-2 is *our recompiled code*, so a bug there is a recompiler bug rather than a
+gap in a hardware model.
+
+**1. `tools/diffsh2.py`.** The reference side is nearly free: the logs already
+carry SHM and SHS lines in the same shape as the CPU ones — r0-r15, sr, gbr,
+vbr, mach, macl, pr and a flag string — with the same `[Omitted: N]` semantics,
+and `tools/diff68k.py` already has the extraction, the monotone forward
+alignment and the reporting.
+
+Our side is the real question, because the generated C deliberately carries no
+instrumentation: what exists is a ring of block entries, not an instruction
+stream. Start at block granularity — compare that ring against the reference
+stream filtered to the same addresses, which needs no codegen change and should
+be enough to answer "does the reference enter a function we never do". Escalate
+to an instrumented codegen mode, one hook per instruction with the register
+state, only if block granularity cannot localise it. That is the version that
+would also catch recompiler semantics bugs, and it is where the M3 debts would
+show up: the PR model, and `jmp` still translated as call-then-return.
+
+**2. Mine the segments we have not touched.** Four of the eight log files, about
+3.3 GB, are from *before* the reset — the game already running, which is exactly
+where the drawing is. `0x060021EA` writes the frame buffer there with
+`r7 = 0x240378CA`. That is an oracle for what drawing looks like: which function
+does it, what calls it, which command triggers it. Our run does not have to
+reach that state first.
+
+**3. Fix what it names**, the same loop as the 68000.
+
+**Pivot condition.** If the answer comes back as "we never receive the command
+that triggers drawing", the problem is not the SH-2 but the scheduling model,
+and that becomes the work instead. It is already the common root of several
+stand-ins: the 68000 runs a whole frame and only then are queued commands
+serviced, which is why the comm handshakes need hand-delivery, why the SH-2
+command interrupt is acknowledged for it, and why the post-boot comparison is
+useless — the reference takes 102 vblanks on real timing where we inject one per
+frame at a fixed point.
+
+### Carried debts
+
+* **No regression gate on the runtime.** The front end has byte-exact
+  round-trips and the recompiler has semantics tests, but nothing notices if the
+  boot diff stops matching. `tools/diff68k.py --ref-lines 20213` is one command
+  and already exits non-zero on a fatal divergence.
+* **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
+  during boot; `vdp_dma` returns early on both.
+* **The 32X frame-select polarity is a guess.** Displayed is taken to be
+  `fb[FS]` and the CPUs get the other one; nothing has confirmed which way round
+  it is.
+* **The frame has not been checked against a real screenshot.** It is a
+  plausible Chaotix level, which is not the same as a verified match.
+* **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
+  per-line sprite and pixel limits.
 
 **M6 — sound, then the 68000 recompiler**
 

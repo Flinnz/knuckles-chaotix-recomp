@@ -133,8 +133,11 @@ void genvdp_render(uint32_t *px, unsigned w, unsigned h) {
             /* Vertical scroll comes from VSRAM: one pair of entries for the
              * whole screen, or a pair per two cells across. */
             unsigned vi = vcol ? ((x >> 4) * 2) : 0;
-            int vsa = (int)(gen.vsram[vi & 0x3F] & 0x3FF);
-            int vsb = (int)(gen.vsram[(vi + 1) & 0x3F] & 0x3FF);
+            /* 40 entries, so bound rather than mask: a 320-pixel line asks for
+             * index 40 at the right-hand edge, and masking would read past the
+             * array instead of wrapping. */
+            int vsa = (int)(gen.vsram[vi % 40] & 0x3FF);
+            int vsb = (int)(gen.vsram[(vi + 1) % 40] & 0x3FF);
 
             Px zero = { 0, 0, 0 };
             Px a = (gen.layers & 2) ? plane_pixel(pa, cw, ch, hsa, vsa, x, y)
