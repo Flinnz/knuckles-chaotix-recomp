@@ -36,9 +36,21 @@ def main():
         body += cg.function(az.funcs[a]) + [""]
 
     # Address -> function table, so an indirect transfer can find its target.
+    #
+    # One row per address. 288 blocks belong to more than one function — two
+    # functions that share a tail, or fall into each other — and a row per
+    # (block, owner) pair left the table with duplicate keys for the runtime's
+    # binary search to pick between arbitrarily. Any owner will do now that a
+    # block's exits are explicit rather than implied by emission order, so the
+    # lowest-addressed one is chosen: arbitrary, but the same on every build.
+    owner = {}
+    for a in entries:
+        for b in az.funcs[a].blocks:
+            if b not in owner or a < owner[b]:
+                owner[b] = a
     table = ["typedef struct { uint32_t addr; uint32_t (*fn)(SH2 *, uint32_t); } SH2Entry;",
              "const SH2Entry sh2_functions[] = {"]
-    blocks = sorted((b, a) for a in entries for b in az.funcs[a].blocks)
+    blocks = sorted(owner.items())
     table += [f"    {{ 0x{b:08X}u, {fname(a)} }}," for b, a in blocks]
     table += ["};",
               f"const unsigned sh2_function_count = {len(blocks)};"]

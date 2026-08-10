@@ -435,18 +435,37 @@ class Analyzer:
         return added
 
     def scan_after_returns(self):
-        """Seed functions that begin immediately after another one ends.
+        """Seed functions that begin immediately after a run of code ends.
 
         Handlers only ever reached through a register callback have no visible
         xref, but the compiler still lays them out end to end, so the address
-        after an `rts` is a strong candidate.
+        after an `rts` is a strong candidate. So is the address after an
+        unconditional `bra` or `jmp`: control cannot fall through either of
+        those, so whatever follows is reachable only indirectly — which is
+        exactly the case a static cross-reference search cannot see. A
+        conditional branch is not in this class; its next address falls through
+        and is covered already.
+
+        A routine reached only through a pointer is also aligned, so what
+        follows is often one or two `nop`s of padding and *then* the entry
+        point. Seeding only the padding leaves the real entry mid-block, where
+        an indirect transfer to it has nothing to dispatch to — which is how
+        0x06004A24 went missing while every byte of it was translated.
         """
         added = 0
         for end, (kind, _) in list(self.block_ends.items()):
-            if kind != RET or end in self.code or end in self.data:
+            if kind not in (RET, JUMP, JUMP_IND) or end in self.code \
+                    or end in self.data:
                 continue
-            if self.looks_like_code(end) and self.add_function(end, "after rts"):
+            if not self.looks_like_code(end):
+                continue
+            if self.add_function(end, "after " + kind):
                 added += 1
+            a = end
+            while self.img.readable(a, 2) and self.img.u16(a) == 0x0009:
+                a += 2
+                if self.looks_like_code(a) and self.add_function(a, "after padding"):
+                    added += 1
         return added
 
     # -- phase 2: blocks and functions ---------------------------------

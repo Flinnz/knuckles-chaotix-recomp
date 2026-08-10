@@ -384,17 +384,33 @@ class Codegen:
             # branch when tracing is off — see SH2_BLOCK in src/sh2.h.
             lines.append(f"{lname(b.start)}: SH2_BLOCK(c, 0x{b.start:08X}u);")
             i = 0
+            closed = False       # did an unconditional transfer end this block?
             while i < len(b.insns):
                 ins = b.insns[i]
                 if ins.kind in (BRANCH, JUMP, JUMP_IND, CALL, CALL_IND, RET):
                     ds = b.insns[i + 1] if (ins.delay and i + 1 < len(b.insns)) else None
                     lines += self.transfer(ins, ds, fn)
+                    # A conditional branch is the one transfer control can come
+                    # back from, so it does not close the block.
+                    closed = ins.kind is not BRANCH
                     i += 2 if ds is not None else 1
                     continue
                 for s in self.insn(ins):
                     lines.append("    " + s)
+                closed = False
                 i += 1
-        # A block that ends by falling off the end of the function returns.
+            # Falling out of a block is a real control-flow edge and has to be
+            # emitted as one. Letting it be textual adjacency instead is only
+            # correct when a function's blocks are contiguous in memory, and 288
+            # of them are not: a function that shares a tail with another owns
+            # two disjoint runs, so the fall-through at the end of the first run
+            # silently continued into the second. That is how entering
+            # 0x060008EC through f_06001250 ran on into 0x06001250 itself, where
+            # the hardware falls through to 0x060008F2.
+            if not closed:
+                lines += self._goto(b.end, fn, 4)
+        # Unreachable now that every block ends in an explicit transfer, and
+        # still required: C wants a return on the path out of the function.
         lines.append("    return 0;")
         lines.append("}")
         return lines
