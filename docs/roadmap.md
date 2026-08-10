@@ -477,14 +477,39 @@ and keeps both images' byte-exact round-trips. It also breaks the master's boot,
 and the SH-2 diff said why in one run: at the end of init the reference goes to
 0x060008F2 and we went to 0x06001250, with *identical registers*.
 
-The cause is not the new seeding. **288 basic blocks already belong to more than
-one function** — functions that share a tail, or fall into each other — and
-`recompile.py` emits one dispatch-table row per (block, owner) pair. So
-`sh2_functions[]` has duplicate addresses, and `lookup()` binary-searches them
-and gets whichever it lands on. It has been arbitrary all along; the new
-seeding just made a case where the two owners disagree reachable. That has to be
-one row per address, with a rule for which owner wins, before the discovery
-change can go in — so neither is committed here.
+The cause is not the new seeding. **Falling out of a block was textual
+adjacency**: a block that did not end in an unconditional transfer simply ran
+into whichever label the emitter had put next. That is only correct when a
+function's blocks are contiguous in memory, and 288 of them are not — a function
+that shares a tail with another owns two disjoint runs, so the fall-through at
+the end of the first run continued into the second.
+
+Every block now ends in an explicit `goto` or `return`. That also makes the two
+owners of a shared block interchangeable, so `sh2_functions[]` holds one row per
+address instead of one per (block, owner) pair — it had duplicate keys for the
+runtime's binary search to pick between arbitrarily, which had been true all
+along and only became reachable when the new seeding found a case where the two
+owners disagreed.
+
+With that settled the discovery change goes in: **208 -> 247 functions**, both
+images still reassemble byte for byte, both boots still match the reference with
+no fatal divergence, and the run no longer stops at frame 380.
+
+### What the picture is waiting on now
+
+Two thirds of the objects the master draws have a valid asset pointer and one
+third is null, which is what the 10.8 million reads of address 0 are. The
+pointers live in a two-level table at `0x06003614` that starts as all-ones and
+is filled one slot at a time by **command 7** (`0x060010D8`): read a slot index
+and an asset id from the command payload, decompress from the cartridge index at
+`0x020A0000` into the next free SDRAM, store the destination in the slot, and
+post the new free pointer back to comm 3. Our 68000 issues that command once in
+400 frames, so most slots are never filled. Why it issues one and not many is
+the next thread, and it is a 68000-side question rather than an SH-2 one.
+
+The 32X image also degrades after frame ~350: the line table becomes 256 entries
+all holding the same offset, so every scanline scans out the same row and the
+screen goes flat. At 200 frames it is still a real picture.
 
 ### Carried debts
 
@@ -493,15 +518,14 @@ change can go in — so neither is committed here.
   boot diff stops matching. `tools/diff68k.py --ref-lines 20213` is one command
   and already exits non-zero on a fatal divergence; `tools/diffsh2.py --cpu
   master` is now a second one.
-* **The dispatch table has duplicate addresses.** 288 blocks belong to two
-  functions, `recompile.py` emits a row per (block, owner), and `lookup()`
-  picks between them by wherever its binary search lands. Blocking the
-  discovery fix above, and latent everywhere else.
-* **`0x06004A24` is executed and never translated**, reached by an indirect
-  transfer no static xref finds. It is what stops the run at frame ~380.
+* **The asset table is barely filled.** Command 7 loads one slot per call and
+  our 68000 issues it once; a third of the objects drawn therefore dereference
+  a null pointer.
 * **Only the command interrupt is delivered.** The slave takes 2,197 PWM
   interrupts in one reference segment and we raise none, so it still idles in
-  the delay loop the diff caught it in.
+  the delay loop the diff caught it in — `tools/diffsh2.py --cpu slave` goes
+  fatal at reference line 103 and will keep doing so until it has a timer to
+  drive that interrupt from.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
   during boot; `vdp_dma` returns early on both.
 * **The 32X frame-select polarity is a guess.** Displayed is taken to be
