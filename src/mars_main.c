@@ -143,12 +143,64 @@ static void render(uint32_t *px) {
     }
 }
 
+/* The keyboard, as a pad. Held once a frame into gen.pad_buttons and read out
+ * of it by src/gen68k.c whenever the game strobes TH.
+ *
+ * The layout is the one every Mega Drive emulator uses: the three face buttons
+ * on the row under the fingers, the three extras above them, and Enter for
+ * Start. Mode is on Tab because nothing in this game is known to use it.
+ */
+static const struct { int key; unsigned bit; } pad_keys[] = {
+    { SDL_SCANCODE_UP,     PAD_U }, { SDL_SCANCODE_DOWN,  PAD_D },
+    { SDL_SCANCODE_LEFT,   PAD_L }, { SDL_SCANCODE_RIGHT, PAD_R },
+    { SDL_SCANCODE_Z,      PAD_A }, { SDL_SCANCODE_X,     PAD_B },
+    { SDL_SCANCODE_C,      PAD_C },
+    { SDL_SCANCODE_A,      PAD_X }, { SDL_SCANCODE_S,     PAD_Y },
+    { SDL_SCANCODE_D,      PAD_Z },
+    { SDL_SCANCODE_RETURN, PAD_S }, { SDL_SCANCODE_TAB,   PAD_M },
+};
+
+/* The same twelve by name, for `--hold up,start` — which is how a headless run
+ * gets to press anything, and the only way the input path can be tested without
+ * a person at the keyboard. */
+static const struct { const char *name; unsigned bit; } pad_names[] = {
+    { "up", PAD_U }, { "down", PAD_D }, { "left", PAD_L }, { "right", PAD_R },
+    { "a", PAD_A }, { "b", PAD_B }, { "c", PAD_C }, { "start", PAD_S },
+    { "x", PAD_X }, { "y", PAD_Y }, { "z", PAD_Z }, { "mode", PAD_M },
+};
+
+static unsigned parse_hold(const char *s) {
+    unsigned held = 0;
+    while (*s) {
+        size_t n = strcspn(s, ",");
+        for (unsigned i = 0; i < sizeof pad_names / sizeof *pad_names; i++)
+            if (n == strlen(pad_names[i].name) && !strncmp(s, pad_names[i].name, n))
+                held |= pad_names[i].bit;
+        s += n + (s[n] == ',');
+    }
+    return held;
+}
+
+static unsigned read_pad(void) {
+    SDL_PumpEvents();
+    const Uint8 *k = SDL_GetKeyboardState(NULL);
+    unsigned held = 0;
+    for (unsigned i = 0; i < sizeof pad_keys / sizeof *pad_keys; i++)
+        if (k[pad_keys[i].key]) held |= pad_keys[i].bit;
+    /* Opposite directions at once is something a real d-pad cannot do and some
+     * engines handle badly; drop both rather than pick one. */
+    if ((held & (PAD_L | PAD_R)) == (PAD_L | PAD_R)) held &= ~(PAD_L | PAD_R);
+    if ((held & (PAD_U | PAD_D)) == (PAD_U | PAD_D)) held &= ~(PAD_U | PAD_D);
+    return held;
+}
+
 int main(int argc, char **argv) {
     const char *rompath = argc > 1 && argv[1][0] != '-' ? argv[1]
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
+    unsigned hold = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             headless_frames = atoi(argv[i + 1]);
@@ -166,6 +218,8 @@ int main(int argc, char **argv) {
             dump_vdp = argv[++i];
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc)
             gen.layers = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--hold") && i + 1 < argc)
+            hold = parse_hold(argv[++i]);
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -241,6 +295,8 @@ int main(int argc, char **argv) {
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
                                 SDL_TEXTUREACCESS_STREAMING, W, H);
+        printf("pad: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Enter = Start, "
+               "Tab = Mode, Esc quits\n");
     }
 
     int running = 1;
@@ -264,6 +320,7 @@ int main(int argc, char **argv) {
          * post-boot comparison out by however far into its wait loop the engine
          * had got. */
         gen68k_frame_start();
+        gen.pad_buttons = headless_frames ? hold : (read_pad() | hold);
         unsigned pwm = mars_pwm_per_frame(), acc = 0;
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;

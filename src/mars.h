@@ -72,11 +72,28 @@ typedef struct {
     uint32_t line;           /* scanline the 68000 is running inside */
     uint8_t  vint_pending;   /* VDP status bit 7, until the 68000 acknowledges */
     uint8_t  pad_cycle[3], pad_th[3];   /* six-button pad sequencing */
+    unsigned pad_buttons;    /* what player one is holding; see PAD_* below */
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
 } Gen;
 
 extern Mars mars;
 extern Gen gen;
+
+/* The twelve lines of a six-button pad, as `gen.pad_buttons` holds them. Set
+ * from the keyboard once a frame in src/mars_main.c; nothing sets it in a
+ * headless run, so every trace comparison still sees an untouched pad. */
+#define PAD_U 0x001u
+#define PAD_D 0x002u
+#define PAD_L 0x004u
+#define PAD_R 0x008u
+#define PAD_A 0x010u
+#define PAD_B 0x020u
+#define PAD_C 0x040u
+#define PAD_S 0x080u    /* Start */
+#define PAD_X 0x100u
+#define PAD_Y 0x200u
+#define PAD_Z 0x400u
+#define PAD_M 0x800u    /* Mode */
 
 /* The 32X has two frame buffers and FBCR bit 0 selects between them, so one can
  * be drawn into while the other is on screen. Everything the CPUs reach at

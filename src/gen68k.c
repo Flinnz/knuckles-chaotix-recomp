@@ -148,8 +148,6 @@ static void bios_comm_read(unsigned i) {
  * gives 14 instead, which is the branch we were taking by having no ports at
  * all — 74 instructions of pad handling skipped, 204 times over the extract.
  *
- * Nothing is pressed yet; there is no input path into the runtime.
- *
  * And it is a *six*-button pad. The routine at 0x8F46EE pulses TH three more
  * times after the identification and branches when the low nibble comes back
  * zero, which is the six-button signature and which a three-button pad never
@@ -157,7 +155,7 @@ static void bios_comm_read(unsigned i) {
  * the machine the log came from.
  *
  * So the pad answers a rotating sequence keyed to how many times TH has fallen
- * since it was last left alone, with nothing pressed:
+ * since it was last left alone:
  *
  *     TH high, any cycle    ? ? C B R L D U      (cycle 3 is ? ? C B M X Y Z)
  *     TH low, cycle 3       ? ? S A 0 0 0 0      the signature
@@ -167,16 +165,33 @@ static void bios_comm_read(unsigned i) {
  * The real pad forgets the count after about 1.5 ms of TH left high, which is
  * shorter than a frame and longer than one read sequence, so clearing it once a
  * frame is the same thing from the game's side.
+ *
+ * Only port one carries what the keyboard is holding; the other two answer as
+ * pads with nothing pressed, which is what identified all three before there was
+ * any input at all and is what keeps that part unchanged.
  */
 #define PAD_PORTS 3
 
 static uint8_t pad_lines(unsigned port, int th) {
-    if (th) return 0x7F;
-    switch (gen.pad_cycle[port]) {
-    case 3:  return 0x70;
-    case 4:  return 0x7F;
-    default: return 0x73;
+    /* The six lines, most significant first. A zero entry is a line the pad
+     * holds low whatever is pressed — the two that make the three-button half
+     * recognisable. */
+    static const unsigned high[6]  = { PAD_C, PAD_B, PAD_R, PAD_L, PAD_D, PAD_U };
+    static const unsigned extra[6] = { PAD_C, PAD_B, PAD_M, PAD_X, PAD_Y, PAD_Z };
+    static const unsigned low[6]   = { PAD_S, PAD_A, 0,     0,     PAD_D, PAD_U };
+
+    const unsigned *sel = th ? (gen.pad_cycle[port] == 3 ? extra : high) : low;
+    uint8_t drives = 0x3F, forced = 0;
+    if (!th && gen.pad_cycle[port] == 3) drives = 0x30;          /* S A 0 0 0 0 */
+    if (!th && gen.pad_cycle[port] == 4) drives = 0x30, forced = 0x0F;
+
+    unsigned held = port == 0 ? gen.pad_buttons : 0;
+    uint8_t v = (uint8_t)(0x40 | forced);       /* TH; the caller masks it out */
+    for (unsigned i = 0; i < 6; i++) {
+        uint8_t line = (uint8_t)(0x20u >> i);
+        if ((drives & line) && sel[i] && !(held & sel[i])) v |= line;
     }
+    return v;                                   /* active low: held pulls to 0 */
 }
 
 static uint16_t pad_read(unsigned port) {
