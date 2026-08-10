@@ -100,4 +100,10 @@ void gen68k_init_vectors(void);
 int trace68k_open(const char *path, unsigned long max_lines);
 void trace68k_close(void);
 
+/* The same for the SH-2s, one line per basic block entered rather than per
+ * instruction — see sh2.h. Both CPUs write to the one file, tagged SHM/SHS as
+ * the reference tags its own. */
+int sh2_trace_open(const char *path, unsigned long max_lines);
+void sh2_trace_close(void);
+
 #endif

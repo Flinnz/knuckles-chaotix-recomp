@@ -377,7 +377,12 @@ class Codegen:
         else:
             lines.append("    (void)entry;")
         for b in blocks:
-            lines.append(f"{lname(b.start)}: ;")
+            # The one hook in the generated code. It is what makes the output
+            # comparable against the reference logs at all: they record every
+            # instruction, so their stream filtered to these addresses is
+            # exactly the sequence this emits. Compiled out to a not-taken
+            # branch when tracing is off — see SH2_BLOCK in src/sh2.h.
+            lines.append(f"{lname(b.start)}: SH2_BLOCK(c, 0x{b.start:08X}u);")
             i = 0
             while i < len(b.insns):
                 ins = b.insns[i]

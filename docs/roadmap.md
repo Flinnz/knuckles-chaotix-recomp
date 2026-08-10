@@ -342,54 +342,102 @@ table's own bytes as pixel indices, which is exactly the rainbow stripes that
 first showed up over the picture. `--layers` switches each layer off
 independently, which is how that was pinned down.
 
-### Next: the same treatment for the SH-2
+### The SH-2 gets the same treatment
 
-The mechanical diff is the most productive thing this project has built. It
-turned the 68000 from a hunt into a lookup and found five bugs in one pass, and
-the unknowns are now all on the other CPU — where they matter more, because the
-SH-2 is *our recompiled code*, so a bug there is a recompiler bug rather than a
-gap in a hardware model.
+`tools/diffsh2.py` now does for the SH-2s what `diff68k.py` does for the 68000,
+and the alignment they share — the monotone forward search, the classification
+into trips/state/flow, the reporting — moved into `tools/tracediff.py`. The
+68000's output is byte-identical across that refactor, which is what says the
+move was a move and not a rewrite.
 
-**1. `tools/diffsh2.py`.** The reference side is nearly free: the logs already
-carry SHM and SHS lines in the same shape as the CPU ones — r0-r15, sr, gbr,
-vbr, mach, macl, pr and a flag string — with the same `[Omitted: N]` semantics,
-and `tools/diff68k.py` already has the extraction, the monotone forward
-alignment and the reporting.
+**Block granularity, but not from the entry ring.** The plan was to compare the
+existing ring against the reference filtered to those addresses. Reading the
+generated code settled it differently: the ring records *dispatch* entries —
+calls, returns, tail transfers — because that is what passes through the
+trampoline, while an intra-function branch is a `goto` and a fall-through is
+nothing at all. Matching the reference to that needs a static, delay-slot-aware
+model of which transfers route through the runtime, which is more machinery than
+the alternative and less exact.
 
-Our side is the real question, because the generated C deliberately carries no
-instrumentation: what exists is a ring of block entries, not an instruction
-stream. Start at block granularity — compare that ring against the reference
-stream filtered to the same addresses, which needs no codegen change and should
-be enough to answer "does the reference enter a function we never do". Escalate
-to an instrumented codegen mode, one hook per instruction with the register
-state, only if block granularity cannot localise it. That is the version that
-would also catch recompiler semantics bugs, and it is where the M3 debts would
-show up: the PR model, and `jmp` still translated as call-then-return.
+One hook at each basic block label is two lines of codegen and makes the two
+streams the same sequence by construction: the reference logs every instruction,
+so filtered to the block addresses it *is* our stream. `SH2_BLOCK` writes the
+whole register state, so this is not merely "did we enter this function" but the
+full state on entry — and because a basic block always executes whole, our
+instruction counts between two entries are exact too, which is what makes a trip
+count comparable against the reference's. It costs a load and a not-taken branch
+per block: 200 headless frames go from 0.19s to 0.52s, on a workload that is
+almost entirely four-instruction idle-poll blocks and so close to the worst case
+for a per-block hook.
 
-**2. Mine the segments we have not touched.** Four of the eight log files, about
-3.3 GB, are from *before* the reset — the game already running, which is exactly
-where the drawing is. `0x060021EA` writes the frame buffer there with
-`r7 = 0x240378CA`. That is an oracle for what drawing looks like: which function
-does it, what calls it, which command triggers it. Our run does not have to
-reach that state first.
+**The recompiled code is not the problem.** Over the whole extracted boot, for
+both SH-2s, *every instruction the reference ran is inside a block we have* —
+discovery missed nothing it reaches. The master's control flow then matches the
+reference exactly from its cartridge entry to the end of our trace: no flow
+divergence at all.
 
-**3. Fix what it names**, the same loop as the 68000.
+**The BIOS hands over a register state, and we were starting from zero.** The
+first thing the diff found was that nothing matched — 0 blocks of 141 agreed,
+because the reference arrives at `0x060001A0` carrying what the adapter's boot
+ROM left behind. `src/mars_main.c` now supplies it, in the same vein as the
+checksum and the comm words. Three parts of it are load-bearing rather than
+cosmetic: `gbr = 0x20004000`, the 32X system register block, which the cartridge
+addresses GBR-relative from `0x06004770` on and only ever loads from `r14` — so
+zero sent all of it to address 0; `sr = 0x000000F1`; and the slave's stack
+pointer, which the cartridge's own vector table gives as `0xC0000800` inside the
+cache data array, where the reference shows the slave entering with `0x0603F800`
+in SDRAM. The adapter does not take the slave's stack from the cartridge table.
+Agreement went from 0 to 128 of 141 blocks, and the master now gets far enough
+to upload the 32X palette — 471 of 512 bytes, where it had never been written.
 
-**Pivot condition.** If the answer comes back as "we never receive the command
-that triggers drawing", the problem is not the SH-2 but the scheduling model,
-and that becomes the work instead. It is already the common root of several
-stand-ins: the 68000 runs a whole frame and only then are queued commands
-serviced, which is why the comm handshakes need hand-delivery, why the SH-2
-command interrupt is acknowledged for it, and why the post-boot comparison is
-useless — the reference takes 102 vblanks on real timing where we inject one per
-frame at a fixed point.
+**What is left on the master is scheduling, not semantics.** The one remaining
+state divergence in the boot is the frame-select bit: our master's init runs to
+completion before the 68000 starts, and the 68000's own 32X init at
+`0x880738`-`0x880750` then toggles FS underneath it. On hardware those overlap —
+the 68000 does that while the master is still in the BIOS summing the cartridge.
+The `bclr`/`bset` loops there run one iteration in the reference and two in ours,
+which is the same fact seen from the other CPU.
+
+**The slave never receives its interrupt.** It diverges after 103 reference
+lines and does not rejoin: from its idle delay loop at `0x060002FC` the reference
+vectors away, runs the cache-array routine at `0xC0000004`, and comes back. Ours
+spins in the delay loop forever, because nothing delivers the 32X command
+interrupt to recompiled code.
+
+**The draw path, mined from the pre-reset segments.** Command 2 reaches
+`0x0600097C`; `0x060009A6` is not a handler but a command-*list* interpreter —
+`mov.b @r14+,r1`, then `braf` through a table of 16-bit offsets at `0x060009B4`,
+each entry returning to the fetch. Opcode 1 is `0x06000A50`, which runs on to the
+stub at `0x06000A88` whose `bsrf` enters `0x06001F18` — the routine holding the
+frame buffer write at `0x060021EA`. The reference's `pr = 0x06000A8E` at that
+write confirms the call site exactly.
+
+**So there is no 32X picture because the command's payload never arrives.** We
+*do* receive command 2 — thirteen times in 200 frames — and run its handler. The
+list it is supposed to interpret comes over the **DREQ FIFO at `0xA15112`**,
+which the runtime discards: `mars_reg_write` handles the DREQ control register
+and swallows the rest of the block. The 68000 sets the transfer up at
+`0x8819AE`-`0x8819E0` — length to `0xA15110`, source to `0xA15107`, raise the
+master's command interrupt at `0xA15103`, wait for the SH-2 to clear it, then
+push words into the FIFO. Our master reads a stale list at `0x06004xxx`, gets
+opcode 0 instead of opcode 1, and returns without drawing.
+
+That is the pivot condition, half met and more specific than it was written: not
+"we never receive the command", but "the command arrives empty". The fix is the
+DREQ FIFO plus real interrupt delivery to the SH-2s — which is the same missing
+piece the slave's divergence names, and it is the next work.
 
 ### Carried debts
 
 * **No regression gate on the runtime.** The front end has byte-exact
   round-trips and the recompiler has semantics tests, but nothing notices if the
   boot diff stops matching. `tools/diff68k.py --ref-lines 20213` is one command
-  and already exits non-zero on a fatal divergence.
+  and already exits non-zero on a fatal divergence; `tools/diffsh2.py --cpu
+  master` is now a second one.
+* **No interrupt delivery to the SH-2s, and no DREQ FIFO.** The two are one
+  problem: the 68000 raises the command interrupt and then streams the command
+  list through `0xA15112`, and the runtime does neither. It is why the slave
+  idles forever and why command 2 draws nothing.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
   during boot; `vdp_dma` returns early on both.
 * **The 32X frame-select polarity is a guess.** Displayed is taken to be

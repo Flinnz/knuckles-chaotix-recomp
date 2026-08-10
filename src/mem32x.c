@@ -322,6 +322,57 @@ void mars_trace_dump(const char *why) {
     fprintf(stderr, "total entries: %u\n", tring_n);
 }
 
+/* --- block-entry trace ---------------------------------------------------
+ * One line per basic block entered, carrying the whole register state, written
+ * in the shape the reference tracer uses for its own SHM/SHS lines so that
+ * `tools/diffsh2.py` parses both with one reader. The reference logs every
+ * instruction; filtered to the addresses in `sh2_functions[]` its stream is
+ * exactly this one, which is what makes the two comparable without the
+ * generated code having to carry a hook per instruction.
+ *
+ * The flag string is the reference's: M, Q, the interrupt mask as one hex
+ * digit, S, T — upper case for set. It is redundant with `sr`, and emitted
+ * anyway so a line of ours and a line of theirs are the same shape.
+ */
+int sh2_trace;
+static FILE *sh2_trace_f;
+/* Budgeted per CPU. The slave's idle handler is a tight poll that only the
+ * watchdog stops, so one shared budget would be spent entirely on it and the
+ * master — the half with the interesting init — would never be recorded. */
+static unsigned long sh2_trace_left[2];
+
+int sh2_trace_open(const char *path, unsigned long max_lines) {
+    sh2_trace_f = fopen(path, "w");
+    if (!sh2_trace_f) { perror(path); return 0; }
+    sh2_trace_left[0] = sh2_trace_left[1] = max_lines;
+    sh2_trace = 1;
+    return 1;
+}
+
+void sh2_trace_close(void) {
+    if (sh2_trace_f) fclose(sh2_trace_f);
+    sh2_trace_f = NULL;
+    sh2_trace = 0;
+}
+
+void sh2_block(SH2 *c, uint32_t addr) {
+    if (!sh2_trace_f) return;
+    if (!sh2_trace_left[c->slave & 1]) return;
+    sh2_trace_left[c->slave & 1]--;
+    fprintf(sh2_trace_f,
+            "%s  %08x  r0:%08x r1:%08x r2:%08x r3:%08x r4:%08x r5:%08x "
+            "r6:%08x r7:%08x r8:%08x r9:%08x r10:%08x r11:%08x r12:%08x "
+            "r13:%08x r14:%08x r15:%08x sr:%08x gbr:%08x vbr:%08x mach:%08x "
+            "macl:%08x pr:%08x %c%c%x%c%c\n",
+            c->slave ? "SHS" : "SHM", addr,
+            c->r[0], c->r[1], c->r[2], c->r[3], c->r[4], c->r[5], c->r[6],
+            c->r[7], c->r[8], c->r[9], c->r[10], c->r[11], c->r[12], c->r[13],
+            c->r[14], c->r[15], sh2_get_sr(c), c->gbr, c->vbr, c->mach,
+            c->macl, c->pr,
+            c->m ? 'M' : 'm', c->q ? 'Q' : 'q', c->imask & 0xF,
+            c->s ? 'S' : 's', c->t ? 'T' : 't');
+}
+
 /* The table is sorted by address, so binary search it. It lists every basic
  * block, not just function entries: a return goes to the instruction after a
  * call, which is mid-function. */

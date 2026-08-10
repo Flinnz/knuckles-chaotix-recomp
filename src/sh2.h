@@ -41,6 +41,20 @@ void     sh2_w32(SH2 *c, uint32_t a, uint32_t v);
 void     sh2_call(SH2 *c, uint32_t addr);
 void     sh2_unimplemented(SH2 *c, uint32_t addr, const char *what);
 
+/* Block-entry trace, for `tools/diffsh2.py`.
+ *
+ * The generated code calls this from every basic block label, which is the one
+ * granularity the two sides can be compared at: the reference logs every
+ * instruction, so filtering its stream to the block addresses we know about
+ * yields exactly this sequence. Between two block entries both machines ran the
+ * same straight-line code, so a state difference here is a real one.
+ *
+ * Off it costs a load and a not-taken branch per block; the dispatch-entry ring
+ * in mem32x.c is a different thing and stays as it was. */
+extern int sh2_trace;
+void     sh2_block(SH2 *c, uint32_t addr);
+#define SH2_BLOCK(c, a) do { if (sh2_trace) sh2_block((c), (a)); } while (0)
+
 /* --- status register packing ------------------------------------------- */
 static inline uint32_t sh2_get_sr(const SH2 *c) {
     return (c->t & 1) | ((c->s & 1) << 1) | ((c->imask & 0xF) << 4)

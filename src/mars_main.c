@@ -86,6 +86,58 @@ static void bios_comm_post(void) {
     }
 }
 
+/* The register state the 32X BIOS leaves behind when it hands control to the
+ * cartridge, taken from the reference trace's first line at each entry point.
+ * We have no BIOS image and start the SH-2s at the cartridge entries, so — like
+ * the comm words and the cartridge checksum — this has to be supplied.
+ *
+ * Three of these are load-bearing rather than cosmetic:
+ *
+ *   gbr = 0x20004000   the 32X system register block. The cartridge addresses
+ *                      the comm registers GBR-relative from 0x06004770 on, and
+ *                      the only thing that sets GBR first is `ldc r14,gbr` at
+ *                      0x0600592A — with r14 arriving holding that same base.
+ *                      Starting at zero sends all of it to address 0.
+ *   sr  = 0x000000F1   interrupts masked, T set.
+ *   the slave's stack  the cartridge's own slave vector table says 0xC0000800,
+ *                      inside the cache data array, which is what we were
+ *                      using. The reference shows the slave entering with
+ *                      0x0603F800, in SDRAM: the adapter does not take the
+ *                      slave's stack from the cartridge table.
+ *
+ * The rest is scratch the BIOS happened to leave. It is copied verbatim because
+ * all-zero is a state the real machine never presents, and because it is what
+ * makes a register comparison in tools/diffsh2.py mean something instead of
+ * drowning in differences we already know about.
+ */
+typedef struct { uint32_t r[16], sr, gbr, vbr, pr; } Handoff;
+
+static const Handoff bios_handoff[2] = {
+    {   /* master, at 0x060001A0 */
+        { 0x4D5F4F4B, 0x04B00000, 0x00000004, 0x0000FFFF,
+          0x0000FFFF, 0x00000000, 0x00000001, 0x00000000,
+          0x060001A0, 0x06009000, 0x00000000, 0x0000076C,
+          0x0000076C, 0x220003E0, 0x20004000, 0x06040000 },
+        0x000000F1, 0x20004000, 0x06000000, 0x00000000 },
+    {   /* slave, at 0x060001A4 */
+        { 0x535F4F4B, 0x00000001, 0x4D5F4F4B, 0x00000000,
+          0x00000000, 0x00000000, 0x00000000, 0x00000000,
+          0x060001A4, 0xFFFFFE92, 0x00000000, 0x00000000,
+          0x00000000, 0x220003E4, 0x20004000, 0x0603F800 },
+        0x000000F1, 0x20004000, 0x06000080, 0x000001AE },
+};
+
+static void handoff(SH2 *c, int slave) {
+    const Handoff *h = &bios_handoff[slave];
+    memset(c, 0, sizeof *c);
+    memcpy(c->r, h->r, sizeof c->r);
+    sh2_set_sr(c, h->sr);
+    c->gbr = h->gbr;
+    c->vbr = h->vbr;
+    c->pr = h->pr;
+    c->slave = slave;
+}
+
 /* The picture is the Mega Drive's with the 32X bitmap composited over it.
  *
  * Packed pixel and direct colour both start with a per-line table of 16-bit
@@ -135,8 +187,8 @@ int main(int argc, char **argv) {
     const char *rompath = argc > 1 && argv[1][0] != '-' ? argv[1]
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
-    const char *trace68k = NULL, *dump_vdp = NULL;
-    unsigned long trace68k_lines = 400000;
+    const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
+    unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             headless_frames = atoi(argv[i + 1]);
@@ -146,6 +198,10 @@ int main(int argc, char **argv) {
             trace68k = argv[++i];
         else if (!strcmp(argv[i], "--trace68k-lines") && i + 1 < argc)
             trace68k_lines = strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--trace-sh2") && i + 1 < argc)
+            tracesh2 = argv[++i];
+        else if (!strcmp(argv[i], "--trace-sh2-lines") && i + 1 < argc)
+            tracesh2_lines = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dump-vdp") && i + 1 < argc)
             dump_vdp = argv[++i];
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc)
@@ -168,17 +224,12 @@ int main(int argc, char **argv) {
            mars.rom_size, src, 0x06000000u + dst, size);
 
     SH2 sh2, slave;
-    memset(&sh2, 0, sizeof sh2);
-    sh2.r[15] = 0x06040000u;
-    sh2.vbr = 0x06000000u;
+    handoff(&sh2, 0);
+    handoff(&slave, 1);
     sh2.pc = start;
 
-    /* The slave has its own vector table at 0x06000080; entry 1 is its stack
-     * pointer, exactly as entry 1 of the master's table is the master's. */
-    memset(&slave, 0, sizeof slave);
-    slave.slave = 1;
-    slave.vbr = 0x06000080u;
-    slave.r[15] = sh2_r32(&slave, 0x06000084u);
+    /* Opened before either SH-2 runs: the boot is the part with an oracle. */
+    if (tracesh2 && !sh2_trace_open(tracesh2, tracesh2_lines)) return 1;
 
     /* Master init. It ends by waiting for a command, which the watchdog turns
      * into an unwind rather than a hang. */
@@ -265,6 +316,7 @@ int main(int argc, char **argv) {
     }
 
     trace68k_close();
+    sh2_trace_close();
     if (mars.trace) mars_trace_dump("after the frame loop");
 
     /* Everything the Mega Drive picture is made of, so a renderer bug can be
