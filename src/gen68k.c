@@ -57,6 +57,60 @@ void gen68k_init_vectors(void) {
     memcpy(&gen.vecram[0xC0], bios_helper_c0, sizeof bios_helper_c0);
 }
 
+/* --- what the 32X BIOS puts in the comm registers --------------------------
+ *
+ * We have no BIOS image and start the SH-2s at the cartridge entry points, so
+ * these have to be supplied; the reference shows all of them written by SH-2
+ * code below 0x00000300, which is the adapter's boot ROM rather than the
+ * cartridge.
+ *
+ *   comm 4    the cartridge checksum, summed by the master at 0x00000278 and
+ *             posted at 0x00000284. The 68000 waits for it at 0x8807C2 and then
+ *             compares it against the header's own word at 0x88018E.
+ *   comm 0-3  "M_OK" and "S_OK", written by the slave around 0x000001C0. The
+ *             68000 waits for those at 0x8809A6 and 0x8809B2.
+ *
+ * None of it can be posted before the 68000 starts, because the 68000 zeroes
+ * these registers itself as part of its own boot — comm 4 at 0x0003F6, comm 0-3
+ * at 0x8806F0 — and only then waits for the BIOS to fill them. So each value is
+ * delivered on the 68000's own next read after it has done that clearing, which
+ * from its side is indistinguishable from the BIOS having got there first.
+ *
+ * Delivering at the read rather than once a frame is what makes it survive the
+ * slave: its sound driver uses comm 4 for its own traffic, and once the PWM
+ * timer runs it writes there 366 times a frame. On hardware the ordering is the
+ * same and never collides — the 68000 reaches 0x8807C2 at reference line
+ * 378,847, the slave enters cartridge code at 379,065, and its first PWM
+ * interrupt is at 379,271, by which point the handshake is long done.
+ */
+uint16_t mars_rom_checksum(void) {
+    uint32_t sum = 0;
+    for (uint32_t o = 0x200; o + 1 < mars.rom_size; o += 2)
+        sum += ((uint16_t)mars.rom[o] << 8) | mars.rom[o + 1];
+    return (uint16_t)sum;
+}
+
+static struct { int cleared_sum, cleared_ok, sum_done, ok_done; } bios;
+
+static void bios_comm_write(unsigned i, uint16_t v) {
+    if (v) return;
+    if (i == 4) bios.cleared_sum = 1;
+    if (i < 4 && !mars.comm[0] && !mars.comm[1] && !mars.comm[2] && !mars.comm[3])
+        bios.cleared_ok = 1;
+}
+
+static void bios_comm_read(unsigned i) {
+    if (i == 4 && bios.cleared_sum && !bios.sum_done) {
+        mars.comm[4] = mars_rom_checksum();
+        bios.sum_done = 1;
+    }
+    if (i < 4 && bios.cleared_ok && !bios.ok_done) {
+        mars.comm[0] = 0x4D5F; mars.comm[1] = 0x4F4B;   /* M_OK */
+        mars.comm[2] = 0x535F; mars.comm[3] = 0x4F4B;   /* S_OK */
+        bios.ok_done = 1;
+    }
+}
+
 static uint32_t rom_at(uint32_t a) {
     if (IN(a, 0x880000u, 0x900000u)) return a - 0x880000u;
     if (IN(a, 0x900000u, 0xA00000u))
@@ -139,7 +193,9 @@ static int mars_reg_read(uint32_t a, uint16_t *out) {
     case 0xA1510A: *out = gen.dreq_ctl; return 1;
     default:
         if (IN(a & ~1u, 0xA15120u, 0xA15130u)) {
-            *out = mars.comm[((a & ~1u) - 0xA15120u) / 2];
+            unsigned i = (unsigned)(((a & ~1u) - 0xA15120u) / 2);
+            bios_comm_read(i);
+            *out = mars.comm[i];
             return 1;
         }
         if (IN(a & ~1u, 0xA15130u, 0xA15140u)) { *out = 0; return 1; } /* PWM */
@@ -181,6 +237,7 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
         if (IN(a & ~1u, 0xA15120u, 0xA15130u)) {
             unsigned i = (unsigned)(((a & ~1u) - 0xA15120u) / 2);
             mars.comm[i] = v;
+            bios_comm_write(i, v);
             /* Posting a command runs the SH-2 there and then. It is parked in
              * its dispatch poll whenever the 68000 is running, so this is where
              * the two actually meet — and the 68000 goes straight on to wait

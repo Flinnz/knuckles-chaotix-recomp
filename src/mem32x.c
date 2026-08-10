@@ -35,6 +35,22 @@ void mars_tick_budget(void) {
 
 void mars_reset_budget(void) { budget = 0; idle_reads = 0; }
 
+/* Both SH-2s park on a register poll that only the other CPU can end, and the
+ * other CPU cannot run while this one does — so a poll that has come back zero
+ * a thousand times running will never come back anything else. Unwinding is how
+ * the runtime says "this one is idle now": the master waits for a command in
+ * comm 0, the slave for its own command byte at 0x20004005, and both are then
+ * driven by whatever the 68000 does next.
+ *
+ * The bound only has to be past any debounce the code does, which is two reads.
+ * It used to be 200,000, which cost two million block entries of nothing every
+ * time either CPU went idle. */
+#define IDLE_POLLS 1024
+static void idle_poll(uint32_t v) {
+    if (v == 0 && ++idle_reads > IDLE_POLLS) longjmp(mars_bail, MARS_BAIL_IDLE);
+    if (v) idle_reads = 0;
+}
+
 static void trap(const char *what, uint32_t a) {
     if (mars.unknown++ < 16)
         fprintf(stderr, "  [mem] %s 0x%08X  (%s)\n", what, a,
@@ -167,6 +183,8 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
             return 1;
         case 0x14: case 0x16: case 0x18:
         case 0x1C: case 0x1E: return 1;       /* the other interrupt clears */
+        case 0x30: mars.pwm_ctl = (uint16_t)v; return 1;
+        case 0x32: mars.pwm_cycle = (uint16_t)v; return 1;
         case 0x20:                            /* comm 0: the 68000 rendezvous */
             /* Plain storage now. The SH-2 zeroing this is how it tells the
              * 68000 it is ready, and the 68000 waits for exactly that — at
@@ -210,9 +228,21 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         switch (a & 0xFE) {
         case 0x00: *out = mars.adapter; return 1;
         case 0x02: *out = mars.intctl; return 1;
-        case 0x04: *out = mars.bank; return 1;
+        case 0x04:
+            *out = mars.bank;
+            /* The slave's own command byte lives in the low half and it polls
+             * it forever; the master reads the same register as a bank select
+             * and must not be unwound for it. */
+            if (mars_running == &mars_cpu[1]) idle_poll(*out & 0xFF);
+            return 1;
         case 0x06: *out = mars.dreq_ctl; return 1;
         case 0x10: *out = mars.dreq_len; return 1;
+        case 0x30: *out = mars.pwm_ctl; return 1;
+        case 0x32: *out = mars.pwm_cycle; return 1;
+        /* The sample FIFOs. Bits 15 and 14 are the full and empty flags; both
+         * clear says "room for more", which is what keeps the driver from
+         * waiting on an audio sink that does not exist yet. */
+        case 0x34: case 0x36: case 0x38: *out = 0; return 1;
         case 0x12:                            /* the FIFO read port */
             /* The DMAC drains the FIFO directly, so nothing here reads it in
              * practice; answering honestly costs nothing and means a CPU that
@@ -225,12 +255,8 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         default:
             if ((a & 0xFE) >= 0x20 && (a & 0xFE) < 0x30) {
                 *out = mars.comm[((a & 0xFE) - 0x20) / 2];
-                if ((a & 0xFE) == 0x20) {
-                    /* Waiting on a command the 68000 will never send. */
-                    if (*out == 0 && ++idle_reads > 200000)
-                        longjmp(mars_bail, MARS_BAIL_IDLE);
-                    if (*out) idle_reads = 0;
-                }
+                /* Waiting on a command the 68000 cannot send while we run. */
+                if ((a & 0xFE) == 0x20) idle_poll(*out);
                 return 1;
             }
             *out = 0; return 1;
@@ -543,6 +569,27 @@ void mars_deliver_int(int slave, unsigned level) {
  * and comes back round to the head — where the 0 it writes is the
  * acknowledgement the 68000 is waiting for. */
 #define MASTER_POLL 0x060008F8u
+
+/* The PWM timer, which is the only clock the slave has.
+ *
+ * Its sound driver programs the two registers from 0xC0000008 and then idles in
+ * a delay loop; every PWM interrupt is one sample period, and nothing else ever
+ * wakes it. So the rate is the machine's own rather than a number picked to
+ * look right: the SH-2 clock divided by the programmed cycle length, divided
+ * again by TM, the interrupt-every-N-cycles field.
+ *
+ * This game writes cycle 0x417 and TM 1, which is 21,957 Hz and 366 interrupts
+ * to a 60 Hz frame. The reference logs 4,877 of them against 13 of the 68000's,
+ * or 375 apiece — the same number, measured the other way round.
+ */
+#define SH2_CLOCK 23011360u              /* NTSC 32X */
+
+unsigned mars_pwm_per_frame(void) {
+    unsigned tm = (mars.pwm_ctl >> 8) & 0xF;
+    unsigned cycle = mars.pwm_cycle & 0xFFF;
+    if (!tm || !cycle) return 0;         /* the timer interrupt is off */
+    return SH2_CLOCK / ((cycle + 1) * tm) / 60;
+}
 
 void mars_run_command(void) {
     mars_reset_budget();

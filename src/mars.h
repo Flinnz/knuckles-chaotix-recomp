@@ -35,6 +35,13 @@ typedef struct {
     unsigned fifo_n;
     uint32_t dma_words;      /* words the DMAC has moved, for reporting */
 
+    /* PWM. The slave's sound driver is interrupt-driven and nothing else wakes
+     * it, so these two registers are what its clock is made of — see
+     * mars_pwm_per_frame(). No audio comes out yet; the sample FIFOs accept
+     * writes and report space so the driver never stalls on them. */
+    uint16_t pwm_ctl, pwm_cycle;
+    uint32_t pwm_ints;       /* delivered, for reporting */
+
     /* 32X VDP registers */
     uint16_t bitmap_mode, shift, fill_len, fill_start, fill_data, fbctl;
 
@@ -107,9 +114,19 @@ extern SH2 mars_cpu[2];          /* 0 = master, 1 = slave */
  * — it raises the request and then spins until the handler acknowledges it. */
 void mars_deliver_int(int slave, unsigned level);
 #define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
+#define MARS_INT_PWM 6           /* the PWM timer, which only the slave takes */
+
+/* How many PWM interrupts fall in one 60 Hz frame, from the registers the
+ * slave itself programmed. Zero when the timer is off. */
+unsigned mars_pwm_per_frame(void);
 
 /* Draw the Mega Drive picture: planes, sprites and palette. */
 void genvdp_render(uint32_t *px, unsigned w, unsigned h);
+
+/* The Mega Drive checksum the adapter's boot ROM computes over the cartridge:
+ * 16-bit words from 0x200 to the end. It reproduces the header word of both the
+ * JU and E images exactly. */
+uint16_t mars_rom_checksum(void);
 
 /* Seed the 256 bytes the adapter supplies at 0x000000 — see src/gen68k.c. Must
  * run before the 68000's reset, which fetches its vectors from there. */

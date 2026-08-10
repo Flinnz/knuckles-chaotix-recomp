@@ -42,50 +42,6 @@ static uint16_t be16(const uint8_t *p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
-/* The sum the adapter's boot ROM computes over the cartridge: 16-bit words from
- * 0x200 to the end, kept to 16 bits. That is the ordinary Mega Drive checksum,
- * and it reproduces the header word of both the JU and E images exactly. */
-static uint16_t rom_checksum(void) {
-    uint32_t sum = 0;
-    for (uint32_t o = 0x200; o + 1 < mars.rom_size; o += 2)
-        sum += be16(&mars.rom[o]);
-    return (uint16_t)sum;
-}
-
-/* What the 32X BIOS posts into the comm registers during boot. We have no BIOS
- * image and start the SH-2s at the cartridge entry points, so these have to be
- * supplied; the reference trace shows all of them written by SH-2 code running
- * below 0x00000300, which is the adapter's boot ROM rather than the cartridge.
- *
- *   comm 4    the cartridge checksum, summed by the master at 0x00000278 and
- *             posted at 0x00000284. The 68000 waits for it at 0x8807C2 and then
- *             compares it against the header's own word at 0x88018E.
- *   comm 0-3  "M_OK" and "S_OK", written by the slave around 0x000001C0. The
- *             68000 waits for those at 0x8809A6 and 0x8809B2.
- *
- * None of it can be posted before the 68000 starts, because the 68000 zeroes
- * these registers itself as part of its own boot — comm 4 at 0x0003F6, comm 0-3
- * at 0x8806F0 — and only then waits for the BIOS to fill them. On hardware the
- * two CPUs are doing this concurrently. Here each value is delivered once, the
- * first time the 68000 is found to have cleared it, which from the 68000's side
- * is indistinguishable. Delivering once and not again matters: the 68000 clears
- * comm 4 again at 0x8807D2 and all of them at 0x880A00 once it is satisfied,
- * and from there on the registers carry real traffic.
- */
-static void bios_comm_post(void) {
-    static int sum_done, ok_done;
-    if (!sum_done && mars.comm[4] == 0) {
-        mars.comm[4] = rom_checksum();
-        sum_done = 1;
-    }
-    if (!ok_done && !mars.comm[0] && !mars.comm[1]
-                 && !mars.comm[2] && !mars.comm[3]) {
-        mars.comm[0] = 0x4D5F; mars.comm[1] = 0x4F4B;   /* M_OK */
-        mars.comm[2] = 0x535F; mars.comm[3] = 0x4F4B;   /* S_OK */
-        ok_done = 1;
-    }
-}
-
 /* The register state the 32X BIOS leaves behind when it hands control to the
  * cartridge, taken from the reference trace's first line at each entry point.
  * We have no BIOS image and start the SH-2s at the cartridge entries, so — like
@@ -247,8 +203,8 @@ int main(int argc, char **argv) {
            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3]);
 
     printf("  cartridge checksum 0x%04X, header says 0x%04X%s\n",
-           rom_checksum(), be16(&mars.rom[H_CHECKSUM]),
-           rom_checksum() == be16(&mars.rom[H_CHECKSUM]) ? "" : "  MISMATCH");
+           mars_rom_checksum(), be16(&mars.rom[H_CHECKSUM]),
+           mars_rom_checksum() == be16(&mars.rom[H_CHECKSUM]) ? "" : "  MISMATCH");
 
     gen68k_init_vectors();
     m68k_init();
@@ -281,16 +237,28 @@ int main(int argc, char **argv) {
     unsigned frames = 0;
     unsigned limit = headless_frames ? (unsigned)headless_frames : 0;
     while (running) {
-        m68k_execute(CYCLES_PER_FRAME);
+        /* The frame is run in slices with a PWM interrupt between each, rather
+         * than as one block with the interrupts bunched at the end. The slave's
+         * sound driver is the only thing that takes them and it does a fixed
+         * amount of work per interrupt, so what the spacing buys is not audio
+         * timing — it is that the two CPUs interleave the way the reference
+         * shows them interleaving, which is what the trace comparison sees. */
+        unsigned pwm = mars_pwm_per_frame();
+        if (pwm) {
+            unsigned slice = CYCLES_PER_FRAME / pwm;
+            for (unsigned i = 0; i < pwm; i++) {
+                m68k_execute(slice);
+                mars_deliver_int(1, MARS_INT_PWM);
+                mars.pwm_ints++;
+            }
+            m68k_execute(CYCLES_PER_FRAME - slice * pwm);
+        } else {
+            m68k_execute(CYCLES_PER_FRAME);
+        }
         /* A vertical interrupt is what the engine's main loop waits on. */
         m68k_set_irq(6);
         m68k_execute(2000);
         m68k_set_irq(0);
-
-        bios_comm_post();
-        /* Commands are no longer collected here and replayed at the end of the
-         * frame: the 68000 runs the SH-2 at the moment it posts one, which is
-         * the only ordering the acknowledgement handshake works under. */
 
         frames++;
         if (!headless_frames) {
@@ -337,6 +305,8 @@ int main(int argc, char **argv) {
     printf("  comm: %04X %04X %04X %04X   DMA words to SH-2: %u\n",
            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3],
            mars.dma_words);
+    printf("  PWM: ctl %04X cycle %04X -> %u int/frame, %u delivered\n",
+           mars.pwm_ctl, mars.pwm_cycle, mars_pwm_per_frame(), mars.pwm_ints);
     printf("  VDP: dma %u, reg1=%02X addr=%04X\n",
            gen.dma_done, gen.vdpreg[1], gen.vdp_addr);
     printf("  32X: bitmap mode 0x%04X  palette %s\n", mars.bitmap_mode,

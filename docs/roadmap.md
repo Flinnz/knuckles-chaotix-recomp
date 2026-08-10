@@ -511,6 +511,43 @@ The 32X image also degrades after frame ~350: the line table becomes 256 entries
 all holding the same offset, so every scanline scans out the same row and the
 screen goes flat. At 200 frames it is still a real picture.
 
+### The slave gets its clock
+
+The PWM interrupt is the slave's only clock, and its rate is the machine's own
+rather than a number picked to look right. The sound driver programs the two
+registers from `0xC0000008` — control `0x0105`, so TM is 1 and the interrupt
+comes once per PWM cycle, and cycle `0x417` — and then idles. SH-2 clock over
+cycle over TM is 21,957 Hz, or **366 interrupts to a 60 Hz frame**. The
+reference logs 4,877 of them against 13 of the 68000's, or 375 apiece: the same
+number arrived at from the other end.
+
+The frame is now run in slices with one interrupt between each, rather than as
+one block with the interrupts bunched at the end. What that buys is not audio
+timing — nothing consumes the samples yet — but that the two CPUs interleave the
+way the reference shows them interleaving, which is what the trace comparison
+sees.
+
+**`tools/diffsh2.py --cpu slave` now walks the whole extract with no fatal
+divergence**, where it used to part company for good at reference line 103. The
+slave takes the interrupt out of its delay loop, vectors through `0x060001F8`
+into the cache-array handler at `0xC0000004`, and comes back, exactly as the
+reference does.
+
+Two things had to move for it. **The BIOS comm words are delivered at the
+68000's own read** rather than once a frame, because the slave's driver uses
+comm 4 for its own traffic and, once the timer runs, writes there 366 times a
+frame — the checksum handshake was being trampled before the 68000 ever looked.
+The hardware ordering is the same and never collides: the 68000 reaches
+`0x8807C2` at reference line 378,847, the slave enters cartridge code at
+379,065, and its first PWM interrupt is at 379,271.
+
+And **both SH-2s now stop polling after 1,024 reads instead of 200,000**. Each
+one parks on a register only the other CPU can change, and the other CPU cannot
+run while it does, so a poll that has come back zero a thousand times will never
+come back anything else. The old bound cost two million block entries of nothing
+every time either CPU went idle; 200 headless frames went from 0.46s to 0.07s,
+with every other number identical.
+
 ### Carried debts
 
 * **No regression gate on the runtime.** The front end has byte-exact
@@ -521,11 +558,12 @@ screen goes flat. At 200 frames it is still a real picture.
 * **The asset table is barely filled.** Command 7 loads one slot per call and
   our 68000 issues it once; a third of the objects drawn therefore dereference
   a null pointer.
-* **Only the command interrupt is delivered.** The slave takes 2,197 PWM
-  interrupts in one reference segment and we raise none, so it still idles in
-  the delay loop the diff caught it in — `tools/diffsh2.py --cpu slave` goes
-  fatal at reference line 103 and will keep doing so until it has a timer to
-  drive that interrupt from.
+* **The slave's handler runs far too long.** With the timer in, the slave diff
+  reaches the whole extract, but at `0xC0000132` we run 75,923 instructions
+  where the reference runs 3. Nothing consumes the PWM samples, so something in
+  there is looping on a condition an audio sink would clear.
+* **No audio.** The sample FIFOs accept writes and report space so the driver
+  never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
   during boot; `vdp_dma` returns early on both.
 * **The 32X frame-select polarity is a guess.** Displayed is taken to be
