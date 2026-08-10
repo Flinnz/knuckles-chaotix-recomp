@@ -203,9 +203,58 @@ never executes 0x88099E, the loop ours spins in. Its path is
 0x880824 `bpl 0x8809A6`. Ours takes a different branch somewhere upstream and
 lands in code the real machine never runs.
 
-Next: diff our 68000's execution against the reference line by line to find the
-first divergent PC. That is a mechanical comparison now that the oracle exists,
-rather than the inference this had been relying on.
+**The comparison is now mechanical.** `build/mars --trace68k FILE` logs one line
+per 68000 instruction — PC, opcode word and the register state before it
+executes — and `tools/diff68k.py` aligns that against the reference, finds the
+reset in the logs itself, and reports every difference with both register sets.
+
+Aligning the two took one insight. The reference tracer does not log a complete
+stream: it collapses repeats and reports each run as `[Omitted: N]`. Mirroring
+that policy is the wrong move, because our trip counts legitimately differ from
+the reference's — it spins 8,277 times on a VDP busy bit our model clears
+immediately, so any prediction built on those counts lands 16,000 instructions
+into unrelated code. Instead our side logs everything, alignment is a monotone
+forward search, and the counts are used for *diagnosis*: comparing what we ran
+between two reference lines against what they ran turns a differing trip count
+into a finding rather than a lost alignment.
+
+**18,614 of the reference's 20,178 boot instructions now agree in lock step**,
+and the two bugs in between are found rather than guessed at.
+
+The first was mundane and had been hiding since the 68000 was added:
+`src/m68kconf.h` never took effect. Musashi's sources say `#include
+"m68kconf.h"`, which a quoted include resolves to the copy next to them in
+`third_party/`, so `-Isrc` never overrode anything. Forcing ours in first claims
+the shared header guard and the vendored file expands to nothing.
+
+The second was the divergence itself, at **0x880790**: `move.b ($a15180),d2`
+reads the 32X bitmap mode register, and the security check at 0x880798 refuses
+to boot unless bit 15 is set. We returned 0, so the 68000 fell into the failure
+path — which is exactly how it ended up spinning at 0x88099E. Bit 15 reads back
+set whatever is written: the boot writes 0x0000 there at 0x880730, and a later
+word read at 0x88196A still returns 0x8000. Open bus does not explain it, since
+the word the 68000 had just prefetched at that point was 0x0040. The bit's
+*meaning* is unidentified — it appears in no register description we have — but
+its behaviour is pinned by two independent reads, and modelling it moved the
+68000 eleven reference instructions further, onto the reference's own path.
+
+**Where it stops now:** at 0x8807CC. The 68000 reads the SH-2 program checksum
+from the MARS header at 0x88018E — 0xB61C — and then spins at 0x8807C2 until
+comm register 4 holds the same value. The reference's master SH-2 posts it after
+the 68000 has waited 336,174 instructions; ours never posts it, because our
+scheduler runs the SH-2's whole init before the 68000 starts and then only
+services queued commands. This is the rendezvous problem the two stand-ins were
+papering over, and it is the next thing to fix.
+
+The remaining divergences are all understood and none is fatal. Polls that
+finish instantly for us where the reference waits: the VDP DMA-busy bit
+(16,555 instructions against our 1) and the 32X autofill FEN bit (4,330 against
+1,786, twice). Registers that differ without changing any branch: the version
+register's hardware-revision nibble, the undriven bits 14-8 of the bitmap mode
+register, and one extra iteration clearing FM at 0xA15100 because our SH-2 ran
+to completion first. And one path the reference takes that we do not — its
+controller ports are already initialised, so it skips the cold-boot shortcut at
+0x000424 — where both roads reconverge four instructions later at 0x000436.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

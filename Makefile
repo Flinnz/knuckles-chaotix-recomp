@@ -2,14 +2,20 @@ MUSASHI = third_party/musashi
 GEN     = build/musashi
 SDLCF  := $(shell pkg-config --cflags sdl2)
 SDLLD  := $(shell pkg-config --libs sdl2)
-CFLAGS  = -O2 -Wall -Wno-unused-label -Isrc -I$(MUSASHI) -I$(GEN) $(SDLCF)
+# -include is what makes src/m68kconf.h effective: Musashi's own sources say
+# #include "m68kconf.h", which a quoted include resolves to the copy sitting
+# next to them in third_party/, so -Isrc alone never overrode anything. Forcing
+# ours in first claims the shared M68KCONF__HEADER guard and the vendored file
+# then expands to nothing.
+CFLAGS  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
+          -Isrc -I$(MUSASHI) -I$(GEN) $(SDLCF)
 
 # m68kcpu.c includes m68kfpu.c unconditionally, which needs softfloat even for
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
-SRC = build/sh2_recomp.c src/mem32x.c src/gen68k.c src/mars_main.c \
+SRC = build/sh2_recomp.c src/mem32x.c src/gen68k.c src/trace68k.c src/mars_main.c \
       $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c $(MUSASHI)/softfloat/softfloat.c
 
-build/mars: $(SRC) src/mars.h src/sh2.h $(GEN)/m68kops.c
+build/mars: $(SRC) src/mars.h src/sh2.h src/m68kconf.h Makefile $(GEN)/m68kops.c
 	clang $(CFLAGS) -o $@ $(SRC) $(SDLLD)
 
 build/sh2_recomp.c:

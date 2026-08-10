@@ -77,4 +77,9 @@ extern jmp_buf mars_bail;
 
 void mars_set_commands(const uint16_t *cmds, unsigned n);
 
+/* One line per 68000 instruction, in the reference tracer's format, for
+ * `tools/diff68k.py` to compare against a known-good emulator's log. */
+int trace68k_open(const char *path, unsigned long max_lines);
+void trace68k_close(void);
+
 #endif

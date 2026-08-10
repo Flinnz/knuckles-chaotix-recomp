@@ -63,11 +63,17 @@ int main(int argc, char **argv) {
     const char *rompath = argc > 1 && argv[1][0] != '-' ? argv[1]
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
+    const char *trace68k = NULL;
+    unsigned long trace68k_lines = 400000;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             headless_frames = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--trace"))
             mars.trace = 1;
+        else if (!strcmp(argv[i], "--trace68k") && i + 1 < argc)
+            trace68k = argv[++i];
+        else if (!strcmp(argv[i], "--trace68k-lines") && i + 1 < argc)
+            trace68k_lines = strtoul(argv[++i], NULL, 0);
 
     FILE *f = fopen(rompath, "rb");
     if (!f) { perror(rompath); return 1; }
@@ -126,8 +132,13 @@ int main(int argc, char **argv) {
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
+    /* The 68000 manual leaves the condition codes undefined after reset, and
+     * Musashi happens to come up with Z set. Zero them so a trace comparison
+     * starts from the same defined state the reference emulator starts from. */
+    m68k_set_reg(M68K_REG_SR, 0x2700);
     printf("68000 reset: PC=0x%06X SP=0x%06X\n",
            m68k_get_reg(NULL, M68K_REG_PC), m68k_get_reg(NULL, M68K_REG_SP));
+    if (trace68k && !trace68k_open(trace68k, trace68k_lines)) return 1;
 
     SDL_Window *win = NULL; SDL_Renderer *ren = NULL; SDL_Texture *tex = NULL;
     static uint32_t px[W * H];
@@ -177,6 +188,8 @@ int main(int argc, char **argv) {
         }
         if (limit && frames >= limit) running = 0;
     }
+
+    trace68k_close();
 
     printf("\nafter %u frames:\n", frames);
     printf("  68000 PC=0x%06X   commands posted %u, serviced %u\n",

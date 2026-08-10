@@ -214,9 +214,12 @@
 /* If ON, CPU will call the instruction hook callback before every
  * instruction.
  */
+/* ON so that `--trace68k` can log one line per instruction for comparison
+ * against a reference emulator's trace. The callback is installed at runtime,
+ * and Musashi skips it when none is set, so this costs an indirect-call test
+ * per instruction when tracing is off. */
 #ifndef M68K_INSTRUCTION_HOOK
-#define M68K_INSTRUCTION_HOOK       M68K_OPT_OFF
-#define M68K_INSTRUCTION_CALLBACK(pc) your_instruction_hook_function(pc)
+#define M68K_INSTRUCTION_HOOK       M68K_OPT_ON
 #endif
 
 

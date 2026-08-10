@@ -35,6 +35,21 @@ static void trap(const char *what, uint32_t a) {
         fprintf(stderr, "  [mem] %s 0x%08X\n", what, a);
 }
 
+/* Bit 15 of the bitmap mode register reads back set whatever is written to it.
+ * The cartridge's 32X check at 0x880790 reads the register and refuses to boot
+ * unless the bit is there, and with it clear the 68000 falls into the failure
+ * path that ends spinning at 0x88099E.
+ *
+ * Two reads in the reference trace pin the behaviour down. The boot writes
+ * 0x0000 to the register at 0x880730, so the bit is not simply what was
+ * written; a later word read at 0x88196A returns 0x8000, and open bus cannot
+ * explain it, because the word the 68000 had just prefetched there was 0x0040.
+ * The byte read at 0x880790 additionally returns junk in bits 14-8, which do
+ * look undriven — those are modelled as zero, which is enough for every test
+ * this game makes. What the bit *means* is not identified; it appears in no
+ * register description we have. */
+#define BITMAP_MODE_SET 0x8000u
+
 /* The SH-2 spends much of the boot polling hardware. Nothing here advances on
  * its own, so a free-running counter stands in for the passage of time and
  * lets those loops terminate. */
@@ -89,7 +104,7 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
     }
     if (a >= 0x4100 && a < 0x4200) {          /* VDP registers */
         switch (a & 0xFE) {
-        case 0x00: mars.bitmap_mode = (uint16_t)v; return 1;
+        case 0x00: mars.bitmap_mode = (uint16_t)v & ~BITMAP_MODE_SET; return 1;
         case 0x02: mars.shift = (uint16_t)v; return 1;
         case 0x04: mars.fill_len = (uint16_t)v; return 1;
         case 0x06: mars.fill_start = (uint16_t)v; return 1;
@@ -129,7 +144,7 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
     }
     if (a >= 0x4100 && a < 0x4200) {
         switch (a & 0xFE) {
-        case 0x00: *out = mars.bitmap_mode; return 1;
+        case 0x00: *out = mars.bitmap_mode | BITMAP_MODE_SET; return 1;
         case 0x02: *out = mars.shift; return 1;
         case 0x0A: *out = vdp_status(); return 1;
         default: *out = 0; return 1;
