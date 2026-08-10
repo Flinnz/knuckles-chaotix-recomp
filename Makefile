@@ -27,8 +27,34 @@ $(GEN)/m68kops.c: $(MUSASHI)/m68k_in.c
 	clang -O2 -o $(GEN)/m68kmake $(MUSASHI)/m68kmake.c
 	cd $(GEN) && ./m68kmake . ../../$(MUSASHI)/m68k_in.c
 
-.PHONY: run clean
+.PHONY: run clean check
 run: build/mars
 	./build/mars
+
+# Everything that can say "this stopped being true", in the order a break is
+# cheapest to understand: the front end reassembles both cartridges byte for
+# byte, the recompiler still computes the right answers, and then the runtime
+# diffs. Those exit non-zero on a divergence control flow never recovers from
+# *and* on a run that stopped short, so a build that crashes early fails here
+# rather than passing quietly. The extracts under build/ are rebuilt by the
+# tools themselves if missing.
+#
+# The master is held to its boot rather than the whole extract. That is where
+# the signal is — 158 of 177 blocks in lock step, against 176 of 23,077 further
+# out, where our trip counts through the poll loops diverge by design — and
+# covering the rest needs a six-million-line trace to compare against.
+check: build/mars
+	python3 tools/emit_asm.py --verify
+	python3 tools/emit_asm.py --verify --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x"
+	python3 tools/test_recomp.py
+	./build/mars --frames 300 --trace68k build/trace68k.txt \
+	    --trace68k-lines 2000000 --trace-sh2 build/tracesh2.txt >/dev/null
+	python3 tools/diff68k.py --ref-lines 20213 --rows 0 --detail 0
+	python3 tools/diff68k.py --rows 0 --detail 0
+	python3 tools/diffsh2.py --cpu master --window 300000 --ref-blocks 200 \
+	    --rows 0 --detail 0
+	python3 tools/diffsh2.py --cpu slave  --window 300000 --rows 0 --detail 0
+	@echo "all gates pass"
+
 clean:
 	rm -f build/mars build/sh2_recomp.c build/sh2_recomp.o

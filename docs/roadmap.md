@@ -548,20 +548,71 @@ come back anything else. The old bound cost two million block entries of nothing
 every time either CPU went idle; 200 headless frames went from 0.46s to 0.07s,
 with every other number identical.
 
+### The 68000 oracle works past the boot
+
+**52,171 of the reference's 54,081 instructions now agree — 96.5%, with no
+fatal divergence anywhere in the extract.** It was 22,037 when this was written
+off as "needs interrupt timing modelled", and 32,662 after this session's
+earlier fixes. Almost none of the remaining gap was timing.
+
+The frame is run **a scanline at a time** now, with everything timed hanging off
+that one clock: the vertical interrupt at line 224, which is where the
+reference's own markers put it once the display is up (`Vblank SR=3 @ 224,n`),
+and the VDP's VBLANK bit, so a wait loop sees the real thing rather than a
+free-running counter that flipped on whichever read happened to land. That was
+the change the gap was blamed on, and on its own it moved nothing.
+
+**What actually mattered was the controller.** We modelled no pads at all. The
+identification routine at `0x8F45F0` pulses TH, reads the low nibble twice and
+maps the pair through a table at `0x8F4620`; an empty port floats high both
+times and comes out as index 14, where a pad answers 0xF then 0x3 and comes out
+as 12 — which is the `jsr (pc,d0.w)` target `0x8F45E8` the reference takes. We
+were taking the empty-port branch and skipping 74 instructions of pad handling,
+204 times over the extract. Modelling a pad took agreement to 40,561.
+
+And it is a **six-button** pad. The routine at `0x8F46EE` pulses TH three more
+times and branches when the low nibble comes back zero, which is the six-button
+signature and which a three-button pad never produces. The reference takes that
+branch. Sequencing the pad by TH pulse count took agreement to 52,080.
+
+The last piece was the interrupt vector. The adapter's table names a *stub*
+where the cartridge's own header names the stub's target — the cartridge shows
+this itself by writing `0x008802A2` into vector 28 at `0x88077E`, and
+`0x8802A2` is `jmp 0xffffc036`, exactly what its header holds for that vector.
+Vector 30 is the same shape, and the reference executes `0x8802AE` on every one
+of its 102 vblanks.
+
+What remains is 244 register differences and 143 trip counts, nearly all one
+poll: VDP status bit 7, the vertical-interrupt-pending flag, which we never set,
+so `0x883254` never spins where the reference does. Benign, and in the same
+class as the polls already listed.
+
+### A gate, and a bound that was costing more than it bought
+
+`make check` runs all of it: both images' byte-exact round-trips, the recompiler
+semantics tests, and the four trace diffs. The diffs already exited non-zero on
+a fatal divergence; they now also fail when a run **stops short**, which is what
+a crash or a truncated trace looks like and which used to read as a clean pass —
+the walk simply ended when our stream ran out, recording nothing.
+
+The idle-poll bound came down from 200,000 to 64. Each SH-2 parks on a register
+only the other CPU can change, and the other cannot run while it does, so a poll
+that has come back zero sixty-four times never comes back anything else. The old
+number bought nothing and cost two million block entries every time either CPU
+went idle — and the slave's idle handler burns 99 delay steps per poll, so it
+was multiplied again in the trace. That also explains the slave's apparent
+runaway at `0xC0000132`: 75,923 instructions against the reference's 3 was not a
+handler looping, it was the init's idle spin being counted into the interval.
+
 ### Carried debts
 
-* **No regression gate on the runtime.** The front end has byte-exact
-  round-trips and the recompiler has semantics tests, but nothing notices if the
-  boot diff stops matching. `tools/diff68k.py --ref-lines 20213` is one command
-  and already exits non-zero on a fatal divergence; `tools/diffsh2.py --cpu
-  master` is now a second one.
 * **The asset table is barely filled.** Command 7 loads one slot per call and
   our 68000 issues it once; a third of the objects drawn therefore dereference
   a null pointer.
-* **The slave's handler runs far too long.** With the timer in, the slave diff
-  reaches the whole extract, but at `0xC0000132` we run 75,923 instructions
-  where the reference runs 3. Nothing consumes the PWM samples, so something in
-  there is looping on a condition an audio sink would clear.
+* **VDP status bit 7 is never set.** The vertical-interrupt-pending flag, which
+  the engine polls at `0x883254`; it is most of what is left in the 68000 diff.
+* **No controller input.** The pads are modelled and identified, but nothing is
+  ever pressed — there is no input path into the runtime.
 * **No audio.** The sample FIFOs accept writes and report space so the driver
   never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills

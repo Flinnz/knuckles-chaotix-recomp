@@ -67,6 +67,8 @@ typedef struct {
     uint16_t io[16];
     uint16_t dreq_ctl;
     uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
+    uint32_t line;           /* scanline the 68000 is running inside */
+    uint8_t  pad_cycle[3], pad_th[3];   /* six-button pad sequencing */
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
 } Gen;
 
@@ -131,6 +133,10 @@ uint16_t mars_rom_checksum(void);
 /* Seed the 256 bytes the adapter supplies at 0x000000 — see src/gen68k.c. Must
  * run before the 68000's reset, which fetches its vectors from there. */
 void gen68k_init_vectors(void);
+
+/* Let the controller ports forget their TH pulse count, which the real pads do
+ * after an idle gap shorter than a frame. */
+void gen68k_frame_start(void);
 
 /* One line per 68000 instruction, in the reference tracer's format, for
  * `tools/diff68k.py` to compare against a known-good emulator's log. */

@@ -45,7 +45,7 @@ void mars_reset_budget(void) { budget = 0; idle_reads = 0; }
  * The bound only has to be past any debounce the code does, which is two reads.
  * It used to be 200,000, which cost two million block entries of nothing every
  * time either CPU went idle. */
-#define IDLE_POLLS 1024
+#define IDLE_POLLS 64
 static void idle_poll(uint32_t v) {
     if (v == 0 && ++idle_reads > IDLE_POLLS) longjmp(mars_bail, MARS_BAIL_IDLE);
     if (v) idle_reads = 0;

@@ -28,6 +28,10 @@
 #define H 224
 #define SCALE 2
 #define CYCLES_PER_FRAME 127840      /* 7.67 MHz / 60 */
+#define LINES_PER_FRAME 262          /* NTSC */
+#define CYCLES_PER_LINE (CYCLES_PER_FRAME / LINES_PER_FRAME)
+#define VBLANK_LINE 224              /* where the reference's markers put it */
+#define VBLANK_ACK_CYCLES 2000
 
 /* Entered through sh2_call so tail transfers trampoline rather than nest. */
 #define MASTER_RESET 0x060001A0u
@@ -243,22 +247,35 @@ int main(int argc, char **argv) {
          * amount of work per interrupt, so what the spacing buys is not audio
          * timing — it is that the two CPUs interleave the way the reference
          * shows them interleaving, which is what the trace comparison sees. */
-        unsigned pwm = mars_pwm_per_frame();
-        if (pwm) {
-            unsigned slice = CYCLES_PER_FRAME / pwm;
-            for (unsigned i = 0; i < pwm; i++) {
-                m68k_execute(slice);
+        /* The frame is run a scanline at a time, and everything timed hangs off
+         * that one clock: the vertical interrupt when the line reaches 224, the
+         * VDP's own VBLANK bit so a wait loop sees the same thing, and the
+         * slave's PWM interrupts spread across the lines they fall in.
+         *
+         * The reference's own interrupt markers are what fixes the line: after
+         * the display is up they all read "Vblank SR=3 @ 224,n". Taking it at
+         * the end of the frame instead — which is what this did — put every
+         * post-boot comparison out by however far into its wait loop the engine
+         * had got. */
+        gen68k_frame_start();
+        unsigned pwm = mars_pwm_per_frame(), acc = 0;
+        for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
+            gen.line = line;
+            m68k_execute(CYCLES_PER_LINE);
+            if (line == VBLANK_LINE) {
+                /* Held only long enough to be taken. The VDP would keep it
+                 * asserted until the handler acknowledged, and there is no
+                 * acknowledge path here — holding it would re-enter the handler
+                 * the moment it returned. */
+                m68k_set_irq(6);
+                m68k_execute(VBLANK_ACK_CYCLES);
+                m68k_set_irq(0);
+            }
+            for (acc += pwm; acc >= LINES_PER_FRAME; acc -= LINES_PER_FRAME) {
                 mars_deliver_int(1, MARS_INT_PWM);
                 mars.pwm_ints++;
             }
-            m68k_execute(CYCLES_PER_FRAME - slice * pwm);
-        } else {
-            m68k_execute(CYCLES_PER_FRAME);
         }
-        /* A vertical interrupt is what the engine's main loop waits on. */
-        m68k_set_irq(6);
-        m68k_execute(2000);
-        m68k_set_irq(0);
 
         frames++;
         if (!headless_frames) {

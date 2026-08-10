@@ -52,9 +52,27 @@ static const uint8_t bios_helper_c0[] = {
     0x4E, 0x75,
 };
 
+/* The adapter's table names a stub, where the cartridge's own names the stub's
+ * target. The cartridge shows this itself: at 0x88077E it writes 0x008802A2
+ * into vector 28, and 0x8802A2 is `jmp 0xffffc036` — which is exactly the value
+ * its own header holds for that vector. Vector 30, the vertical interrupt, is
+ * the same shape: the header says 0xFFFFC030 and 0x8802AE is `jmp 0xffffc030`.
+ * The reference executes 0x8802AE on every one of its 102 vblanks, so that is
+ * what the adapter has there, and seeding the header value skipped one
+ * instruction each time. */
+static const struct { uint8_t vec; uint32_t at; } vector_stubs[] = {
+    { 28, 0x008802A2 }, { 30, 0x008802AE },
+};
+
 void gen68k_init_vectors(void) {
     memcpy(gen.vecram, mars.rom, sizeof gen.vecram);
     memcpy(&gen.vecram[0xC0], bios_helper_c0, sizeof bios_helper_c0);
+    for (unsigned i = 0; i < sizeof vector_stubs / sizeof *vector_stubs; i++) {
+        uint8_t *p = &gen.vecram[vector_stubs[i].vec * 4];
+        uint32_t v = vector_stubs[i].at;
+        p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+        p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+    }
 }
 
 /* --- what the 32X BIOS puts in the comm registers --------------------------
@@ -109,6 +127,75 @@ static void bios_comm_read(unsigned i) {
         mars.comm[2] = 0x535F; mars.comm[3] = 0x4F4B;   /* S_OK */
         bios.ok_done = 1;
     }
+}
+
+/* --- the controller ports --------------------------------------------------
+ *
+ * Three ports, each a data register with a control register six bytes above it.
+ * A control bit of 1 makes that data bit an output, so a read gives back what
+ * was written for the outputs and the pad for the inputs. TH — bit 6 — is the
+ * only line the game drives, and it selects which half of a three-button pad
+ * answers. Everything is active low:
+ *
+ *     TH high    ? ? C B R L D U
+ *     TH low     ? ? S A 0 0 D U
+ *
+ * The two hard zeroes in the low half are the signature. The identification
+ * routine at 0x8F45F0 reads the low nibble with TH high, then again with TH
+ * low, and maps the pair through the table at 0x8F4620: a pad answers 0xF then
+ * 0x3 and comes out as index 12, which is the `jsr (pc,d0.w)` target 0x8F45E8
+ * the reference takes at 0x8F45CA. An empty port floats high both times and
+ * gives 14 instead, which is the branch we were taking by having no ports at
+ * all — 74 instructions of pad handling skipped, 204 times over the extract.
+ *
+ * Nothing is pressed yet; there is no input path into the runtime.
+ *
+ * And it is a *six*-button pad. The routine at 0x8F46EE pulses TH three more
+ * times after the identification and branches when the low nibble comes back
+ * zero, which is the six-button signature and which a three-button pad never
+ * produces. The reference takes that branch, so that is what was plugged into
+ * the machine the log came from.
+ *
+ * So the pad answers a rotating sequence keyed to how many times TH has fallen
+ * since it was last left alone, with nothing pressed:
+ *
+ *     TH high, any cycle    ? ? C B R L D U      (cycle 3 is ? ? C B M X Y Z)
+ *     TH low, cycle 3       ? ? S A 0 0 0 0      the signature
+ *     TH low, cycle 4       ? ? S A 1 1 1 1
+ *     TH low, otherwise     ? ? S A 0 0 D U
+ *
+ * The real pad forgets the count after about 1.5 ms of TH left high, which is
+ * shorter than a frame and longer than one read sequence, so clearing it once a
+ * frame is the same thing from the game's side.
+ */
+#define PAD_PORTS 3
+
+static uint8_t pad_lines(unsigned port, int th) {
+    if (th) return 0x7F;
+    switch (gen.pad_cycle[port]) {
+    case 3:  return 0x70;
+    case 4:  return 0x7F;
+    default: return 0x73;
+    }
+}
+
+static uint16_t pad_read(unsigned port) {
+    uint8_t ctrl = (uint8_t)gen.io[4 + port];
+    uint8_t out = (uint8_t)gen.io[1 + port];
+    uint8_t pad = pad_lines(port, out & 0x40);
+    return (uint16_t)((out & ctrl) | (pad & (uint8_t)~ctrl));
+}
+
+/* TH falling is what the pad counts. */
+static void pad_write(unsigned port, uint16_t v) {
+    uint8_t th = (v & 0x40) != 0;
+    if (gen.pad_th[port] && !th && gen.pad_cycle[port] < 8)
+        gen.pad_cycle[port]++;
+    gen.pad_th[port] = th;
+}
+
+void gen68k_frame_start(void) {
+    for (unsigned p = 0; p < PAD_PORTS; p++) gen.pad_cycle[p] = 0;
 }
 
 static uint32_t rom_at(uint32_t a) {
@@ -175,12 +262,16 @@ static void vdp_data(uint16_t v) {
 }
 
 static uint16_t vdp_status(void) {
-    /* Bit 3 VBLANK, bit 2 HBLANK, bit 9 FIFO empty. Advancing these is what
-     * lets the game's wait-for-vblank loops finish. */
-    uint32_t t = gen.ticks++;
+    /* Bit 3 VBLANK, bit 2 HBLANK, bit 9 FIFO empty.
+     *
+     * VBLANK is the real one now — the scanline the frame loop is running — so
+     * a wait-for-vblank loop takes as long as it takes rather than ending on
+     * whichever read happened to land. HBLANK stays on a free-running counter
+     * because the frame is only advanced a line at a time, and a bit that could
+     * not change inside a line is a bit a loop could wait on forever. */
     uint16_t s = 0x0200;
-    if ((t % 262) >= 224) s |= 0x0008;
-    if ((t % 20) >= 16) s |= 0x0004;
+    if (gen.line >= 224) s |= 0x0008;
+    if ((gen.ticks++ % 20) >= 16) s |= 0x0004;
     return s;
 }
 
@@ -283,9 +374,11 @@ unsigned int m68k_read_memory_16(unsigned int a) {
     if (a == 0xA130EC) return 0x4D41;      /* "MA" */
     if (a == 0xA130EE) return 0x5253;      /* "RS" */
     if (IN(a, 0xA10000u, 0xA10020u)) {
+        unsigned i = (a & 0x1F) >> 1;
         /* Version register: domestic, NTSC, no expansion, with the 32X bit. */
-        if (a == 0xA10000) return 0x00A0;
-        return gen.io[(a & 0x1F) >> 1];
+        if (i == 0) return 0x00A0;
+        if (i >= 1 && i <= PAD_PORTS) return pad_read(i - 1);
+        return gen.io[i];
     }
     uint16_t v;
     if (mars_reg_read(a, &v)) return v;
@@ -301,7 +394,12 @@ void m68k_write_memory_8(unsigned int a, unsigned int v) {
     a &= 0xFFFFFFu;
     if (a < sizeof gen.vecram) { gen.vecram[a] = (uint8_t)v; return; }
     if (IN(a, 0xFF0000u, 0x1000000u)) { gen.ram[a & 0xFFFFu] = (uint8_t)v; return; }
-    if (IN(a, 0xA10000u, 0xA10020u)) { gen.io[(a & 0x1F) >> 1] = (uint16_t)v; return; }
+    if (IN(a, 0xA10000u, 0xA10020u)) {
+        unsigned i = (a & 0x1F) >> 1;
+        gen.io[i] = (uint16_t)v;
+        if (i >= 1 && i <= PAD_PORTS) pad_write(i - 1, (uint16_t)v);
+        return;
+    }
     if (IN(a, 0xA00000u, 0xA10000u)) return;            /* Z80 space */
     if (IN(a, 0xA11000u, 0xA11400u)) return;            /* Z80 bus / reset */
     if (a == 0xA130F1) return;                          /* SRAM control */
@@ -329,7 +427,12 @@ void m68k_write_memory_16(unsigned int a, unsigned int v) {
         else if ((a & 0x1F) < 8) vdp_ctrl(w);
         return;
     }
-    if (IN(a, 0xA10000u, 0xA10020u)) { gen.io[(a & 0x1F) >> 1] = w; return; }
+    if (IN(a, 0xA10000u, 0xA10020u)) {
+        unsigned i = (a & 0x1F) >> 1;
+        gen.io[i] = w;
+        if (i >= 1 && i <= PAD_PORTS) pad_write(i - 1, w);
+        return;
+    }
     if (IN(a, 0xA00000u, 0xA10000u)) return;
     if (IN(a, 0xA11000u, 0xA11400u)) return;            /* Z80 bus / reset */
     if (mars_reg_write(a, w)) return;

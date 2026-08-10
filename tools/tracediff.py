@@ -262,6 +262,14 @@ def diff(ref, ours, window, hold, skip):
             run.span += 1
         i += di + 1
         j = p + 1
+
+    # Our stream running out while everything still matched is not agreement,
+    # it is a short run — and the walk above just ends when it happens, with
+    # nothing recorded. Say so, or a truncated trace reads as a clean pass.
+    if i < len(ref) and j >= len(ours):
+        d = Div(FLOW, i, len(ours))
+        d.exhausted = True
+        divs.append(d)
     return divs, agreed
 
 
@@ -348,7 +356,11 @@ def report(cpu, ref, ours, marks, divs, agreed, args, unit="instruction",
         print("\n  what each side does next:")
         print("    ref %s" % " -> ".join(cpu.addr(r.pc) for r in ref[i:i + 10]))
         print("    our %s" % " -> ".join(cpu.addr(r.pc) for r in ours[j:j + 10]))
-    return 1 if fatal else 0
+    # Stopping short is not a pass either. `exhausted` means our own trace ran
+    # out before the reference did, which is what a crashed or truncated run
+    # looks like — and a gate that called that success would sleep through
+    # exactly the failure it exists to catch.
+    return 1 if stop else 0
 
 
 # --------------------------------------------------------------- log search --
