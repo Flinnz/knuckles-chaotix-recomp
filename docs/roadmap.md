@@ -93,7 +93,7 @@ Still open before this milestone closes:
 * **Literal pool loads go through memory.** Correct, and leaves the constants
   patchable, but they are the obvious first optimisation.
 
-**M4 — runtime skeleton** 🔵 *SH-2 half running, 68000 half absent*
+**M4 — runtime skeleton** ✅ *both CPUs running, in step with the reference*
 
 `make run` boots the recompiled master SH-2 against a real 32X memory map:
 SDRAM, cartridge, framebuffer with its overwrite image, palette, the 32X system
@@ -106,10 +106,13 @@ selects packed-pixel mode and writes the framebuffer line table: 256 entries,
 what correct 32X video initialisation produces, and it is checkable rather than
 merely non-empty.
 
-**There is no picture yet, and that is the honest state.** In this game the
-68000 is the engine — it decides what to draw and posts commands to the SH-2s.
-With no 68000, the SH-2 initialises video and then waits, so the framebuffer
-holds a line table and nothing else, and the palette is never uploaded.
+*From here each milestone reads in order, and later paragraphs supersede earlier
+ones — the headings say where it ended up.*
+
+**There was no picture at that point, and that was the honest state.** In this
+game the 68000 is the engine — it decides what to draw and posts commands to the
+SH-2s. With no 68000, the SH-2 initialised video and then waited, so the frame
+buffer held a line table and nothing else, and the palette was never uploaded.
 
 Two stand-ins keep the SH-2 moving where it would rendezvous with the 68000:
 the "REDY" handshake word in SDRAM, and a scripted command queue on comm
@@ -305,7 +308,7 @@ dispatch loop that never returns becomes a finite call chain that unwinds. It
 is why the master "returns" at all. Harmless here, wrong in general, and worth
 fixing when the 68000 starts driving real work.
 
-**M5 — first pixels** 🔵 *a picture, from the Mega Drive half*
+**M5 — first pixels** 🔵 *both halves draw; the 32X image is the SH-2's own*
 
 There is a frame. It is a recognisable Knuckles' Chaotix level — sky, palm
 trees, machinery, plant sprites, foreground platforms — and it took one thing
@@ -495,6 +498,22 @@ With that settled the discovery change goes in: **208 -> 247 functions**, both
 images still reassemble byte for byte, both boots still match the reference with
 no fatal divergence, and the run no longer stops at frame 380.
 
+### The 32X image is the SH-2's own
+
+Separating the layers settles what draws what. At 200 frames `--layers 8` — the
+32X buffer alone — is **byte-identical to the full composite**, and `--layers 7`
+— the Mega Drive alone — is black, with 0 of 65,536 VRAM bytes and 0 of 64 CRAM
+entries set. Every pixel on screen at that point came out of the recompiled
+SH-2. That is the reverse of the first frame this project produced, which was a
+Mega Drive picture with an empty 32X buffer composited over it.
+
+The chain behind it, in block entries over 200 frames: the 68000 posts command 2
+and streams the display list through the DREQ FIFO, the master's interrupt
+handler DMAs it into SDRAM, the list interpreter at `0x060009A6` dispatches
+opcode 1, and `0x06001F18` decompresses cartridge art and writes packed pixels —
+`0x06000856`, the decompressor's bit reader, 80,082 entries, and `0x060021EA`,
+the frame buffer write itself, **1,254,400** of them.
+
 ### What the picture is waiting on now
 
 Two thirds of the objects the master draws have a valid asset pointer and one
@@ -504,8 +523,7 @@ is filled one slot at a time by **command 7** (`0x060010D8`): read a slot index
 and an asset id from the command payload, decompress from the cartridge index at
 `0x020A0000` into the next free SDRAM, store the destination in the slot, and
 post the new free pointer back to comm 3. Our 68000 issues that command once in
-400 frames, so most slots are never filled. Why it issues one and not many is
-the next thread, and it is a 68000-side question rather than an SH-2 one.
+400 frames, so most slots are never filled.
 
 The 32X image also degrades after frame ~350: the line table becomes 256 entries
 all holding the same offset, so every scanline scans out the same row and the
@@ -604,11 +622,42 @@ was multiplied again in the trace. That also explains the slave's apparent
 runaway at `0xC0000132`: 75,923 instructions against the reference's 3 was not a
 handler looping, it was the init's idle spin being counted into the interval.
 
+### Next
+
+**1. VDP status bit 7.** The vertical-interrupt-pending flag: set when the
+interrupt fires, cleared when the 68000 reads the status register. We never set
+it, so the poll at `0x883254` exits immediately where the reference spins. It is
+**~387 of the 554 divergences the 68000 diff has left** — 244 register
+differences and 143 trip counts — against a few lines in `vdp_status()` and a
+set at line 224. Worth doing first because everything after it leans on that
+oracle, and this takes it from 96.5% to near-complete.
+
+**2. Command 7 and the asset table**, the top debt above. With the oracle sharp
+this is a lookup rather than a hunt: find where our 68000's asset-loading
+sequence parts from the reference's and read off why it issues one command where
+the reference issues many. It is a 68000-side question, not an SH-2 one.
+
+**3. The line table degeneration** after frame ~350. After (2), because it may
+well share a cause — and if it does not, it needs a heavier master trace than
+the gate uses, so it is the more expensive investigation.
+
+Two that could slot in anywhere. **Controller input** is nearly free now that
+the pads are modelled and identified: wiring keys into `pad_lines()` is small,
+and it makes the runtime driveable for testing. **The screenshot check** is the
+one real verification gap left in the rendering path — nothing has confirmed the
+packed-pixel decode, the palette conversion or the frame-select polarity against
+ground truth. The logs cannot give it directly, being instruction traces rather
+than memory dumps; it needs a real emulator run, or replaying the reference's
+frame buffer writes out of the pre-reset segments to reconstruct what the real
+machine had on screen.
+
 ### Carried debts
 
 * **The asset table is barely filled.** Command 7 loads one slot per call and
   our 68000 issues it once; a third of the objects drawn therefore dereference
   a null pointer.
+* **The 32X image degrades after frame ~350.** The line table collapses to 256
+  identical entries and the screen goes flat. Undiagnosed.
 * **VDP status bit 7 is never set.** The vertical-interrupt-pending flag, which
   the engine polls at `0x883254`; it is most of what is left in the 68000 diff.
 * **No controller input.** The pads are modelled and identified, but nothing is
@@ -620,8 +669,10 @@ handler looping, it was the init's idle spin being counted into the interval.
 * **The 32X frame-select polarity is a guess.** Displayed is taken to be
   `fb[FS]` and the CPUs get the other one; nothing has confirmed which way round
   it is.
-* **The frame has not been checked against a real screenshot.** It is a
-  plausible Chaotix level, which is not the same as a verified match.
+* **Nothing has been checked against a real screenshot.** Both pictures are
+  plausible — a Chaotix level from the Mega Drive half, decompressed art from
+  the 32X half — which is not the same as a verified match. The packed-pixel
+  decode, the palette conversion and the frame-select polarity all rest on it.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
