@@ -31,6 +31,7 @@ typedef struct {
      * drains. This is how the master's command *list* arrives; the comm
      * register only carries which kind of command it is. */
     uint16_t dreq_ctl, dreq_len;
+    uint16_t dreq_left;      /* words still to push before 68S drops */
     uint16_t fifo[8];
     unsigned fifo_n;
     uint32_t dma_words;      /* words the DMAC has moved, for reporting */
@@ -68,6 +69,7 @@ typedef struct {
     uint16_t dreq_ctl;
     uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
     uint32_t line;           /* scanline the 68000 is running inside */
+    uint8_t  vint_pending;   /* VDP status bit 7, until the 68000 acknowledges */
     uint8_t  pad_cycle[3], pad_th[3];   /* six-button pad sequencing */
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
 } Gen;

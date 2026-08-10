@@ -107,9 +107,14 @@
  * If off, all interrupts will be autovectored and all interrupt requests will
  * auto-clear when the interrupt is serviced.
  */
+/* On, because the acknowledge cycle is where the VDP clears its pending
+ * vertical interrupt, and there is no other moment we can see. The handler is
+ * gen68k_int_ack() in src/gen68k.c; it takes over lowering the request, which
+ * the core stops doing for itself as soon as this is on. */
 #ifndef M68K_EMULATE_INT_ACK
-#define M68K_EMULATE_INT_ACK        M68K_OPT_OFF
-#define M68K_INT_ACK_CALLBACK(A)    your_int_ack_handler_function(A)
+#define M68K_EMULATE_INT_ACK        M68K_OPT_SPECIFY_HANDLER
+int gen68k_int_ack(int level);
+#define M68K_INT_ACK_CALLBACK(A)    gen68k_int_ack(A)
 #endif
 
 

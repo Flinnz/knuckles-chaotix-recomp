@@ -261,18 +261,59 @@ static void vdp_data(uint16_t v) {
     gen.vdp_pending = 0;
 }
 
+/* The status register: bit 1 DMA busy, bit 2 HBLANK, bit 3 VBLANK, bit 7
+ * vertical interrupt pending, bit 9 FIFO empty — and bits 10-15 driven by
+ * nothing at all.
+ *
+ * The game reads this from three places in the whole extract, and between them
+ * they pin every bit that is set:
+ *
+ *   0x0005B0  d0 = 0x3288   the first read of the run, before a single VDP
+ *                           register has been written
+ *   0x0005F2  d0 = 0x0A8A   waiting out a DMA, then 0x0A88 when it finishes
+ *   0x880AAC  d0 = 0x0A88
+ *
+ * VBLANK is set in all three, including the first, where the frame loop is on
+ * line 0 — because the display is still disabled, and a disabled display is in
+ * blanking the whole frame. HBLANK stays on a free-running counter: the frame
+ * is only advanced a line at a time, so a bit that could not change inside a
+ * line is a bit a loop could wait on forever.
+ *
+ * The vertical-interrupt flag is set in all three too, and the middle one is
+ * the interesting case — it is one read out of 16,555 in the same loop, all of
+ * them with the bit still set. So this VDP does not clear it when the status is
+ * read; it clears it on the interrupt-acknowledge cycle, which during the boot
+ * never comes because the 68000 is masked to level 7 throughout. That is also
+ * why it is already set on the very first read: the adapter's boot ROM ran
+ * 379,000 instructions before the cartridge got control, and every vblank in
+ * there set a flag nothing was ever going to acknowledge.
+ *
+ * Bits 10-15 are the six the VDP does not drive, where it leaves whatever was
+ * last on the bus — for a read into a register, the word the 68000 has already
+ * prefetched. The three sites give two different values and both come out
+ * exactly right: at 0x0005B0 the next word is 0x303C and the top bits read
+ * 0x3000, at the other two it is 0x0800 and they read 0x0800. Musashi does not
+ * model the prefetch queue (M68K_EMULATE_PREFETCH is off), but by the time a
+ * read callback runs its PC is already past the instruction's extension words,
+ * so the word sitting there is the one the queue would be holding.
+ */
 static uint16_t vdp_status(void) {
-    /* Bit 3 VBLANK, bit 2 HBLANK, bit 9 FIFO empty.
-     *
-     * VBLANK is the real one now — the scanline the frame loop is running — so
-     * a wait-for-vblank loop takes as long as it takes rather than ending on
-     * whichever read happened to land. HBLANK stays on a free-running counter
-     * because the frame is only advanced a line at a time, and a bit that could
-     * not change inside a line is a bit a loop could wait on forever. */
     uint16_t s = 0x0200;
-    if (gen.line >= 224) s |= 0x0008;
+    if (gen.line >= 224 || !(gen.vdpreg[1] & 0x40)) s |= 0x0008;
     if ((gen.ticks++ % 20) >= 16) s |= 0x0004;
+    if (gen.vint_pending) s |= 0x0080;
+    s |= (uint16_t)m68k_read_memory_16(m68k_get_reg(NULL, M68K_REG_PC)) & 0xFC00u;
     return s;
+}
+
+/* The acknowledge cycle, which is where the VDP drops the pending flag. With
+ * M68K_EMULATE_INT_ACK on, Musashi no longer clears the request itself, so this
+ * does it — otherwise the level would still be asserted when the handler's
+ * `rte` lowered the mask and it would re-enter immediately. */
+int gen68k_int_ack(int level) {
+    if (level == 6) gen.vint_pending = 0;
+    m68k_set_irq(0);
+    return M68K_INT_ACK_AUTOVECTOR;
 }
 
 /* ------------------------------------------------------- 32X on the bus --- */
@@ -281,6 +322,15 @@ static int mars_reg_read(uint32_t a, uint16_t *out) {
     case 0xA15100: *out = (uint16_t)(mars.adapter | 0x0080); return 1;  /* ADEN */
     case 0xA15102: *out = mars.intctl; return 1;
     case 0xA15104: *out = mars.bank; return 1;
+    /* DREQ control. Bit 2 is 68S, which the 68000 sets to open a transfer and
+     * reads back for as long as it is open; bit 7 is FIFO full, which is the
+     * VDP's to drive and ours is never full, because the SH-2's DMAC is armed
+     * before the first word is pushed and drains each one as it arrives. The
+     * reference agrees on both: it writes 0x04 at 0x88322C and the `tst.b` at
+     * 0x883250 comes back non-zero and positive, all 103 times, never once
+     * taking the `bmi` back to it. Answering 0 here was the difference — 100 of
+     * the 554 divergences in the extract, and every one of them this flag. */
+    case 0xA15106: *out = mars.dreq_ctl; return 1;
     case 0xA1510A: *out = gen.dreq_ctl; return 1;
     default:
         if (IN(a & ~1u, 0xA15120u, 0xA15130u)) {
@@ -320,7 +370,14 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
         mars.intctl &= ~0x0003u;
         return 1;
     case 0xA15104: mars.bank = v; return 1;
-    case 0xA15106: mars.dreq_ctl = v; return 1;
+    /* Raising 68S is what arms the transfer, so the word count is taken on that
+     * edge — the length register is written first, at 0x883228. Taking it on the
+     * level instead would rearm on the BIOS helper's `bset`/`bclr` of RV in the
+     * same byte. */
+    case 0xA15106:
+        if ((v & 4) && !(mars.dreq_ctl & 4)) mars.dreq_left = mars.dreq_len;
+        mars.dreq_ctl = v;
+        return 1;
     case 0xA1510A: gen.dreq_ctl = v; return 1;
     case 0xA15110: mars.dreq_len = v; return 1;
     case 0xA15112: return mars_reg_write_sh2(0x4012u, v, 2);

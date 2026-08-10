@@ -145,9 +145,16 @@ static void dma_drain(void) {
     }
 }
 
+/* 68S stays set for exactly as many words as the length register asked for, and
+ * the adapter drops it on the last one. That is what the 68000 reads back at
+ * 0x883250 while it feeds the FIFO four words at a time: 0x04 for as long as the
+ * loop still has a group to push, and 0 on the read after the final group —
+ * which is the reference's flags at 0x883254 and at 0x88325A respectively. */
 static void fifo_push(uint16_t w) {
     if (mars.fifo_n < sizeof mars.fifo / sizeof *mars.fifo)
         mars.fifo[mars.fifo_n++] = w;
+    if (mars.dreq_left && !--mars.dreq_left)
+        mars.dreq_ctl &= (uint16_t)~0x0004u;
     dma_drain();
 }
 

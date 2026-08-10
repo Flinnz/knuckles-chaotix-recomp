@@ -218,6 +218,12 @@ int main(int argc, char **argv) {
      * Musashi happens to come up with Z set. Zero them so a trace comparison
      * starts from the same defined state the reference emulator starts from. */
     m68k_set_reg(M68K_REG_SR, 0x2700);
+    /* And the VDP's pending vertical interrupt is already up before the
+     * cartridge runs an instruction: the adapter's boot ROM took 379,000 of
+     * them to get here, masked at level 7 the whole way, so every vblank in
+     * there set a flag nothing acknowledged. The reference's first status read,
+     * at 0x0005B0, has it set. */
+    gen.vint_pending = 1;
     printf("68000 reset: PC=0x%06X SP=0x%06X\n",
            m68k_get_reg(NULL, M68K_REG_PC), m68k_get_reg(NULL, M68K_REG_SP));
     if (trace68k && !trace68k_open(trace68k, trace68k_lines)) return 1;
@@ -263,10 +269,12 @@ int main(int argc, char **argv) {
             gen.line = line;
             m68k_execute(CYCLES_PER_LINE);
             if (line == VBLANK_LINE) {
-                /* Held only long enough to be taken. The VDP would keep it
-                 * asserted until the handler acknowledged, and there is no
-                 * acknowledge path here — holding it would re-enter the handler
-                 * the moment it returned. */
+                /* The status flag goes up here and comes down on the
+                 * acknowledge cycle, in gen68k_int_ack(). While the 68000 is
+                 * masked to level 7 — which is the whole boot — the interrupt
+                 * is never taken and the flag simply stays up, which is what
+                 * the reference reads back at all three of its status reads. */
+                gen.vint_pending = 1;
                 m68k_set_irq(6);
                 m68k_execute(VBLANK_ACK_CYCLES);
                 m68k_set_irq(0);
