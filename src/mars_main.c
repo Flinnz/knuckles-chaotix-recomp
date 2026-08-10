@@ -325,8 +325,11 @@ int main(int argc, char **argv) {
     }
 
     printf("\nafter %u frames:\n", frames);
-    printf("  68000 PC=0x%06X   commands posted %u, serviced %u\n",
+    printf("  68000 PC=0x%06X   commands posted %u, serviced %u  (",
            m68k_get_reg(NULL, M68K_REG_PC), gen.cmd_posted, mars.serviced);
+    for (unsigned i = 0; i < 16; i++)
+        if (gen.cmd_hist[i]) printf("%u:%u ", i, gen.cmd_hist[i]);
+    printf(")\n");
     printf("  comm: %04X %04X %04X %04X   DMA words to SH-2: %u\n",
            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3],
            mars.dma_words);
@@ -344,12 +347,23 @@ int main(int argc, char **argv) {
         if (mars_fb_shown()[i]) { nz++; if (i >= table) pix++; }
     printf("  framebuffer: %u/%u bytes non-zero, %u of them beyond the "
            "%u-byte line table\n", nz, MARS_FB, pix, table);
-    unsigned first0 = 256;
-    for (unsigned i = 0; i < 256; i++)
-        if (!(((unsigned)mars_fb_shown()[i * 2] << 8) | mars_fb_shown()[i * 2 + 1])) {
-            first0 = i; break;
-        }
-    printf("  line table: first zero entry at line %u;", first0);
+    /* A line whose entry is zero is one the SH-2 never set up, and the renderer
+     * leaves it showing the Mega Drive. "First zero" is not the measure — the
+     * table can have a hole in it and be fine either side — so count how many of
+     * the 224 lines on screen have somewhere to scan out from, and say whether
+     * they all point at the same place, which is what a collapsed table looks
+     * like. */
+    unsigned set = 0, distinct = 0, seen[H];
+    for (unsigned i = 0; i < H; i++) {
+        unsigned e = ((unsigned)mars_fb_shown()[i * 2] << 8)
+                   | mars_fb_shown()[i * 2 + 1];
+        if (!e) continue;
+        set++;
+        unsigned j = 0;
+        while (j < distinct && seen[j] != e) j++;
+        if (j == distinct) seen[distinct++] = e;
+    }
+    printf("  line table: %u/%u lines set, %u distinct offset(s);", set, H, distinct);
     for (unsigned i = 0; i < 6; i++)
         printf(" %04X", ((unsigned)mars_fb_shown()[i * 2] << 8)
                        | mars_fb_shown()[i * 2 + 1]);

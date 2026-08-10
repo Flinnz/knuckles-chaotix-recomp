@@ -68,6 +68,7 @@ typedef struct {
     uint16_t io[16];
     uint16_t dreq_ctl;
     uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
+    uint32_t cmd_hist[16];   /* commands posted to comm 0, by kind */
     uint32_t line;           /* scanline the 68000 is running inside */
     uint8_t  vint_pending;   /* VDP status bit 7, until the 68000 acknowledges */
     uint8_t  pad_cycle[3], pad_th[3];   /* six-button pad sequencing */

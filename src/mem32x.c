@@ -51,9 +51,14 @@ static void idle_poll(uint32_t v) {
     if (v) idle_reads = 0;
 }
 
+/* Set by the dispatch loop below. An unmapped access is nearly always a pointer
+ * that should have been filled in, and the function it happened in is what says
+ * which one — the address alone does not. */
+static uint32_t trap_fn;
+
 static void trap(const char *what, uint32_t a) {
     if (mars.unknown++ < 16)
-        fprintf(stderr, "  [mem] %s 0x%08X  (%s)\n", what, a,
+        fprintf(stderr, "  [mem] %s 0x%08X  in 0x%08X  (%s)\n", what, a, trap_fn,
                 mars_running == &mars_cpu[1] ? "slave" :
                 mars_running ? "master" : "no cpu");
 }
@@ -532,6 +537,7 @@ void sh2_call(SH2 *c, uint32_t addr) {
             if (i < TRACE_MAXFN) tcount[i]++;
         }
         mars_tick_budget();
+        trap_fn = addr;
         addr = sh2_functions[i].fn(c, addr);
     }
     mars_running = outer;

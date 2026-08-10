@@ -390,7 +390,11 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
              * its dispatch poll whenever the 68000 is running, so this is where
              * the two actually meet — and the 68000 goes straight on to wait
              * for the acknowledgement, which only exists if the SH-2 has run. */
-            if (i == 0 && v) { gen.cmd_posted++; mars_run_command(); }
+            if (i == 0 && v) {
+                gen.cmd_posted++;
+                if (v < 16) gen.cmd_hist[v]++;
+                mars_run_command();
+            }
             return 1;
         }
         if (IN(a & ~1u, 0xA15130u, 0xA15140u)) return 1;
