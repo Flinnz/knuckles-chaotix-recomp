@@ -600,10 +600,9 @@ this itself by writing `0x008802A2` into vector 28 at `0x88077E`, and
 Vector 30 is the same shape, and the reference executes `0x8802AE` on every one
 of its 102 vblanks.
 
-What remains is 244 register differences and 143 trip counts, nearly all one
-poll: VDP status bit 7, the vertical-interrupt-pending flag, which we never set,
-so `0x883254` never spins where the reference does. Benign, and in the same
-class as the polls already listed.
+What remains is 244 register differences and 143 trip counts, and the guess
+recorded here — that they were the Genesis VDP's vertical-interrupt flag, which
+we never set — was wrong on both halves. See the next section but one.
 
 ### A gate, and a bound that was costing more than it bought
 
@@ -622,46 +621,127 @@ was multiplied again in the trace. That also explains the slave's apparent
 runaway at `0xC0000132`: 75,923 instructions against the reference's 3 was not a
 handler looping, it was the init's idle spin being counted into the interval.
 
+### Three questions, and the two of them that dissolved
+
+The list that stood here was: fix VDP status bit 7 for ~387 of the 554
+divergences, then find why our 68000 under-issues command 7, then chase the line
+table collapsing after frame ~350. Working down it found that the first was
+misattributed, the second was not happening, and the third had already been
+fixed. What follows is what is true instead.
+
+**The poll at `0x883254` is not the Genesis VDP.** `tst.b ($a15107)` reads the
+*32X* DREQ control register, and bit 7 there is FIFO full, not interrupt
+pending. What was actually wrong is that 0xA15106 had no read case at all on the
+68000 side, so every read of it came back zero — 100 divergences on its own.
+
+The reference pins two behaviours. 68S, bit 2, reads back for as long as the
+transfer is open: the 68000 sets it at `0x88322C`, feeds the FIFO four words at
+a time, and reads 0x04 at `0x883250` on every group but the last, where it reads
+0. So the word count is taken from the length register on the rising edge of
+68S and the bit drops on the final word. FIFO full is never set, here or in the
+reference — the SH-2's DMAC is armed before the first word arrives and drains
+each one as it comes, and the reference passes `0x883254` 103 times without once
+taking the `bmi` back to it.
+
+**The Genesis VDP status register was wrong too, just not there.** The game
+reads it three times in the whole extract and we matched none of them:
+
+| | reference | ours, before |
+|---|---|---|
+| `0x0005B0`, the first read of the run | 0x3288 | 0x0200 |
+| `0x0005F2`, waiting out a DMA | 0x0A8A then 0x0A88 | 0x0200 |
+| `0x880AAC` | 0x0A88 | 0x0200 |
+
+VBLANK is set in all three, including the first, where the frame loop is on line
+0 — because the display is still disabled and a disabled display is in blanking
+all frame. The vertical-interrupt flag is set in all three as well, and the
+middle one settles how it behaves: it is one read out of 16,555 in the same
+loop, all of them with the bit still up, so this VDP does not clear it on a
+status read. It clears on the acknowledge cycle, which during the boot never
+comes because the 68000 is masked to level 7 throughout — which is also why it
+is already set on the very first read, the adapter's boot ROM having run 379,000
+instructions of vblanks before the cartridge got control. Musashi's int-ack
+callback is on to hook that, and takes over lowering the request.
+
+And bits 10-15, which the VDP does not drive, hold the word the 68000 has
+already prefetched. Two distinct values across the three sites and both exact:
+0x303C at `0x0005B0`, 0x0800 at the other two.
+
+**554 -> 452 divergences, 52,381 of 54,081 in lock step, and the boot 34 -> 32.**
+Every group left is one of three causes and all three are the *synchronous
+SH-2* — it runs inside the 68000's register write, so every rendezvous answers
+on the first poll:
+
+| rows | where | what |
+|---|---|---|
+| 144 | `0x883242`, `0x883244` | the command interrupt is acknowledged before the 68000 can see it pending |
+| 184 | `0x8802AE`, `0x88314C`, `0x8831B4`, `0x8836E6` | comm 0 is never busy when the vblank handler looks, so we run the palette upload and post a command where the reference skips 22 of 102 |
+| 52 | `0x8834C0` | the phase of the vblank wait loop |
+
+That is now the largest single thing left on the 68000 side, and it is a
+scheduling question rather than a register one.
+
+**Command 7 is not being under-issued.** The lookup was: find where our asset
+loading parts from the reference's. It does not. Both issue command 7 exactly
+once over the extract, from the same call site — `0x8ABF28`, the only one of its
+eight reached by either — with the same argument, `d0 = 0x51BC`. The premise was
+false and there is no 68000-side divergence to find.
+
+The debt underneath it is real, though, and now has a location. Over 1,200
+frames the 68000 posts 3 command 7s against 1,173 draws, and the master's sprite
+drawer at `0x06001380` and `0x060013C4` reads a 12-byte object header through a
+null pointer **10.8 million times**. Whether that is normal for this point in
+the game cannot be answered from the logs as extracted: the master's reference
+stream is capped at 400,000 instructions and never reaches `0x06001380` at all —
+it is still in the boot and the first decompression. The raw logs hold 6.5 GB.
+
+**The line table no longer degenerates.** Not at frame 350, not at 2,000, and
+not at the previous commit either — something between the observation and now
+fixed it and the note was carried forward stale. "First zero entry" was the
+wrong thing to have been watching in any case, since a table can have a hole and
+be fine either side. The report counts coverage and distinct offsets now: 128 of
+224 lines set, 128 distinct, unchanged from frame 200 to frame 2,000. The 96
+lines with no entry are the real gap and they are the same 96 throughout.
+
+**Controller input is in.** The sequencer already knew the whole six-button
+protocol; what it lacked was anything to hold. With nothing held it returns
+exactly what it returned before, so the trace comparisons are untouched.
+`--hold up,start` presses buttons in a headless run, which is the only way the
+path can be tested without a person at the keyboard — with `right` held the
+game's own identification routine reads 0x77 out of the port at `0x8F4604` where
+it reads 0x7F with nothing held.
+
 ### Next
 
-**1. VDP status bit 7.** The vertical-interrupt-pending flag: set when the
-interrupt fires, cleared when the 68000 reads the status register. We never set
-it, so the poll at `0x883254` exits immediately where the reference spins. It is
-**~387 of the 554 divergences the 68000 diff has left** — 244 register
-differences and 143 trip counts — against a few lines in `vdp_status()` and a
-set at line 224. Worth doing first because everything after it leans on that
-oracle, and this takes it from 96.5% to near-complete.
+**1. Interleave the two CPUs.** 380 of the 452 remaining divergences are the one
+fact that the SH-2 answers instantly, and it is no longer a cosmetic difference:
+the reference's master is busy for 22 of its 102 vblanks, and in those the
+engine skips a palette upload and a draw command that we perform. Everything
+after this leans on the oracle, and this is what it has left to say.
 
-**2. Command 7 and the asset table**, the top debt above. With the oracle sharp
-this is a lookup rather than a hunt: find where our 68000's asset-loading
-sequence parts from the reference's and read off why it issues one command where
-the reference issues many. It is a 68000-side question, not an SH-2 one.
+**2. Extend the master's reference extract.** It stops 400,000 instructions in,
+before the game draws its first object, which is why the null asset pointers
+cannot be diagnosed. The raw logs have 6.5 GB and the extractor takes a
+`--limit`; the cost is time and disk, not new machinery.
 
-**3. The line table degeneration** after frame ~350. After (2), because it may
-well share a cause — and if it does not, it needs a heavier master trace than
-the gate uses, so it is the more expensive investigation.
-
-Two that could slot in anywhere. **Controller input** is nearly free now that
-the pads are modelled and identified: wiring keys into `pad_lines()` is small,
-and it makes the runtime driveable for testing. **The screenshot check** is the
-one real verification gap left in the rendering path — nothing has confirmed the
-packed-pixel decode, the palette conversion or the frame-select polarity against
-ground truth. The logs cannot give it directly, being instruction traces rather
-than memory dumps; it needs a real emulator run, or replaying the reference's
-frame buffer writes out of the pre-reset segments to reconstruct what the real
-machine had on screen.
+**3. The screenshot check**, still the one real verification gap in the
+rendering path — nothing has confirmed the packed-pixel decode, the palette
+conversion or the frame-select polarity against ground truth. The logs cannot
+give it directly, being instruction traces rather than memory dumps; it needs a
+real emulator run, or replaying the reference's frame buffer writes out of the
+pre-reset segments to reconstruct what the real machine had on screen.
 
 ### Carried debts
 
-* **The asset table is barely filled.** Command 7 loads one slot per call and
-  our 68000 issues it once; a third of the objects drawn therefore dereference
-  a null pointer.
-* **The 32X image degrades after frame ~350.** The line table collapses to 256
-  identical entries and the screen goes flat. Undiagnosed.
-* **VDP status bit 7 is never set.** The vertical-interrupt-pending flag, which
-  the engine polls at `0x883254`; it is most of what is left in the 68000 diff.
-* **No controller input.** The pads are modelled and identified, but nothing is
-  ever pressed — there is no input path into the runtime.
+* **The asset table is barely filled.** 3 command 7s in 1,200 frames against
+  1,173 draws, and the master's sprite drawer dereferences a null pointer 10.8
+  million times over that run. Our 68000 matches the reference exactly as far as
+  the oracle reaches, so diagnosing it needs (2) above first.
+* **96 of the 224 lines have no line-table entry**, so the 32X draws the top 128
+  and the Mega Drive shows through below. Stable, not a collapse.
+* **The two CPUs are not interleaved.** The SH-2 runs inside the 68000's
+  register writes, so every rendezvous answers at once; it is 380 of the 452
+  divergences left in the 68000 diff.
 * **No audio.** The sample FIFOs accept writes and report space so the driver
   never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
