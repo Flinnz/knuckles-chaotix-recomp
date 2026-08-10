@@ -3,10 +3,11 @@
  * bitmap composited over them — goes to an SDL window.
  *
  * The two CPUs are cooperatively scheduled rather than interleaved: the 68000
- * runs a frame's worth of cycles, and any command it posted to comm register 0
- * is then serviced by calling the SH-2's dispatch loop. That is enough while
- * the SH-2 only ever acts on request; it will need revisiting once timing
- * between the two matters.
+ * runs a frame's worth of cycles, and the SH-2s run inside its register writes —
+ * a command posted to comm register 0, or an interrupt raised at 0xA15102, is
+ * handled there and then. That is enough while the SH-2s only ever act on
+ * request, and it is what the handshakes need, since the 68000 goes straight on
+ * to wait for an answer. It will need revisiting once timing matters.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +31,6 @@
 
 /* Entered through sh2_call so tail transfers trampoline rather than nest. */
 #define MASTER_RESET 0x060001A0u
-#define MASTER_DISPATCH 0x060008F2u
 #define SLAVE_RESET 0x060001A4u
 
 static uint32_t be32(const uint8_t *p) {
@@ -223,23 +223,23 @@ int main(int argc, char **argv) {
     printf("rom %u bytes; sdram image 0x%06X -> 0x%08X (%u)\n",
            mars.rom_size, src, 0x06000000u + dst, size);
 
-    SH2 sh2, slave;
-    handoff(&sh2, 0);
-    handoff(&slave, 1);
-    sh2.pc = start;
+    SH2 *sh2 = &mars_cpu[0], *slave = &mars_cpu[1];
+    handoff(sh2, 0);
+    handoff(slave, 1);
+    sh2->pc = start;
 
     /* Opened before either SH-2 runs: the boot is the part with an oracle. */
     if (tracesh2 && !sh2_trace_open(tracesh2, tracesh2_lines)) return 1;
 
     /* Master init. It ends by waiting for a command, which the watchdog turns
      * into an unwind rather than a hang. */
-    printf("SH-2 slave init  (sp=0x%08X) ...\n", slave.r[15]);
+    printf("SH-2 slave init  (sp=0x%08X) ...\n", slave->r[15]);
     mars_reset_budget(); mars_trace_reset();
-    if (setjmp(mars_bail) == 0) sh2_call(&slave, SLAVE_RESET);
+    if (setjmp(mars_bail) == 0) sh2_call(slave, SLAVE_RESET);
     if (mars.trace) mars_trace_dump("after slave init");
     printf("SH-2 master init ...\n");
     mars_reset_budget(); mars_trace_reset();
-    if (setjmp(mars_bail) == 0) sh2_call(&sh2, MASTER_RESET);
+    if (setjmp(mars_bail) == 0) sh2_call(sh2, MASTER_RESET);
     if (mars.trace) mars_trace_dump("after master init");
     printf("  bitmap mode 0x%04X, fb control 0x%04X\n",
            mars.bitmap_mode, mars.fbctl);
@@ -278,7 +278,7 @@ int main(int argc, char **argv) {
     }
 
     int running = 1;
-    unsigned frames = 0, serviced = 0;
+    unsigned frames = 0;
     unsigned limit = headless_frames ? (unsigned)headless_frames : 0;
     while (running) {
         m68k_execute(CYCLES_PER_FRAME);
@@ -288,16 +288,9 @@ int main(int argc, char **argv) {
         m68k_set_irq(0);
 
         bios_comm_post();
-
-        while (mars.cmd_at < mars.ncmd) {
-            unsigned before = mars.cmd_at;
-            mars_reset_budget();
-            int why = setjmp(mars_bail);
-            if (why == 0) sh2_call(&sh2, MASTER_DISPATCH);
-            else mars.bail[why & 3]++;
-            serviced++;
-            if (mars.cmd_at == before) break;     /* made no progress */
-        }
+        /* Commands are no longer collected here and replayed at the end of the
+         * frame: the 68000 runs the SH-2 at the moment it posts one, which is
+         * the only ordering the acknowledgement handshake works under. */
 
         frames++;
         if (!headless_frames) {
@@ -340,7 +333,10 @@ int main(int argc, char **argv) {
 
     printf("\nafter %u frames:\n", frames);
     printf("  68000 PC=0x%06X   commands posted %u, serviced %u\n",
-           m68k_get_reg(NULL, M68K_REG_PC), gen.cmd_posted, serviced);
+           m68k_get_reg(NULL, M68K_REG_PC), gen.cmd_posted, mars.serviced);
+    printf("  comm: %04X %04X %04X %04X   DMA words to SH-2: %u\n",
+           mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3],
+           mars.dma_words);
     printf("  VDP: dma %u, reg1=%02X addr=%04X\n",
            gen.dma_done, gen.vdpreg[1], gen.vdp_addr);
     printf("  32X: bitmap mode 0x%04X  palette %s\n", mars.bitmap_mode,

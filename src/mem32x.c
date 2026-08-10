@@ -11,8 +11,13 @@
 #include "mars.h"
 
 Mars mars;
+SH2 mars_cpu[2];
 jmp_buf mars_bail;
 static uint32_t idle_reads, budget;
+/* Which SH-2 is executing, so that a register write can tell which one did it.
+ * Only the interrupt-clear registers need this; everything else in the 32X
+ * register block is shared between the two by design. */
+static SH2 *mars_running;
 
 /* ---------------------------------------------------------------- helpers */
 static inline uint32_t canon(uint32_t a) {
@@ -32,7 +37,9 @@ void mars_reset_budget(void) { budget = 0; idle_reads = 0; }
 
 static void trap(const char *what, uint32_t a) {
     if (mars.unknown++ < 16)
-        fprintf(stderr, "  [mem] %s 0x%08X\n", what, a);
+        fprintf(stderr, "  [mem] %s 0x%08X  (%s)\n", what, a,
+                mars_running == &mars_cpu[1] ? "slave" :
+                mars_running ? "master" : "no cpu");
 }
 
 /* Bit 15 of the bitmap mode register reads back set whatever is written to it.
@@ -63,6 +70,71 @@ static uint16_t vdp_status(void) {
     return s;
 }
 
+/* --- the DREQ FIFO and the one DMA transfer that uses it -------------------
+ *
+ * The 68000 hands the SH-2 its command list like this (0x8819AE onward):
+ * set the word count at 0xA15110, set the DREQ control byte, raise the master's
+ * command interrupt, spin until the handler clears it, then push the payload
+ * word by word into the FIFO at 0xA15112.
+ *
+ * The handler it wakes — 0x06001334, reached through the dispatcher at
+ * 0x060001B0 — arms SH-2 DMAC channel 0 with SAR0 = 0x20004012 (the FIFO read
+ * port, address fixed), DAR0 = the list buffer in SDRAM, and TCR0 = the count
+ * it reads back from 0x20004010. So the channel is always armed *before* the
+ * data arrives, and modelling it as "consume on push" is exact rather than a
+ * simplification. No general DMAC is needed for it, and pretending otherwise
+ * would mean modelling channel arbitration nothing here uses.
+ */
+#define DMAC_SAR0  0xFFFFFF80u
+#define DMAC_DAR0  0xFFFFFF84u
+#define DMAC_TCR0  0xFFFFFF88u
+#define DMAC_CHCR0 0xFFFFFF8Cu
+#define DMAC_DMAOR 0xFFFFFFB0u
+#define DREQ_FIFO  0x20004012u
+
+static uint8_t *resolve(uint32_t a, uint32_t need);
+
+static uint32_t oc32(uint32_t a) {
+    const uint8_t *p = &mars.onchip[a - 0xFFFFFE00u];
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void oc32w(uint32_t a, uint32_t v) {
+    uint8_t *p = &mars.onchip[a - 0xFFFFFE00u];
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+
+static void dma_drain(void) {
+    while (mars.fifo_n) {
+        uint32_t chcr = oc32(DMAC_CHCR0), tcr = oc32(DMAC_TCR0);
+        /* DMAOR's master enable, the channel's own DE bit, something left to
+         * transfer, and a source that is actually this FIFO. */
+        if (!(oc32(DMAC_DMAOR) & 1) || !(chcr & 1) || !tcr) return;
+        if (oc32(DMAC_SAR0) != DREQ_FIFO) return;
+        uint32_t dar = oc32(DMAC_DAR0);
+        uint16_t w = mars.fifo[0];
+        /* Written through `resolve` rather than sh2_w16: this runs inside a
+         * 68000 register write, where the budget watchdog's longjmp would
+         * unwind straight out of the interpreter. */
+        uint8_t *p = resolve(canon(dar), 2);
+        if (!p) { trap("dma", dar); return; }
+        p[0] = (uint8_t)(w >> 8); p[1] = (uint8_t)w;
+        memmove(mars.fifo, mars.fifo + 1, --mars.fifo_n * sizeof *mars.fifo);
+        oc32w(DMAC_DAR0, dar + 2);
+        oc32w(DMAC_TCR0, tcr - 1);
+        mars.dma_words++;
+        if (tcr == 1) oc32w(DMAC_CHCR0, (chcr & ~1u) | 2u);   /* DE off, TE on */
+    }
+}
+
+static void fifo_push(uint16_t w) {
+    if (mars.fifo_n < sizeof mars.fifo / sizeof *mars.fifo)
+        mars.fifo[mars.fifo_n++] = w;
+    dma_drain();
+}
+
 static void autofill(void) {
     uint32_t addr = mars.fill_start;
     for (uint32_t i = 0; i <= mars.fill_len; i++) {
@@ -84,15 +156,26 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
         case 0x00: mars.adapter = (uint16_t)v; return 1;
         case 0x02: mars.intctl = (uint16_t)v; return 1;
         case 0x04: mars.bank = (uint16_t)v; return 1;
-        case 0x14: case 0x16: case 0x18: case 0x1A:
-        case 0x1C: case 0x1E: return 1;       /* interrupt clears */
+        case 0x06: mars.dreq_ctl = (uint16_t)v; return 1;
+        case 0x10: mars.dreq_len = (uint16_t)v; return 1;
+        case 0x12: fifo_push((uint16_t)v); return 1;   /* only the 68000 writes */
+        case 0x1A:                            /* command interrupt clear */
+            /* The 68000 spins on this bit waiting for the handler to say it has
+             * armed its DMAC. Which CPU is clearing it is whichever one the
+             * runtime is currently executing. */
+            mars.intctl &= (uint16_t)~(mars_running == &mars_cpu[1] ? 2u : 1u);
+            return 1;
+        case 0x14: case 0x16: case 0x18:
+        case 0x1C: case 0x1E: return 1;       /* the other interrupt clears */
         case 0x20:                            /* comm 0: the 68000 rendezvous */
+            /* Plain storage now. The SH-2 zeroing this is how it tells the
+             * 68000 it is ready, and the 68000 waits for exactly that — at
+             * 0x8845CE among other places. It used to be intercepted, because
+             * commands arrived a whole frame before the SH-2 ran and would have
+             * been wiped by the zero the dispatch loop writes on entry; the
+             * 68000 now drives the SH-2 at the moment it posts, so there is
+             * nothing left to paper over. */
             mars.comm[0] = (uint16_t)v;
-            if (v == 0 && mars.cmd_at < mars.ncmd) {
-                /* The handler acknowledged; hand it the next queued command. */
-                mars.comm[0] = mars.cmds[mars.cmd_at++];
-                if (mars.cmd_at >= mars.ncmd) mars.cmd_at = mars.ncmd = 0;
-            }
             return 1;
         default:
             if ((a & 0xFE) >= 0x20 && (a & 0xFE) < 0x30) {
@@ -128,6 +211,17 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         case 0x00: *out = mars.adapter; return 1;
         case 0x02: *out = mars.intctl; return 1;
         case 0x04: *out = mars.bank; return 1;
+        case 0x06: *out = mars.dreq_ctl; return 1;
+        case 0x10: *out = mars.dreq_len; return 1;
+        case 0x12:                            /* the FIFO read port */
+            /* The DMAC drains the FIFO directly, so nothing here reads it in
+             * practice; answering honestly costs nothing and means a CPU that
+             * polls the port instead sees the same data. */
+            *out = mars.fifo_n ? mars.fifo[0] : 0;
+            if (mars.fifo_n)
+                memmove(mars.fifo, mars.fifo + 1,
+                        --mars.fifo_n * sizeof *mars.fifo);
+            return 1;
         default:
             if ((a & 0xFE) >= 0x20 && (a & 0xFE) < 0x30) {
                 *out = mars.comm[((a & 0xFE) - 0x20) / 2];
@@ -390,6 +484,8 @@ void sh2_call(SH2 *c, uint32_t addr) {
     /* Flat: calls, returns and jumps are all just a new address. Nothing
      * recurses, so a handler that branches away instead of returning - which
      * is ordinary SH-2 practice - costs nothing here either. */
+    SH2 *outer = mars_running;
+    mars_running = c;
     while (addr) {
         if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
         int i = lookup(addr);
@@ -405,6 +501,55 @@ void sh2_call(SH2 *c, uint32_t addr) {
         mars_tick_budget();
         addr = sh2_functions[i].fn(c, addr);
     }
+    mars_running = outer;
+}
+
+/* Take an external interrupt and run the handler to completion.
+ *
+ * The SH-2 takes external interrupts through auto-vectors 64-71, two levels to
+ * a vector, so the command interrupt at level 8 lands on vector 68. Both of
+ * this cartridge's tables fill all eight with one dispatcher — 0x060001B0 on
+ * the master, 0x060001F8 on the slave — which reads the accepted level back out
+ * of SR to pick the real handler. That is why the mask has to be set before
+ * entering, and put back afterwards.
+ *
+ * Nothing is pushed on the SH-2 stack: `rte` returns to the runtime here rather
+ * than popping a frame, and the dispatcher balances its own pushes.
+ */
+void mars_deliver_int(int slave, unsigned level) {
+    SH2 *c = &mars_cpu[slave & 1];
+    uint32_t vec = c->vbr + 4u * (64u + ((level + 1u) >> 1));
+    const uint8_t *p = resolve(canon(vec), 4);
+    if (!p) { trap("vector", vec); return; }
+    uint32_t handler = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+                     | ((uint32_t)p[2] << 8) | p[3];
+    if (!handler) return;
+
+    uint32_t save = sh2_get_sr(c);
+    c->imask = level & 0xF;
+    /* Its own setjmp: this runs inside a 68000 register write, and the
+     * watchdog's unwind must not escape into the interpreter. The frame loop
+     * re-arms the buffer before each dispatch, so borrowing it is safe. */
+    mars_reset_budget();
+    int why = setjmp(mars_bail);
+    if (why == 0) sh2_call(c, handler);
+    else mars.bail[why & 3]++;
+    sh2_set_sr(c, save);
+}
+
+/* Run the master's command dispatch loop, entered at its poll rather than at
+ * its head: the head writes 0 to comm 0 first, which would wipe the command the
+ * 68000 has just put there. From the poll it reads the command, dispatches it,
+ * and comes back round to the head — where the 0 it writes is the
+ * acknowledgement the 68000 is waiting for. */
+#define MASTER_POLL 0x060008F8u
+
+void mars_run_command(void) {
+    mars_reset_budget();
+    int why = setjmp(mars_bail);
+    if (why == 0) sh2_call(&mars_cpu[0], MASTER_POLL);
+    else mars.bail[why & 3]++;
+    mars.serviced++;
 }
 
 void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {
@@ -412,13 +557,3 @@ void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {
     fprintf(stderr, "  [sh2] unimplemented at 0x%08X: %s\n", addr, what);
 }
 
-void mars_post_command(uint16_t cmd) {
-    if (mars.ncmd < MARS_MAX_CMDS) mars.cmds[mars.ncmd++] = cmd;
-}
-
-void mars_set_commands(const uint16_t *cmds, unsigned n) {
-    if (n > MARS_MAX_CMDS) n = MARS_MAX_CMDS;
-    memcpy(mars.cmds, cmds, n * sizeof *cmds);
-    mars.ncmd = n;
-    mars.cmd_at = 0;
-}

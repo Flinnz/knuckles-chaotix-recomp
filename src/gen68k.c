@@ -161,28 +161,31 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
     switch (a & ~1u) {
     case 0xA15100: mars.adapter = v; return 1;
     /* Bits 0 and 1 raise the command interrupt on the master and slave SH-2.
-     * On hardware the interrupted SH-2 clears the bit from its own handler, and
-     * the 68000 waits for that as an acknowledgement — at 0x8819C6 it spins on
-     * bit 0 before pushing data through the DREQ FIFO. Our SH-2s do not run
-     * concurrently and are never entered through that vector, so the request is
-     * recorded as already acknowledged. That keeps the 68000 moving, but it is a
-     * stand-in: the transfer it is arranging still needs an SH-2 at the other
-     * end to consume it. */
-    case 0xA15102: mars.intctl = v & ~0x0003u; return 1;
+     * The interrupted SH-2 clears the bit from its own handler and the 68000
+     * waits for that as an acknowledgement — at 0x8819C6 it spins on bit 0
+     * before pushing the command list through the DREQ FIFO. The handler is run
+     * here and now, which is what the 68000 sees on hardware too: it holds the
+     * bus waiting, and by the time it looks the SH-2 has answered. */
+    case 0xA15102:
+        mars.intctl = v;
+        if (v & 1) mars_deliver_int(0, MARS_INT_CMD);
+        if (v & 2) mars_deliver_int(1, MARS_INT_CMD);
+        mars.intctl &= ~0x0003u;
+        return 1;
     case 0xA15104: mars.bank = v; return 1;
+    case 0xA15106: mars.dreq_ctl = v; return 1;
     case 0xA1510A: gen.dreq_ctl = v; return 1;
+    case 0xA15110: mars.dreq_len = v; return 1;
+    case 0xA15112: return mars_reg_write_sh2(0x4012u, v, 2);
     default:
         if (IN(a & ~1u, 0xA15120u, 0xA15130u)) {
             unsigned i = (unsigned)(((a & ~1u) - 0xA15120u) / 2);
-            if (i == 0 && v) {
-                /* Hand it to the SH-2 through the queue rather than writing
-                 * comm[0] directly: the SH-2 clears that register to
-                 * acknowledge, and would otherwise wipe the command. */
-                mars_post_command(v);
-                gen.cmd_posted++;
-            } else {
-                mars.comm[i] = v;
-            }
+            mars.comm[i] = v;
+            /* Posting a command runs the SH-2 there and then. It is parked in
+             * its dispatch poll whenever the 68000 is running, so this is where
+             * the two actually meet — and the 68000 goes straight on to wait
+             * for the acknowledgement, which only exists if the SH-2 has run. */
+            if (i == 0 && v) { gen.cmd_posted++; mars_run_command(); }
             return 1;
         }
         if (IN(a & ~1u, 0xA15130u, 0xA15140u)) return 1;

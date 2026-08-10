@@ -69,6 +69,12 @@ void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {
     exit(3);
 }
 
+/* The generated code calls this at every basic block. These tests compare
+ * answers, not paths, so there is nothing to record — but the symbol has to
+ * exist, and `sh2_trace` staying zero is what keeps the call out of the way. */
+int sh2_trace;
+void sh2_block(SH2 *c, uint32_t addr) { (void)c; (void)addr; }
+
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: %s image.bin nresults\n", argv[0]); return 1; }
     FILE *f = fopen(argv[1], "rb");

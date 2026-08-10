@@ -423,9 +423,68 @@ push words into the FIFO. Our master reads a stale list at `0x06004xxx`, gets
 opcode 0 instead of opcode 1, and returns without drawing.
 
 That is the pivot condition, half met and more specific than it was written: not
-"we never receive the command", but "the command arrives empty". The fix is the
-DREQ FIFO plus real interrupt delivery to the SH-2s — which is the same missing
-piece the slave's divergence names, and it is the next work.
+"we never receive the command", but "the command arrives empty".
+
+### The 32X draws
+
+The missing piece was one path, and building it turned out to be three things
+that are really the same thing: the SH-2s had no way to be entered except by the
+scheduler, so nothing that the 68000 asks of them mid-frame could happen.
+
+**Interrupt delivery.** `mars_deliver_int` takes an external interrupt and runs
+the handler to completion. The SH-2 takes these through auto-vectors 64-71, two
+levels to a vector, so the command interrupt at level 8 lands on vector 68 —
+and both of this cartridge's tables fill all eight slots with one dispatcher,
+0x060001B0 on the master and 0x060001F8 on the slave, which reads the accepted
+level back out of SR to pick the real handler. Nothing is pushed on the SH-2
+stack: `rte` already returns to the runtime rather than popping a frame.
+
+**The DREQ FIFO.** The master's command handler at 0x06001334 arms DMAC channel
+0 with SAR0 = 0x20004012 — the FIFO read port, address fixed — DAR0 = the list
+buffer in SDRAM, and TCR0 = the word count it reads back from 0x20004010. The
+channel is therefore always armed *before* the 68000 pushes anything, so
+draining on push is exact rather than a simplification, and no general DMAC is
+needed.
+
+**The command rendezvous is synchronous now.** Commands used to be collected
+during the frame and replayed at the end, through a queue that intercepted comm
+0 — because a command written a whole frame early would have been wiped by the
+zero the SH-2's dispatch loop writes on entry. With the SH-2 reachable from a
+68000 register write, the 68000 simply runs it at the moment it posts, entering
+at the poll rather than the loop head so the command it just wrote survives. The
+queue is gone, and with it the reason the 68000 could never see its
+acknowledgement: it waits for comm 0 to read back zero, at 0x8845CE among other
+places, and that only happens if the SH-2 has actually run.
+
+**There is a 32X picture.** The frame buffer goes from nothing beyond the line
+table to 40,496 bytes of pixels, and `--layers 8` shows what they are: two
+panels of animated cloud, drawn by the decompressor the master had been running
+against an empty command list all along. 5,876 words now cross the FIFO in 200
+frames. The 68000's boot still matches the reference exactly, and all eight
+recompiler semantics tests still pass.
+
+**Where it stops now** is 0x8845D4, waiting on that same comm 0, because the
+350th command transfers to **0x06004A24** and there is no block there. The
+address is real code — it sits after a `bra`, its delay slot and an alignment
+`nop`, so nothing falls through to it and no static xref reaches it; it is one
+of the unresolved indirect transfers M1 left open.
+
+**And the experiment to find it turned up a bigger bug.** Seeding discovery
+after an unconditional `bra`/`jmp` the way it is already seeded after `rts` —
+control cannot fall through either, so what follows is reachable only
+indirectly — finds 0x06004A24, takes the front end from 208 to 247 functions,
+and keeps both images' byte-exact round-trips. It also breaks the master's boot,
+and the SH-2 diff said why in one run: at the end of init the reference goes to
+0x060008F2 and we went to 0x06001250, with *identical registers*.
+
+The cause is not the new seeding. **288 basic blocks already belong to more than
+one function** — functions that share a tail, or fall into each other — and
+`recompile.py` emits one dispatch-table row per (block, owner) pair. So
+`sh2_functions[]` has duplicate addresses, and `lookup()` binary-searches them
+and gets whichever it lands on. It has been arbitrary all along; the new
+seeding just made a case where the two owners disagree reachable. That has to be
+one row per address, with a rule for which owner wins, before the discovery
+change can go in — so neither is committed here.
 
 ### Carried debts
 
@@ -434,10 +493,15 @@ piece the slave's divergence names, and it is the next work.
   boot diff stops matching. `tools/diff68k.py --ref-lines 20213` is one command
   and already exits non-zero on a fatal divergence; `tools/diffsh2.py --cpu
   master` is now a second one.
-* **No interrupt delivery to the SH-2s, and no DREQ FIFO.** The two are one
-  problem: the 68000 raises the command interrupt and then streams the command
-  list through `0xA15112`, and the runtime does neither. It is why the slave
-  idles forever and why command 2 draws nothing.
+* **The dispatch table has duplicate addresses.** 288 blocks belong to two
+  functions, `recompile.py` emits a row per (block, owner), and `lookup()`
+  picks between them by wherever its binary search lands. Blocking the
+  discovery fix above, and latent everywhere else.
+* **`0x06004A24` is executed and never translated**, reached by an indirect
+  transfer no static xref finds. It is what stops the run at frame ~380.
+* **Only the command interrupt is delivered.** The slave takes 2,197 PWM
+  interrupts in one reference segment and we raise none, so it still idles in
+  the delay loop the diff caught it in.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
   during boot; `vdp_dma` returns early on both.
 * **The 32X frame-select polarity is a guess.** Displayed is taken to be

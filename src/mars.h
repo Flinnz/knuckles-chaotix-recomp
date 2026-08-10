@@ -25,6 +25,16 @@ typedef struct {
     uint16_t adapter, intctl, bank;
     uint16_t comm[8];
 
+    /* The 68000 -> SH-2 data path. The 68000 sets a word count, raises the
+     * SH-2's command interrupt, waits for the handler to arm its DMAC, and then
+     * pushes the payload word by word into an 8-word FIFO which the DMAC
+     * drains. This is how the master's command *list* arrives; the comm
+     * register only carries which kind of command it is. */
+    uint16_t dreq_ctl, dreq_len;
+    uint16_t fifo[8];
+    unsigned fifo_n;
+    uint32_t dma_words;      /* words the DMAC has moved, for reporting */
+
     /* 32X VDP registers */
     uint16_t bitmap_mode, shift, fill_len, fill_start, fill_data, fbctl;
 
@@ -35,8 +45,7 @@ typedef struct {
     uint32_t bail[4];        /* unwinds, indexed by MARS_BAIL_* reason */
     int      trace;          /* record every function entry */
 
-    uint16_t cmds[MARS_MAX_CMDS];
-    unsigned ncmd, cmd_at;
+    unsigned serviced;       /* commands the master has been run for */
 } Mars;
 
 /* The Mega Drive side. */
@@ -65,9 +74,8 @@ extern Gen gen;
 static inline uint8_t *mars_fb_draw(void) { return mars.fb[(mars.fbctl & 1) ^ 1]; }
 static inline uint8_t *mars_fb_shown(void) { return mars.fb[mars.fbctl & 1]; }
 
-/* Queue a command for the SH-2 side. The 68000 posts these through the comm
- * registers; the SH-2 picks one up each time it acknowledges the previous. */
-void mars_post_command(uint16_t cmd);
+/* Run the master for a command the 68000 has just written into comm 0. */
+void mars_run_command(void);
 
 /* The 32X registers are visible from both CPUs — 0x4000/0x4100/0x4200 on the
  * SH-2 side, 0xA15100/0xA15180/0xA15200 on the 68000 side. Both go through
@@ -86,7 +94,19 @@ extern jmp_buf mars_bail;
 #define MARS_BAIL_BUDGET 2
 #define MARS_BAIL_DEPTH  3
 
-void mars_set_commands(const uint16_t *cmds, unsigned n);
+/* The two SH-2s live here rather than in main() so that the runtime can enter
+ * one from anywhere — specifically from a 68000 register write, which is what
+ * raising an interrupt is. */
+extern SH2 mars_cpu[2];          /* 0 = master, 1 = slave */
+
+/* Take an external interrupt on one SH-2 and run its handler to completion.
+ *
+ * Our two CPUs are not interleaved, so there is no instruction boundary to
+ * interrupt: the SH-2 is parked in its dispatch loop whenever the 68000 runs,
+ * and delivering at the moment of the request is what the 68000 observes anyway
+ * — it raises the request and then spins until the handler acknowledges it. */
+void mars_deliver_int(int slave, unsigned level);
+#define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
 
 /* Draw the Mega Drive picture: planes, sprites and palette. */
 void genvdp_render(uint32_t *px, unsigned w, unsigned h);
