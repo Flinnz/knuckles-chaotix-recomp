@@ -26,7 +26,7 @@ A 32X game is not one CPU. The port has to account for all of it:
 | SH-2 master + slave | recompiled C (only 36 KB of code) | moderate |
 | Z80 sound driver | interpret — it is tiny and self-contained | easy |
 | 32X VDP | native: framebuffer, palette, line table, autofill | easy |
-| Genesis VDP | native: planes, sprites, scroll, DMA | moderate |
+| Genesis VDP | native: planes, sprites, scroll, DMA ✅ | moderate |
 | YM2612 + PSG + PWM | existing emulator cores (Nuked-OPN2 etc.) | easy |
 | Controllers | SDL input | easy |
 
@@ -305,9 +305,49 @@ dispatch loop that never returns becomes a finite call chain that unwinds. It
 is why the master "returns" at all. Harmless here, wrong in general, and worth
 fixing when the 68000 starts driving real work.
 
-**M5 — first pixels**
+**M5 — first pixels** 🔵 *a picture, from the Mega Drive half*
 
-Reach the Sega logo, then the title screen. This is where the hard bugs surface.
+There is a frame. It is a recognisable Knuckles' Chaotix level — sky, palm
+trees, machinery, plant sprites, foreground platforms — and it took one thing
+that had been missing all along rather than another CPU bug.
+
+Asking where the pixels were supposed to come from answered it. At 3,000 frames
+the 32X frame buffer holds a line table and no pixels, while the Mega Drive side
+holds 45 KB of tiles, a full 64-colour palette, both name tables nearly full,
+and the display enabled. **In this game the first picture is a Mega Drive
+picture**, and `src/gen68k.c` was keeping all of that as state without anything
+turning it into pixels.
+
+`src/genvdp.c` now does: planes A and B with per-line horizontal and
+whole-screen vertical scroll, sprites in link order with the size and flip
+fields, the six-way priority ordering between planes and sprites, and the
+three-bits-a-channel palette. The 32X bitmap composites over the result, index 0
+transparent. Register decoding is general, but only what this game selects is
+exercised — H40, two 64x32 planes — and the window plane, shadow/highlight,
+interlace and the per-line sprite limits are not modelled.
+
+Getting there needed three smaller things too. The reference showed writes into
+0x000000-0x0000FF and a `jsr` into it, so that region is adapter RAM rather than
+cartridge ROM. Cache purges — writes to the SH7604's associative purge area at
+0x40000000 — were being counted as unmapped. And the 32X has two frame buffers
+selected by FBCR bit 0, where we had one, so drawing and display were the same
+memory.
+
+**What is still missing is the 32X image.** The SH-2 runs the right code — its
+hottest function is the bit reader at 0x06000856, 80,082 entries, the same
+decompressor the reference sits in — but nothing reaches the frame buffer, and
+the line table it does write covers 128 lines of the 224 on screen. Where an
+entry is zero the runtime draws nothing; hardware would scan out the line
+table's own bytes as pixel indices, which is exactly the rainbow stripes that
+first showed up over the picture. `--layers` switches each layer off
+independently, which is how that was pinned down.
+
+So the next thing is the SH-2 side of the same treatment the 68000 got: the logs
+carry SHM and SHS lines in the same format, and `tools/diff68k.py` is most of a
+`diff sh2` already. The remaining 68000 work is interrupt timing — the reference
+takes 102 vblanks in the traced window on real timing where we inject one per
+frame at a fixed point, and that is what stops the post-boot comparison from
+being useful.
 
 **M6 — sound, then the 68000 recompiler**
 

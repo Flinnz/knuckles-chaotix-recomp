@@ -1,5 +1,6 @@
 /* Run the machine: Musashi drives the 68000, the recompiled code drives the
- * master SH-2, and the 32X framebuffer goes to an SDL window.
+ * master SH-2, and the picture — the Mega Drive planes and sprites with the 32X
+ * bitmap composited over them — goes to an SDL window.
  *
  * The two CPUs are cooperatively scheduled rather than interleaved: the 68000
  * runs a frame's worth of cycles, and any command it posted to comm register 0
@@ -85,21 +86,43 @@ static void bios_comm_post(void) {
     }
 }
 
-/* Convert the 32X framebuffer to RGB. Packed pixel and direct colour both
- * start with a per-line table of 16-bit word offsets. */
+/* The picture is the Mega Drive's with the 32X bitmap composited over it.
+ *
+ * Packed pixel and direct colour both start with a per-line table of 16-bit
+ * word offsets. Index 0 in packed pixel, and a zero word in direct colour, are
+ * transparent and leave the Mega Drive pixel showing — which is currently the
+ * whole screen, since the 32X frame buffer holds no pixels yet. The bitmap mode
+ * register's priority bit, which can put the 32X behind the Mega Drive instead,
+ * is not modelled.
+ */
 static void render(uint32_t *px) {
+    genvdp_render(px, W, H);
+
     unsigned mode = mars.bitmap_mode & 3;
+    if (!(gen.layers & 8)) return;              /* 32X layer switched off */
+    if (mode != 1 && mode != 2) return;         /* blank: Mega Drive only */
+    const uint8_t *fb = mars_fb_shown();
     for (int y = 0; y < H; y++) {
         uint32_t e = (uint32_t)y * 2;
-        uint32_t base = ((((uint32_t)mars.fb[e] << 8) | mars.fb[e + 1]) * 2u) & 0x1FFFFu;
+        uint32_t entry = (((uint32_t)fb[e] << 8) | fb[e + 1]);
+        /* A zero entry means the SH-2 never set this line up. Hardware would
+         * take it at face value and scan out the line table's own bytes as
+         * pixel indices, which is where the rainbow stripes came from; the
+         * table is only 128 entries long so far. Showing nothing is the more
+         * truthful rendering of a line the game has not drawn, and it keeps the
+         * Mega Drive picture — which the game *has* drawn — visible. */
+        if (!entry) continue;
+        uint32_t base = (entry * 2u) & 0x1FFFFu;
         for (int x = 0; x < W; x++) {
-            uint16_t col = 0;
+            uint16_t col;
             if (mode == 1) {
-                uint8_t idx = mars.fb[(base + (uint32_t)x) & 0x1FFFFu];
+                uint8_t idx = fb[(base + (uint32_t)x) & 0x1FFFFu];
+                if (!idx) continue;
                 col = (uint16_t)((mars.cram[idx * 2] << 8) | mars.cram[idx * 2 + 1]);
-            } else if (mode == 2) {
+            } else {
                 uint32_t o = (base + (uint32_t)x * 2) & 0x1FFFFu;
-                col = (uint16_t)((mars.fb[o] << 8) | mars.fb[o + 1]);
+                col = (uint16_t)((fb[o] << 8) | fb[o + 1]);
+                if (!col) continue;
             }
             unsigned r = col & 0x1F, g = (col >> 5) & 0x1F, b = (col >> 10) & 0x1F;
             px[y * W + x] = 0xFF000000u | ((r * 255 / 31) << 16)
@@ -112,7 +135,7 @@ int main(int argc, char **argv) {
     const char *rompath = argc > 1 && argv[1][0] != '-' ? argv[1]
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
-    const char *trace68k = NULL;
+    const char *trace68k = NULL, *dump_vdp = NULL;
     unsigned long trace68k_lines = 400000;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
@@ -123,6 +146,12 @@ int main(int argc, char **argv) {
             trace68k = argv[++i];
         else if (!strcmp(argv[i], "--trace68k-lines") && i + 1 < argc)
             trace68k_lines = strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--dump-vdp") && i + 1 < argc)
+            dump_vdp = argv[++i];
+        else if (!strcmp(argv[i], "--layers") && i + 1 < argc)
+            gen.layers = (unsigned)strtoul(argv[++i], NULL, 0);
+
+    if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
     FILE *f = fopen(rompath, "rb");
     if (!f) { perror(rompath); return 1; }
@@ -212,7 +241,9 @@ int main(int argc, char **argv) {
         while (mars.cmd_at < mars.ncmd) {
             unsigned before = mars.cmd_at;
             mars_reset_budget();
-            if (setjmp(mars_bail) == 0) sh2_call(&sh2, MASTER_DISPATCH);
+            int why = setjmp(mars_bail);
+            if (why == 0) sh2_call(&sh2, MASTER_DISPATCH);
+            else mars.bail[why & 3]++;
             serviced++;
             if (mars.cmd_at == before) break;     /* made no progress */
         }
@@ -234,6 +265,26 @@ int main(int argc, char **argv) {
     }
 
     trace68k_close();
+    if (mars.trace) mars_trace_dump("after the frame loop");
+
+    /* Everything the Mega Drive picture is made of, so a renderer bug can be
+     * worked on against a fixed snapshot instead of a moving target. */
+    if (dump_vdp) {
+        FILE *d = fopen(dump_vdp, "wb");
+        if (d) {
+            /* CRAM and VSRAM are 16-bit arrays; write them big-endian so the
+             * file reads the same way the VDP's own words do, rather than
+             * however this host happens to order bytes. */
+            fwrite(gen.vram, 1, sizeof gen.vram, d);
+            for (unsigned i = 0; i < 64; i++)
+                fputc(gen.cram[i] >> 8, d), fputc(gen.cram[i] & 0xFF, d);
+            for (unsigned i = 0; i < 40; i++)
+                fputc(gen.vsram[i] >> 8, d), fputc(gen.vsram[i] & 0xFF, d);
+            fwrite(gen.vdpreg, 1, sizeof gen.vdpreg, d);
+            fclose(d);
+            printf("  wrote %s (vram, cram, vsram, regs)\n", dump_vdp);
+        }
+    }
 
     printf("\nafter %u frames:\n", frames);
     printf("  68000 PC=0x%06X   commands posted %u, serviced %u\n",
@@ -242,11 +293,56 @@ int main(int argc, char **argv) {
            gen.dma_done, gen.vdpreg[1], gen.vdp_addr);
     printf("  32X: bitmap mode 0x%04X  palette %s\n", mars.bitmap_mode,
            mars.cram[0] || mars.cram[3] ? "written" : "all zero");
-    unsigned nz = 0;
-    for (unsigned i = 0; i < MARS_FB; i++) if (mars.fb[i]) nz++;
-    printf("  framebuffer: %u/%u bytes non-zero\n", nz, MARS_FB);
+    /* Enough of the video state to tell an empty frame from a black one: the
+     * line table says where each row lives, and pixels beyond it are the image.
+     * A frame needs all three — a table, pixels, and a palette. */
+    unsigned nz = 0, table = (unsigned)H * 2, pix = 0;
+    for (unsigned i = 0; i < MARS_FB; i++)
+        if (mars_fb_shown()[i]) { nz++; if (i >= table) pix++; }
+    printf("  framebuffer: %u/%u bytes non-zero, %u of them beyond the "
+           "%u-byte line table\n", nz, MARS_FB, pix, table);
+    unsigned first0 = 256;
+    for (unsigned i = 0; i < 256; i++)
+        if (!(((unsigned)mars_fb_shown()[i * 2] << 8) | mars_fb_shown()[i * 2 + 1])) {
+            first0 = i; break;
+        }
+    printf("  line table: first zero entry at line %u;", first0);
+    for (unsigned i = 0; i < 6; i++)
+        printf(" %04X", ((unsigned)mars_fb_shown()[i * 2] << 8)
+                       | mars_fb_shown()[i * 2 + 1]);
+    printf("\n  palette:  ");
+    for (unsigned i = 0; i < 6; i++)
+        printf(" %04X", ((unsigned)mars.cram[i * 2] << 8) | mars.cram[i * 2 + 1]);
+    unsigned cnz = 0;
+    for (unsigned i = 0; i < sizeof mars.cram; i++) if (mars.cram[i]) cnz++;
+    printf("   (%u/%u bytes non-zero)\n", cnz, (unsigned)sizeof mars.cram);
+
+    /* The Mega Drive half has its own picture, and this game may well put the
+     * first one there rather than in the 32X framebuffer. */
+    unsigned vnz = 0, gnz = 0;
+    for (unsigned i = 0; i < sizeof gen.vram; i++) if (gen.vram[i]) vnz++;
+    for (unsigned i = 0; i < 64; i++) if (gen.cram[i]) gnz++;
+    printf("  genesis: vram %u/%u bytes non-zero, cram %u/64 entries set\n",
+           vnz, (unsigned)sizeof gen.vram, gnz);
+    unsigned pa = (unsigned)(gen.vdpreg[2] & 0x38) << 10;
+    unsigned pb = (unsigned)(gen.vdpreg[4] & 0x07) << 13;
+    unsigned na = 0, nb = 0;
+    for (unsigned i = 0; i < 0x1000; i += 2) {
+        if (gen.vram[(pa + i) & 0xFFFF] || gen.vram[(pa + i + 1) & 0xFFFF]) na++;
+        if (gen.vram[(pb + i) & 0xFFFF] || gen.vram[(pb + i + 1) & 0xFFFF]) nb++;
+    }
+    printf("           display %s, planes A=%04X (%u/2048 cells) "
+           "B=%04X (%u/2048), sprites=%04X, size reg=%02X\n",
+           (gen.vdpreg[1] & 0x40) ? "on" : "off", pa, na, pb, nb,
+           (unsigned)(gen.vdpreg[5] & 0x7F) << 9, gen.vdpreg[16]);
+    printf("           regs:");
+    for (unsigned i = 0; i < 24; i++) printf(" %02X", gen.vdpreg[i]);
+    printf("\n");
     printf("  unmapped: 68k r=%u w=%u, sh2=%u; dispatch depth bails %u\n",
            gen.unknown_r, gen.unknown_w, mars.unknown, mars.deep);
+    printf("  SH-2 unwound: %u idle, %u out of budget, %u too deep\n",
+           mars.bail[MARS_BAIL_IDLE], mars.bail[MARS_BAIL_BUDGET],
+           mars.bail[MARS_BAIL_DEPTH]);
 
     if (headless_frames) {
         render(px);

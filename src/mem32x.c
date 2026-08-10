@@ -67,8 +67,8 @@ static void autofill(void) {
     uint32_t addr = mars.fill_start;
     for (uint32_t i = 0; i <= mars.fill_len; i++) {
         uint32_t o = (addr & 0x1FFFFu);
-        mars.fb[o] = (uint8_t)(mars.fill_data >> 8);
-        mars.fb[o + 1] = (uint8_t)mars.fill_data;
+        mars_fb_draw()[o] = (uint8_t)(mars.fill_data >> 8);
+        mars_fb_draw()[o + 1] = (uint8_t)mars.fill_data;
         /* The fill wraps within a 512-byte line, which is what makes it
          * useful for clearing one scanline at a time. */
         addr = (addr & 0xFF00u) | ((addr + 2) & 0xFFu);
@@ -163,8 +163,8 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
 
 static uint8_t *resolve(uint32_t a, uint32_t need) {
     if (IN(a, 0x06000000u, 0x06040000u)) return &mars.sdram[a - 0x06000000u];
-    if (IN(a, 0x04000000u, 0x04020000u)) return &mars.fb[a - 0x04000000u];
-    if (IN(a, 0x04020000u, 0x04040000u)) return &mars.fb[a - 0x04020000u];
+    if (IN(a, 0x04000000u, 0x04020000u)) return mars_fb_draw() + (a - 0x04000000u);
+    if (IN(a, 0x04020000u, 0x04040000u)) return mars_fb_draw() + (a - 0x04020000u);
     if (IN(a, 0x02000000u, 0x02000000u + MARS_ROM_MAX)) {
         uint32_t o = a - 0x02000000u;
         return o + need <= mars.rom_size ? &mars.rom[o] : NULL;

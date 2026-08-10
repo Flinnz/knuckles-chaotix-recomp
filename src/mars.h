@@ -9,14 +9,14 @@
 
 #define MARS_ROM_MAX   (4u * 1024 * 1024)
 #define MARS_SDRAM     (256u * 1024)
-#define MARS_FB        (128u * 1024)
+#define MARS_FB        (128u * 1024)   /* one frame; there are two of them */
 #define MARS_MAX_CMDS  64
 
 typedef struct {
     uint8_t  rom[MARS_ROM_MAX];
     uint32_t rom_size;
     uint8_t  sdram[MARS_SDRAM];
-    uint8_t  fb[MARS_FB];
+    uint8_t  fb[2][MARS_FB];
     uint8_t  cache[4096];
     uint8_t  cram[512];
     uint8_t  onchip[512];    /* FRT / WDT / DMAC / SCI, as a plain store */
@@ -32,6 +32,7 @@ typedef struct {
     uint32_t unknown;        /* accesses outside the modelled map */
     uint32_t missing;        /* indirect transfers with no recompiled target */
     uint32_t deep;           /* dispatch recursion that hit the depth bound */
+    uint32_t bail[4];        /* unwinds, indexed by MARS_BAIL_* reason */
     int      trace;          /* record every function entry */
 
     uint16_t cmds[MARS_MAX_CMDS];
@@ -50,10 +51,19 @@ typedef struct {
     uint16_t io[16];
     uint16_t dreq_ctl;
     uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
+    unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
 } Gen;
 
 extern Mars mars;
 extern Gen gen;
+
+/* The 32X has two frame buffers and FBCR bit 0 selects between them, so one can
+ * be drawn into while the other is on screen. Everything the CPUs reach at
+ * 0x24000000 (and the 68000 at 0x840000) goes to the one that is not being
+ * displayed; the display scans out the other. Modelling only one conflates the
+ * two, which shows up as the display finding a half-written line table. */
+static inline uint8_t *mars_fb_draw(void) { return mars.fb[(mars.fbctl & 1) ^ 1]; }
+static inline uint8_t *mars_fb_shown(void) { return mars.fb[mars.fbctl & 1]; }
 
 /* Queue a command for the SH-2 side. The 68000 posts these through the comm
  * registers; the SH-2 picks one up each time it acknowledges the previous. */
@@ -77,6 +87,9 @@ extern jmp_buf mars_bail;
 #define MARS_BAIL_DEPTH  3
 
 void mars_set_commands(const uint16_t *cmds, unsigned n);
+
+/* Draw the Mega Drive picture: planes, sprites and palette. */
+void genvdp_render(uint32_t *px, unsigned w, unsigned h);
 
 /* Seed the 256 bytes the adapter supplies at 0x000000 — see src/gen68k.c. Must
  * run before the 68000's reset, which fetches its vectors from there. */

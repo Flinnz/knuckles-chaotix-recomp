@@ -5,11 +5,11 @@
  * registers, which appear here at 0xA15120 and on the SH-2 side at 0x4020, so
  * both views index the same `mars.comm[]`.
  *
- * The Genesis VDP is modelled far enough to keep the game moving: the control
- * port's address/code latch, the data port, DMA from 68000 memory, and a status
- * register whose blanking bits advance so that polling loops terminate. Nothing
- * here renders a Mega Drive plane yet — the picture we are after comes from the
- * 32X framebuffer.
+ * The Genesis VDP lives here as state: the control port's address/code latch,
+ * the data port, DMA from 68000 memory, and a status register whose blanking
+ * bits advance so that polling loops terminate. Turning that state into pixels
+ * is src/genvdp.c, and in this game that is where the picture comes from — the
+ * 32X frame buffer is composited over it but holds no image yet.
  */
 #include <stdio.h>
 #include <string.h>
@@ -274,8 +274,9 @@ void m68k_write_memory_16(unsigned int a, unsigned int v) {
     if (IN(a, 0x840000u, 0x880000u)) {                  /* 32X framebuffer */
         uint32_t o = (a - 0x840000u) & 0x1FFFEu;
         int over = a >= 0x860000u;
-        if (!over || (w >> 8)) mars.fb[o] = (uint8_t)(w >> 8);
-        if (!over || (w & 0xFF)) mars.fb[o + 1] = (uint8_t)w;
+        uint8_t *fb = mars_fb_draw();
+        if (!over || (w >> 8)) fb[o] = (uint8_t)(w >> 8);
+        if (!over || (w & 0xFF)) fb[o + 1] = (uint8_t)w;
         return;
     }
     if (rom_at(a) != 0xFFFFFFFFu) return;               /* writes to ROM ignored */

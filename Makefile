@@ -12,7 +12,7 @@ CFLAGS  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
 
 # m68kcpu.c includes m68kfpu.c unconditionally, which needs softfloat even for
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
-SRC = build/sh2_recomp.c src/mem32x.c src/gen68k.c src/trace68k.c src/mars_main.c \
+SRC = build/sh2_recomp.c src/mem32x.c src/gen68k.c src/genvdp.c src/trace68k.c src/mars_main.c \
       $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c $(MUSASHI)/softfloat/softfloat.c
 
 build/mars: $(SRC) src/mars.h src/sh2.h src/m68kconf.h Makefile $(GEN)/m68kops.c
