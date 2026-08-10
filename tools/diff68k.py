@@ -107,12 +107,32 @@ def find_reset_pc(rom_path):
     return int.from_bytes(head[4:8], "big") & 0xFFFFFF
 
 
+def _find_in(path, needle):
+    """Byte offset of `needle` in a file too large to hold in memory."""
+    with open(path, "rb") as f:
+        carry, base, chunk = b"", 0, 1 << 24
+        while True:
+            buf = f.read(chunk)
+            if not buf:
+                return -1
+            hay = carry + buf
+            i = hay.find(needle)
+            if i >= 0:
+                return base - len(carry) + i
+            base += len(buf)
+            carry = hay[-len(needle):]
+
+
 def extract(rom_path, out_path, limit):
     """Locate the 68000 reset in the reference logs and copy the run forward.
 
-    The logs hold every CPU interleaved, so the 68000 is a few percent of the
-    lines; and they are segmented, so the reset has to be searched for rather
-    than assumed to be at the start of the first file.
+    Two things make this more than a grep. The logs hold every CPU interleaved,
+    so the 68000 is a couple of percent of the lines. And they are 1 GB segments
+    of one long run, so the reset is wherever it happens to fall — here a way
+    into the fifth segment, because tracing was started with the game already
+    running and the console reset afterwards. The segments do run on from each
+    other, though: one ends mid-instruction-stream and the next picks it up at
+    the branch target, so the trace is followed across them until `limit` lines.
     """
     pc = find_reset_pc(rom_path)
     needle = ("CPU  %06x" % pc).encode()
@@ -121,32 +141,25 @@ def extract(rom_path, out_path, limit):
     if not logs:
         sys.exit("no reference logs in %s/" % ROMS)
 
-    for path in logs:
-        size = os.path.getsize(path)
-        with open(path, "rb") as f:
-            at, chunk = -1, 1 << 24
-            carry, base = b"", 0
-            while True:
-                buf = f.read(chunk)
-                if not buf:
-                    break
-                hay = carry + buf
-                i = hay.find(needle)
-                if i >= 0:
-                    at = base - len(carry) + i
-                    break
-                base += len(buf)
-                carry = hay[-len(needle):]
-            if at < 0:
-                print("  %-52s no reset (%d MB)"
-                      % (os.path.basename(path), size >> 20))
-                continue
-
+    first, at = None, -1
+    for k, path in enumerate(logs):
+        at = _find_in(path, needle)
+        if at >= 0:
+            first = k
             print("  %s: reset PC 0x%06X at byte %d"
                   % (os.path.basename(path), pc, at))
-            f.seek(at)
-            n = 0
-            with open(out_path, "w") as out:
+            break
+        print("  %-52s no reset (%d MB)"
+              % (os.path.basename(path), os.path.getsize(path) >> 20))
+    if first is None:
+        sys.exit("reset PC 0x%06X not found in any log" % pc)
+
+    n = 0
+    with open(out_path, "w") as out:
+        for k in range(first, len(logs)):
+            with open(logs[k], "rb") as f:
+                if k == first:
+                    f.seek(at)
                 for raw in f:
                     line = raw.decode("latin1")
                     if line.startswith("CPU "):
@@ -154,9 +167,10 @@ def extract(rom_path, out_path, limit):
                         n += 1
                         if n >= limit:
                             break
-            print("  wrote %s (%d lines)" % (out_path, n))
-            return
-    sys.exit("reset PC 0x%06X not found in any log" % pc)
+            print("  through %s: %d lines" % (os.path.basename(logs[k]), n))
+            if n >= limit:
+                break
+    print("  wrote %s (%d lines)" % (out_path, n))
 
 
 # ------------------------------------------------------------- annotation ---
@@ -236,6 +250,7 @@ class Div:
         self.span = 0                  # STATE: instructions until states agree
         self.ours = self.theirs = 0    # TRIPS: instructions each side ran
         self.skipped = 0               # FLOW: reference lines we never execute
+        self.exhausted = False         # FLOW: our stream simply ran out
         self.fatal = False
 
     def summary(self):
@@ -247,6 +262,8 @@ class Div:
         if self.kind is STATE:
             return ("registers differ at the same instruction, for %d "
                     "instruction(s)" % self.span)
+        if self.exhausted:
+            return "our trace ends here — inconclusive, run more frames"
         if self.fatal:
             return "control flow parts and never rejoins"
         return ("control flow parts; %d reference instruction(s) we never run"
@@ -336,7 +353,11 @@ def diff(ref, ours, window, hold, skip):
                     break
             if hit is None:
                 d = Div(FLOW, i, j)
-                d.fatal = True
+                # Our stream ending is not the paths parting. If there is less
+                # of it left than the search needs, the answer is "run longer",
+                # not "diverged" — and a long copy loop is easily that big.
+                d.exhausted = len(ours) - j < window
+                d.fatal = not d.exhausted
                 divs.append(d)
                 break
             di, p = hit
@@ -376,7 +397,11 @@ def main():
     ap.add_argument("--ours", default=OUR_TRACE)
     ap.add_argument("--extract", action="store_true",
                     help="rebuild the reference extract from roms/*.log")
-    ap.add_argument("--limit", type=int, default=REF_LINES)
+    ap.add_argument("--limit", type=int, default=REF_LINES,
+                    help="reference lines to extract")
+    ap.add_argument("--ref-lines", type=int, default=0,
+                    help="compare only the first N reference lines; the boot "
+                         "ends at 20213, before the first vblank interrupt")
     ap.add_argument("--context", type=int, default=12,
                     help="reference instructions of lead-up to print")
     ap.add_argument("--window", type=int, default=40000,
@@ -399,14 +424,20 @@ def main():
     dis = Disasm(args.rom)
     ref, marks = parse(args.ref, want_text=True)
     ours, _ = parse(args.ours)
+    if args.ref_lines:
+        ref = [r for r in ref if r.lineno <= args.ref_lines]
     print("reference %d instructions, ours %d" % (len(ref), len(ours)))
     if not ref or not ours:
         sys.exit("nothing to compare")
 
     divs, agreed = diff(ref, ours, args.window, args.hold, args.skip)
     fatal = [d for d in divs if d.fatal]
-    print("%d instructions agreed; %d divergence(s), %d fatal"
+    stop = divs[-1] if divs and (divs[-1].fatal or divs[-1].exhausted) else None
+    print("%d instructions agreed; %d divergence(s), %d fatal" 
           % (agreed, len(divs), len(fatal)))
+    print("reached reference line %d of %d%s"
+          % (ref[stop.i].lineno if stop else ref[-1].lineno, ref[-1].lineno,
+             "" if stop else " — the whole extract"))
 
     if not divs:
         print("\nthe two runs agree for the whole reference trace")
@@ -439,12 +470,15 @@ def main():
             break
 
     # Detail: the fatal divergence, plus the first few others for context.
-    detail = fatal[:1] + [d for d in divs if not d.fatal][:args.detail]
+    detail = [d for d in divs if d.fatal or d.exhausted][:1]
+    detail += [d for d in divs if not (d.fatal or d.exhausted)][:args.detail]
     detail.sort(key=lambda d: d.i)
     for d in detail:
         i, j = d.i, d.j
         ran_out = j >= len(ours)
         head = ("OUR TRACE ENDS HERE — nothing left to compare" if ran_out
+                else "INCONCLUSIVE — our trace ends here; run more frames"
+                if d.exhausted
                 else "FATAL DIVERGENCE — control flow never rejoins" if d.fatal
                 else "divergence — " + d.summary())
         print("\n" + "=" * 74)

@@ -20,6 +20,43 @@ Gen gen;
 
 #define IN(a, lo, hi) ((a) >= (lo) && (a) < (hi))
 
+/* The adapter's 68000-side vector RAM: 256 bytes at 0x000000 that the 32X
+ * supplies in place of the cartridge, holding the exception vectors plus a
+ * couple of BIOS helper routines tucked into the slots the 68000 leaves
+ * reserved. The reference trace shows all three of its distinguishing
+ * behaviours: the cartridge writes vector 28 at 0x000070 (from 0x88077E and
+ * again at 0x8809EA), which only works if the region takes writes; it calls a
+ * routine at 0x0000C0 (from 0x8809E0) whose first opcode is 0x08F9, where the
+ * cartridge's own image holds the 0x00880B2E handler pointer that fills every
+ * reserved slot; and everything from 0x000100 up matches the cartridge byte for
+ * byte, which is how the security stub at 0x0003F0 ran in lock step.
+ *
+ * We have no BIOS image, so the vectors are seeded from the cartridge's own
+ * table — the handlers the game expects to reach — and the one helper the
+ * cartridge calls is assembled from the four instructions the reference
+ * executes there:
+ *
+ *      0000c0  08f9 0000 00a15107   bset.b  #0,($a15107)    ; RV on
+ *      0000c8  1280                 move.b  d0,(a1)         ; a1 = 0xA130F1
+ *      0000ca  08b9 0000 00a15107   bclr.b  #0,($a15107)    ; RV off
+ *      0000d2  4e75                 rts
+ *
+ * Flipping RV around the write is what lets the 68000 reach the cartridge's own
+ * mapper register at 0xA130F1. Both of those registers are already no-ops on
+ * this side, so the routine's only effect that matters here is that it returns.
+ */
+static const uint8_t bios_helper_c0[] = {
+    0x08, 0xF9, 0x00, 0x00, 0x00, 0xA1, 0x51, 0x07,
+    0x12, 0x80,
+    0x08, 0xB9, 0x00, 0x00, 0x00, 0xA1, 0x51, 0x07,
+    0x4E, 0x75,
+};
+
+void gen68k_init_vectors(void) {
+    memcpy(gen.vecram, mars.rom, sizeof gen.vecram);
+    memcpy(&gen.vecram[0xC0], bios_helper_c0, sizeof bios_helper_c0);
+}
+
 static uint32_t rom_at(uint32_t a) {
     if (IN(a, 0x880000u, 0x900000u)) return a - 0x880000u;
     if (IN(a, 0x900000u, 0xA00000u))
@@ -121,7 +158,15 @@ static int mars_reg_read(uint32_t a, uint16_t *out) {
 static int mars_reg_write(uint32_t a, uint16_t v) {
     switch (a & ~1u) {
     case 0xA15100: mars.adapter = v; return 1;
-    case 0xA15102: mars.intctl = v; return 1;
+    /* Bits 0 and 1 raise the command interrupt on the master and slave SH-2.
+     * On hardware the interrupted SH-2 clears the bit from its own handler, and
+     * the 68000 waits for that as an acknowledgement — at 0x8819C6 it spins on
+     * bit 0 before pushing data through the DREQ FIFO. Our SH-2s do not run
+     * concurrently and are never entered through that vector, so the request is
+     * recorded as already acknowledged. That keeps the 68000 moving, but it is a
+     * stand-in: the transfer it is arranging still needs an SH-2 at the other
+     * end to consume it. */
+    case 0xA15102: mars.intctl = v & ~0x0003u; return 1;
     case 0xA15104: mars.bank = v; return 1;
     case 0xA1510A: gen.dreq_ctl = v; return 1;
     default:
@@ -151,6 +196,7 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
 /* ------------------------------------------------------------ callbacks --- */
 unsigned int m68k_read_memory_8(unsigned int a) {
     a &= 0xFFFFFFu;
+    if (a < sizeof gen.vecram) return gen.vecram[a];
     uint32_t o = rom_at(a);
     if (o != 0xFFFFFFFFu && o < mars.rom_size) return mars.rom[o];
     if (IN(a, 0xFF0000u, 0x1000000u)) return gen.ram[a & 0xFFFFu];
@@ -159,6 +205,8 @@ unsigned int m68k_read_memory_8(unsigned int a) {
 
 unsigned int m68k_read_memory_16(unsigned int a) {
     a &= 0xFFFFFEu;
+    if (a < sizeof gen.vecram)
+        return ((unsigned)gen.vecram[a] << 8) | gen.vecram[a + 1];
     uint32_t o = rom_at(a);
     if (o != 0xFFFFFFFFu && o + 1 < mars.rom_size)
         return ((unsigned)mars.rom[o] << 8) | mars.rom[o + 1];
@@ -189,6 +237,7 @@ unsigned int m68k_read_memory_32(unsigned int a) {
 
 void m68k_write_memory_8(unsigned int a, unsigned int v) {
     a &= 0xFFFFFFu;
+    if (a < sizeof gen.vecram) { gen.vecram[a] = (uint8_t)v; return; }
     if (IN(a, 0xFF0000u, 0x1000000u)) { gen.ram[a & 0xFFFFu] = (uint8_t)v; return; }
     if (IN(a, 0xA10000u, 0xA10020u)) { gen.io[(a & 0x1F) >> 1] = (uint16_t)v; return; }
     if (IN(a, 0xA00000u, 0xA10000u)) return;            /* Z80 space */
@@ -203,6 +252,11 @@ void m68k_write_memory_8(unsigned int a, unsigned int v) {
 void m68k_write_memory_16(unsigned int a, unsigned int v) {
     a &= 0xFFFFFEu;
     uint16_t w = (uint16_t)v;
+    if (a < sizeof gen.vecram) {
+        gen.vecram[a] = (uint8_t)(w >> 8);
+        gen.vecram[a + 1] = (uint8_t)w;
+        return;
+    }
     if (IN(a, 0xFF0000u, 0x1000000u)) {
         gen.ram[a & 0xFFFFu] = (uint8_t)(w >> 8);
         gen.ram[(a & 0xFFFFu) + 1] = (uint8_t)w;

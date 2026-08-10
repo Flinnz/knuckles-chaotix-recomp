@@ -41,6 +41,7 @@ typedef struct {
 /* The Mega Drive side. */
 typedef struct {
     uint8_t  ram[64 * 1024];
+    uint8_t  vecram[256];    /* what the adapter supplies at 0x000000 */
     uint8_t  vram[64 * 1024];
     uint16_t cram[64], vsram[40];
     uint8_t  vdpreg[32];
@@ -76,6 +77,10 @@ extern jmp_buf mars_bail;
 #define MARS_BAIL_DEPTH  3
 
 void mars_set_commands(const uint16_t *cmds, unsigned n);
+
+/* Seed the 256 bytes the adapter supplies at 0x000000 — see src/gen68k.c. Must
+ * run before the 68000's reset, which fetches its vectors from there. */
+void gen68k_init_vectors(void);
 
 /* One line per 68000 instruction, in the reference tracer's format, for
  * `tools/diff68k.py` to compare against a known-good emulator's log. */

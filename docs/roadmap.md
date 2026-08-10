@@ -238,23 +238,67 @@ the word the 68000 had just prefetched at that point was 0x0040. The bit's
 its behaviour is pinned by two independent reads, and modelling it moved the
 68000 eleven reference instructions further, onto the reference's own path.
 
-**Where it stops now:** at 0x8807CC. The 68000 reads the SH-2 program checksum
-from the MARS header at 0x88018E — 0xB61C — and then spins at 0x8807C2 until
-comm register 4 holds the same value. The reference's master SH-2 posts it after
-the 68000 has waited 336,174 instructions; ours never posts it, because our
-scheduler runs the SH-2's whole init before the 68000 starts and then only
-services queued commands. This is the rendezvous problem the two stand-ins were
-papering over, and it is the next thing to fix.
+**The 68000 now runs the entire boot in step with the reference.** Working down
+the list the diff produced turned up three more gaps, each of the same kind: the
+adapter does something for the cartridge that we were not doing for it.
 
-The remaining divergences are all understood and none is fatal. Polls that
-finish instantly for us where the reference waits: the VDP DMA-busy bit
-(16,555 instructions against our 1) and the 32X autofill FEN bit (4,330 against
-1,786, twice). Registers that differ without changing any branch: the version
-register's hardware-revision nibble, the undriven bits 14-8 of the bitmap mode
-register, and one extra iteration clearing FM at 0xA15100 because our SH-2 ran
-to completion first. And one path the reference takes that we do not — its
-controller ports are already initialised, so it skips the cold-boot shortcut at
-0x000424 — where both roads reconverge four instructions later at 0x000436.
+*The cartridge checksum.* The 68000 reads the header's checksum word at
+0x88018E — 0xB61C — and spins at 0x8807C2 until comm register 4 holds the same
+value. The reference's master SH-2 posts it from 0x00000284, having summed the
+cartridge in a loop at 0x00000278 that costs 9,435,642 instructions. That is
+BIOS code, so the runtime supplies it, and the sum is computed rather than
+asserted: 16-bit words from 0x200 to the end, which reproduces the header word
+of both the JU and E images exactly.
+
+*The handshake was being posted too early.* The 68000 zeroes comm 4 at 0x0003F6
+and comm 0-3 at 0x8806F0, as part of its own boot, and only then waits for the
+BIOS to fill them — so "M_OK"/"S_OK" written before the 68000 started were being
+wiped, and would have hung at 0x8809A6 as soon as the checksum let us reach it.
+Each value is now delivered once, the first time the 68000 is found to have
+cleared it.
+
+*The adapter supplies the vector table.* At 0x8809E0 the 68000 does
+`jsr ($0000c0)`, and the reference finds four instructions there — RV on, a byte
+to the mapper at 0xA130F1, RV off, `rts` — where the cartridge's own image has
+the 0x00880B2E handler pointer that fills every reserved vector slot. It also
+*writes* vector 28 at 0x000070, twice. So 0x000000-0x0000FF is 256 bytes of
+adapter RAM holding the vectors plus BIOS helpers in the slots the 68000 leaves
+reserved, not cartridge ROM; everything from 0x000100 up is the cartridge, which
+is why the security stub at 0x0003F0 matched all along. `src/gen68k.c` seeds that
+region from the cartridge's own table and assembles the one helper the cartridge
+calls, its four opcodes checked against the reference's.
+
+One more, found the same way: the 68000 raises the master SH-2's command
+interrupt at 0x8819BE and waits at 0x8819C6 for the SH-2's handler to clear it.
+Nothing clears it here, so the request is recorded as already acknowledged — a
+stand-in, since the DREQ transfer it is arranging still needs an SH-2 at the
+other end.
+
+*Gate met:* `python3 tools/diff68k.py --ref-lines 20213` walks the whole boot,
+20,062 of the reference's 20,178 instructions agreeing exactly and no divergence
+in control flow. The 68000 now posts real commands to the SH-2 (18 in 20 frames,
+13 serviced), drives Genesis VDP DMA, and there are zero unmapped accesses on
+the SH-2 side — the last of those turned out to be cache management, writes to
+the SH7604's associative purge area at 0x40000000, which are no-ops for a model
+with no cache.
+
+The 34 differences that remain in the boot are all understood and none changes a
+branch. Polls that finish instantly for us where the reference waits: the VDP
+DMA-busy bit (16,555 instructions against our 1), the autofill FEN bit, and the
+comm rendezvous themselves, now that we answer them at once rather than after
+336,174 instructions. Registers that differ without consequence: the version
+register's hardware-revision nibble, and the undriven bits 14-8 of the bitmap
+mode register. And one path the reference takes that we do not — its controller
+ports are already initialised, so it skips the cold-boot shortcut at 0x000424 —
+where both roads reconverge four instructions later at 0x000436.
+
+**Past the boot the oracle thins out.** The reference extract now follows all
+four remaining log segments, 54,647 lines in all, and our run reaches the end of
+it without control flow ever parting for good. But only 22,037 of those 54,081
+instructions agree exactly, because the first vblank interrupt lands at line
+20,781 and there are 102 of them: we inject one per frame at a fixed point,
+where the reference takes them on real timing. Comparing that section usefully
+needs interrupt timing modelled, not just more trace.
 
 Also outstanding: `jmp` is translated as call-then-return, so a hardware
 dispatch loop that never returns becomes a finite call chain that unwinds. It

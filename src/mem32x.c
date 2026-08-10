@@ -184,6 +184,16 @@ static int is_overwrite(uint32_t a) {
     return IN(a, 0x04020000u, 0x04040000u);
 }
 
+/* The SH7604 splits its address space by the top three bits, and 0x40000000 to
+ * 0x5FFFFFFF is the associative purge area: a write there invalidates the cache
+ * line holding the same address in the cached area, and the data is discarded.
+ * Our SH-2 has no cache to purge, so these are no-ops — but they have to be
+ * recognised, or the game's cache management shows up as 1,792 unmapped writes
+ * to addresses like 0x46004F82, which is SDRAM 0x06004F82 being purged. */
+static int is_purge(uint32_t a) {
+    return IN(a, 0x40000000u, 0x60000000u);
+}
+
 uint8_t sh2_r8(SH2 *c, uint32_t a) {
     mars_tick_budget();
     (void)c; a = canon(a);
@@ -220,6 +230,7 @@ uint32_t sh2_r32(SH2 *c, uint32_t a) {
 void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
     mars_tick_budget();
     (void)c; uint32_t ra = canon(a);
+    if (is_purge(ra)) return;
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 1)) return;
     if (is_overwrite(ra) && v == 0) return;
     uint8_t *p = resolve(ra, 1);
@@ -229,6 +240,7 @@ void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
 void sh2_w16(SH2 *c, uint32_t a, uint16_t v) {
     mars_tick_budget();
     (void)c; uint32_t ra = canon(a);
+    if (is_purge(ra)) return;
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 2)) return;
     uint8_t *p = resolve(ra, 2);
     if (p) {

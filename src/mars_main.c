@@ -18,6 +18,7 @@
 #define H_DST 0x3D8
 #define H_SIZE 0x3DC
 #define H_MSTART 0x3E0
+#define H_CHECKSUM 0x18E
 #define CACHE_ROM_SRC 0x07FC00
 #define REDY_ADDR 0x06003610
 
@@ -34,6 +35,54 @@
 static uint32_t be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
          | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static uint16_t be16(const uint8_t *p) {
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+/* The sum the adapter's boot ROM computes over the cartridge: 16-bit words from
+ * 0x200 to the end, kept to 16 bits. That is the ordinary Mega Drive checksum,
+ * and it reproduces the header word of both the JU and E images exactly. */
+static uint16_t rom_checksum(void) {
+    uint32_t sum = 0;
+    for (uint32_t o = 0x200; o + 1 < mars.rom_size; o += 2)
+        sum += be16(&mars.rom[o]);
+    return (uint16_t)sum;
+}
+
+/* What the 32X BIOS posts into the comm registers during boot. We have no BIOS
+ * image and start the SH-2s at the cartridge entry points, so these have to be
+ * supplied; the reference trace shows all of them written by SH-2 code running
+ * below 0x00000300, which is the adapter's boot ROM rather than the cartridge.
+ *
+ *   comm 4    the cartridge checksum, summed by the master at 0x00000278 and
+ *             posted at 0x00000284. The 68000 waits for it at 0x8807C2 and then
+ *             compares it against the header's own word at 0x88018E.
+ *   comm 0-3  "M_OK" and "S_OK", written by the slave around 0x000001C0. The
+ *             68000 waits for those at 0x8809A6 and 0x8809B2.
+ *
+ * None of it can be posted before the 68000 starts, because the 68000 zeroes
+ * these registers itself as part of its own boot — comm 4 at 0x0003F6, comm 0-3
+ * at 0x8806F0 — and only then waits for the BIOS to fill them. On hardware the
+ * two CPUs are doing this concurrently. Here each value is delivered once, the
+ * first time the 68000 is found to have cleared it, which from the 68000's side
+ * is indistinguishable. Delivering once and not again matters: the 68000 clears
+ * comm 4 again at 0x8807D2 and all of them at 0x880A00 once it is satisfied,
+ * and from there on the registers carry real traffic.
+ */
+static void bios_comm_post(void) {
+    static int sum_done, ok_done;
+    if (!sum_done && mars.comm[4] == 0) {
+        mars.comm[4] = rom_checksum();
+        sum_done = 1;
+    }
+    if (!ok_done && !mars.comm[0] && !mars.comm[1]
+                 && !mars.comm[2] && !mars.comm[3]) {
+        mars.comm[0] = 0x4D5F; mars.comm[1] = 0x4F4B;   /* M_OK */
+        mars.comm[2] = 0x535F; mars.comm[3] = 0x4F4B;   /* S_OK */
+        ok_done = 1;
+    }
 }
 
 /* Convert the 32X framebuffer to RGB. Packed pixel and direct colour both
@@ -117,18 +166,11 @@ int main(int argc, char **argv) {
     printf("  comm: %04X %04X %04X %04X  (want M_OK / S_OK)\n",
            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3]);
 
-    /* The 32X BIOS, which runs on both SH-2s out of the adapter's own boot ROM
-     * at 0x00000000, performs a ready handshake with the 68000 before cartridge
-     * code takes over: it posts "M_OK" and "S_OK" into the comm registers, and
-     * the 68000 spins at 0x8809A6 until it sees them. We have no BIOS image and
-     * start the SH-2s at the cartridge entry points instead, so the handshake
-     * is supplied here. Confirmed against a reference trace, where those words
-     * are written by the slave executing at 0x000001C0 - BIOS space, not SDRAM.
-     */
-    mars.comm[0] = 0x4D5F; mars.comm[1] = 0x4F4B;   /* M_OK */
-    mars.comm[2] = 0x535F; mars.comm[3] = 0x4F4B;   /* S_OK */
-    printf("posted BIOS handshake: M_OK / S_OK\n");
+    printf("  cartridge checksum 0x%04X, header says 0x%04X%s\n",
+           rom_checksum(), be16(&mars.rom[H_CHECKSUM]),
+           rom_checksum() == be16(&mars.rom[H_CHECKSUM]) ? "" : "  MISMATCH");
 
+    gen68k_init_vectors();
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
@@ -164,6 +206,8 @@ int main(int argc, char **argv) {
         m68k_set_irq(6);
         m68k_execute(2000);
         m68k_set_irq(0);
+
+        bios_comm_post();
 
         while (mars.cmd_at < mars.ncmd) {
             unsigned before = mars.cmd_at;
