@@ -175,7 +175,10 @@ void gen68k_frame_start(void);
 
 /* One line per 68000 instruction, in the reference tracer's format, for
  * `tools/diff68k.py` to compare against a known-good emulator's log. */
-int trace68k_open(const char *path, unsigned long max_lines);
+/* `blocks` records one line per recompiled basic block entered instead of one
+ * per interpreted instruction — the only granularity the translated build can
+ * be hooked at, and what `tools/diff68k.py --blocks` compares. */
+int trace68k_open(const char *path, unsigned long max_lines, int blocks);
 void trace68k_close(void);
 
 /* The same for the SH-2s, one line per basic block entered rather than per

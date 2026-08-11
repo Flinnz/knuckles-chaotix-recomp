@@ -18,7 +18,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "mars.h"
+#include "m68000.h"
 #include "m68k.h"
+
+static void line(unsigned int pc, const uint32_t *r, uint32_t sr, uint32_t osp);
 
 static FILE *tf;
 static unsigned long emitted, limit;
@@ -75,6 +78,21 @@ static void hook(unsigned int pc) {
     f[7] = (sr & 0x10) ? 'X' : 'x';
     f[8] = 0;
 
+    line(pc, r, sr, osp);
+}
+
+static void line(unsigned int pc, const uint32_t *r, uint32_t sr, uint32_t osp) {
+    char f[9];
+    f[0] = (sr & 0x8000) ? 'T' : 't';
+    f[1] = (sr & 0x2000) ? 'S' : 's';
+    f[2] = (char)('0' + ((sr >> 8) & 7));
+    f[3] = (sr & 0x01) ? 'C' : 'c';
+    f[4] = (sr & 0x02) ? 'V' : 'v';
+    f[5] = (sr & 0x04) ? 'Z' : 'z';
+    f[6] = (sr & 0x08) ? 'N' : 'n';
+    f[7] = (sr & 0x10) ? 'X' : 'x';
+    f[8] = 0;
+
     fprintf(tf, "CPU  %06x  %04x  ", pc & 0xFFFFFFu,
             (unsigned)m68k_read_memory_16(pc));
     for (int i = 0; i < 8; i++) fprintf(tf, "d%d:%08x ", i, r[i]);
@@ -82,21 +100,59 @@ static void hook(unsigned int pc) {
     fprintf(tf, "sp:%08x %s\n", osp, f);
 }
 
-/* Called once, before the 68000 runs. */
-int trace68k_open(const char *path, unsigned long max_lines) {
+/* --- the recompiled 68000 -------------------------------------------------
+ *
+ * One line per basic block entered rather than per instruction, because a block
+ * label is the only place the translated code can be hooked. Same format and
+ * same run-collapsing, so `tools/diff68k.py --blocks` reads one stream with the
+ * reference filtered to the block addresses. See M68K_BLOCK in src/m68000.h.
+ *
+ * The address is a cartridge offset — recompiled code names offsets, the same
+ * bytes being reachable through more than one window — and the diff folds the
+ * reference the same way.
+ */
+int m68k_trace;
+
+void m68k_block(const M68K *c, uint32_t addr) {
+    if (!tf) return;
+    uint32_t r[16], sr = m68k_get_sr(c), osp = c->usp;
+    for (int i = 0; i < 8; i++) { r[i] = c->d[i]; r[8 + i] = c->a[i]; }
+
+    if (run_open && addr == run_pc && sr == run_sr && osp == run_osp
+            && !memcmp(r, run_r, sizeof r)) {
+        run_n++;
+        return;
+    }
+    flush_run();
+    if (limit && emitted >= limit) return;
+    emitted++;
+    run_pc = addr; run_sr = sr; run_osp = osp;
+    memcpy(run_r, r, sizeof r);
+    run_open = 1;
+    line(addr, r, sr, osp);
+}
+
+/* Called once, before the 68000 runs. `blocks` selects the recompiled build's
+ * per-block hook instead of Musashi's per-instruction one; under `--recomp` the
+ * interpreter runs so little that its hook would record almost nothing. */
+int trace68k_open(const char *path, unsigned long max_lines, int blocks) {
     tf = fopen(path, "w");
     if (!tf) { perror(path); return 0; }
     limit = max_lines;
-    m68k_set_instr_hook_callback(hook);
+    if (blocks) m68k_trace = 1;
+    else m68k_set_instr_hook_callback(hook);
     return 1;
 }
 
 void trace68k_close(void) {
     if (!tf) return;
+    int blocks = m68k_trace;
     flush_run();
     fclose(tf);
     tf = NULL;
+    m68k_trace = 0;
     m68k_set_instr_hook_callback(NULL);
-    printf("  68000 trace: %lu instructions written%s\n", emitted,
+    printf("  68000 trace: %lu %s written%s\n", emitted,
+           blocks ? "block(s)" : "instruction(s)",
            limit && emitted >= limit ? " (line limit reached)" : "");
 }

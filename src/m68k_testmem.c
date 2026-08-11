@@ -29,6 +29,13 @@ int gen68k_int_ack(int level) {
     return M68K_INT_ACK_AUTOVECTOR;
 }
 
+/* The generated code calls this at every basic block. These tests compare
+ * answers, not paths, so there is nothing to record — but the symbol has to
+ * exist, and `m68k_trace` staying zero is what keeps the call out of the way.
+ * The same shape as sh2_testmem.c's. */
+int m68k_trace;
+void m68k_block(const M68K *c, uint32_t addr) { (void)c; (void)addr; }
+
 unsigned int m68k_read_memory_8(unsigned int a) {
     return a < MEM_SIZE ? mem[a] : 0;
 }

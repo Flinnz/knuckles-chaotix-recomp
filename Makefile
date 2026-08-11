@@ -71,6 +71,13 @@ run: build/mars
 # last step asks the other half of the question — whether anything the 68000
 # actually executed is missing from what discovery found.
 #
+# The last diff is the recompiled 68000's own gate. `--recomp` used to be held
+# to "same picture, same command count" and nothing else, which was tolerable
+# while the interpreter did nine tenths of the work and is not now that it does
+# 291 hand-overs in 300 frames. It is compared at block granularity because a
+# block label is the only place translated code can be hooked — the reference
+# logs every instruction, so filtered to those addresses its stream is ours.
+#
 # `test_recomp68k.py` runs one assembled program through Musashi and through the
 # recompiled C over identical memory and compares both the values and the
 # condition codes, so the flag rules are held to an independent implementation
@@ -92,6 +99,10 @@ check: build/mars
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \
 	    --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu slave  --window 3000000 --rows 0 --detail 0
+	./build/mars --recomp --frames 300 --trace68k build/trace68k_rc.txt \
+	    --trace68k-lines 6000000 >/dev/null
+	python3 tools/diff68k.py --blocks --ours build/trace68k_rc.txt \
+	    --window 400000 --rows 0 --detail 0
 	python3 tools/disasm68k.py coverage
 	@echo "all gates pass"
 

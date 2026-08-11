@@ -125,6 +125,65 @@ def extract(rom_path, out_path, limit):
     print("  wrote %s (%d lines)" % (out_path, n))
 
 
+# --------------------------------------------------------------- blocks ----
+def canon68k(a):
+    """The recompiled build's own coordinate. Discovery works in cartridge
+    offsets because the same bytes are reachable through more than one window,
+    so the generated code names offsets and the reference's addresses have to
+    be folded the same way before they can be compared. Mirrors src/m68000.c."""
+    if a < 0x100:
+        return None                 # the adapter's, not the cartridge's
+    if 0x880000 <= a < 0x900000:
+        return a - 0x880000
+    if 0x900000 <= a < 0xA00000:
+        return a - 0x900000
+    return a
+
+
+def to_blocks(ref, ours, rom_path):
+    """Filter the reference to block entries, the way tools/diffsh2.py does.
+
+    Under `--recomp` our side can only be hooked at a block label, so it logs
+    one line per block entered. The reference logs every instruction — so
+    filtered to the addresses that start a block, its stream *is* ours, and
+    between two entries both machines ran the same straight-line code, which is
+    what makes a register difference here a real one.
+    """
+    from disasm68k import analyse                     # noqa: E402
+    _, az = analyse(rom_path)
+    starts, length, covered = {}, {}, set(az.code)
+    for f in az.funcs.values():
+        for b in f.blocks.values():
+            starts[b.start] = True
+            length[b.start] = len(b.insns)
+
+    out, unknown, gap = [], {}, 0
+    for r in ref:
+        gap += r.gap
+        off = canon68k(r.pc)
+        if off is not None and off in starts:
+            r.pc = off
+            r.gap = gap
+            gap = 0
+            out.append(r)
+            continue
+        if off is not None and off not in covered:
+            unknown[r.pc] = unknown.get(r.pc, 0) + 1
+        gap += 1
+
+    # A block always executes whole, so its instruction count is exactly what
+    # our side ran on entering it — which is what makes a trip count comparable
+    # against the reference's instruction counts. A collapsed run of the same
+    # block stands for that many more entries, so it is worth that many lengths.
+    for r in ours:
+        r.ran = length.get(r.pc, 1)
+    for k in range(1, len(ours)):
+        if ours[k].gap:
+            ours[k - 1].ran += ours[k].gap * length.get(ours[k - 1].pc, 1)
+            ours[k].gap = 0
+    return out, ours, unknown
+
+
 def find_reset(pc):
     """Which log segment holds the 68000's reset, and where in it.
 
@@ -213,6 +272,9 @@ def main():
                     help="summary rows to print before truncating")
     ap.add_argument("--detail", type=int, default=2,
                     help="non-fatal divergences to print in full")
+    ap.add_argument("--blocks", action="store_true",
+                    help="compare a --recomp run, which traces one line per "
+                         "basic block entered rather than per instruction")
     args = ap.parse_args()
 
     if args.extract or not os.path.exists(args.ref):
@@ -223,22 +285,43 @@ def main():
     cpu = tracediff.Cpu(NAMES, 6, dis.at, show_regs)
     ref, marks = parse(args.ref, want_text=True)
     ours, _ = parse(args.ours)
-    # Our tracer collapses a run of one instruction in one state the way the
-    # reference collapses its own, so an `[Omitted: N]` on our side stands for N
-    # more of the instruction *before* it — `parse` hangs the gap on the record
-    # that follows. Fold it back, or a collapsed spin reads as having run once.
-    for k in range(1, len(ours)):
-        if ours[k].gap:
-            ours[k - 1].ran += ours[k].gap
-            ours[k].gap = 0
+    unknown = {}
+    if args.blocks:
+        ref, ours, unknown = to_blocks(ref, ours, args.rom)
+    else:
+        # Our tracer collapses a run of one instruction in one state the way the
+        # reference collapses its own, so an `[Omitted: N]` on our side stands
+        # for N more of the instruction *before* it — `parse` hangs the gap on
+        # the record that follows. Fold it back, or a collapsed spin reads as
+        # having run once. Block mode does the same with the block's length.
+        for k in range(1, len(ours)):
+            if ours[k].gap:
+                ours[k - 1].ran += ours[k].gap
+                ours[k].gap = 0
     if args.ref_lines:
         ref = [r for r in ref if r.lineno <= args.ref_lines]
-    print("reference %d instructions, ours %d" % (len(ref), len(ours)))
+    print("reference %d %s, ours %d"
+          % (len(ref), "block entries" if args.blocks else "instructions",
+             len(ours)))
     if not ref or not ours:
         sys.exit("nothing to compare")
 
     divs, agreed = tracediff.diff(ref, ours, args.window, args.hold, args.skip)
-    return tracediff.report(cpu, ref, ours, marks, divs, agreed, args)
+    rc = tracediff.report(cpu, ref, ours, marks, divs, agreed, args,
+                          unit="block" if args.blocks else "instruction",
+                          ran_unit="instruction" if args.blocks else None)
+    if args.blocks:
+        # The other half of the question, as tools/diffsh2.py asks it: code the
+        # real machine runs that the recompiler has never seen.
+        if not unknown:
+            print("\nevery instruction the reference ran is inside a block "
+                  "we have")
+        else:
+            print("\n%d reference instruction(s) at %d address(es) in no block "
+                  "of ours:" % (sum(unknown.values()), len(unknown)))
+            for a in sorted(unknown, key=lambda x: -unknown[x])[:args.rows]:
+                print("    %06x  x%-8d %s" % (a, unknown[a], dis.at(a)))
+    return rc
 
 
 if __name__ == "__main__":

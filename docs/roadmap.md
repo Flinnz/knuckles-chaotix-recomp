@@ -1208,25 +1208,90 @@ to the end of the *gap*, stopping as soon as the PC is dispatchable. That makes
 a gap cost one hand-over however long it is; it did not help the vblank wait
 only because that gap never ended.
 
+### The recompiled 68000 gets a gate, and it was running 42% fast
+
+`--recomp` was held to "same picture, same command count" and nothing else.
+That was tolerable while the interpreter did nine tenths of the work; with 291
+hand-overs in 300 frames, essentially the whole run was untested code.
+
+`src/trace68k.c` hooks Musashi and reads Musashi's registers, so under
+`--recomp` it saw almost nothing. The SH-2 side answered this years of commits
+ago and the answer carries over: hook the **block**, which is the only place
+translated code can be hooked, and filter the reference to those addresses —
+the reference logs every instruction, so filtered to the block starts its
+stream *is* ours. `M68K_BLOCK` already existed for the fuel, so the hook is one
+line inside it; `diff68k.py --blocks` does the filtering, folding the
+reference's addresses to cartridge offsets the way `src/m68000.c` does, because
+recompiled code names offsets and the same bytes are reachable through more
+than one window.
+
+*Gate met:* 4,800 of the reference's 9,848 block entries agree, **no fatal
+divergence**, and it walks the whole extract. The only addresses the reference
+executes that we have no block for are the nine structural ones — `0x8802AE`
+and the `0xFFC030` trampoline it jumps through, and the routines the engine
+assembles in work RAM at `0xFF0000` — 216 instructions in all, none of them the
+cartridge's to name.
+
+**And it immediately found something.** `recomp_cpi`, which converts a slice of
+cycles into a count of instructions for the translated code, was 8 — guessed
+from the manual, the cheapest register-to-register forms being 4 cycles and a
+memory operand 8 to 12. The reference measures it instead: 11,236 instructions
+between two vertical interrupts, 127,840 cycles to a frame, **11.4 cycles an
+instruction** for this engine's actual mix. At 8 the recompiled 68000 was
+running 42% more instructions a frame than the interpreted one, which is exactly
+the class of thing "same picture, same command count" cannot see.
+
+One caveat on the numbers it reports: in block mode the trip-count column runs
+about one block's length high, because the interval it sums includes the
+previously-matched record. It is consistent, it does not affect the agreement
+count or the divergence classification, and it is worth fixing in
+`tools/tracediff.py` — where `diffsh2` shares it and has been quietly diluting
+it in long idle loops.
+
 ### Next
 
-**1. What is left of the phase**, now that the clocks are right: 162 register
-differences and 83 places control flow parts on the 68000, led by `0x8836F6`
-and `0x883244`, and the slave's interrupt entries at `0x060001F8`. These are no
-longer trip counts, so they want reading one at a time rather than a mechanism.
+Everything the oracle can reach cheaply has now been reached, and the shape of
+the work changes here: what is left divides into a few hours of tidying, one
+piece of real reverse engineering, and the milestone that is most of the
+remaining project.
 
-**2. A trace gate for the recompiled 68000.** It has none — `src/trace68k.c`
-hooks Musashi and reads Musashi's registers, so under `--recomp` it logs only
-the interpreted fragments, and the mode is held to nothing but "same picture,
-same command count". That was tolerable while the interpreter was doing nine
-tenths of the work; now that it does 293 hand-overs in 300 frames, essentially
-the whole run is untested code. The per-block hook the SH-2 side uses is the
-same two lines of codegen, and the blocks already carry a prologue to put it in.
+**1. Fix the trip-count interval in `tools/tracediff.py`** — half an hour, and
+it makes every other number on this list trustworthy. `sum(r.ran for r in
+ours[j - 1:p])` includes the previously-matched record, so in block mode a trip
+count runs one block's length high. Both SH-2 diffs and the new `--blocks` mode
+share it. Do this first: it moves 8,408 of the recompiled 68000's divergences
+and an unknown share of the slave's 11,969, and until it is right nobody can
+tell which of those are real.
 
-**3. What the picture still rests on.** The palette conversion is unchecked —
-the reference's own CRAM writes fall inside loops its tracer elides, so
-`refframe.py` cannot reach them and it needs a different angle. So is the
-frame-select polarity, which no CPU trace can settle at all.
+**2. Read the residual divergences one at a time.** 162 register differences
+and 83 places control flow parts on the 68000, led by `0x8836F6` and
+`0x883244`; on the slave, the interrupt entries at `0x060001F8`. These are no
+longer trip counts and no longer a mechanism — the clocks are right, the
+rendezvous are real, the interrupts are on their own timers. They want reading,
+and the tooling to read them exists. Expect several to be one bug.
+
+**3. The two things the picture still rests on.** The palette conversion is
+unchecked, because the reference's own CRAM writes fall inside loops its tracer
+elides — so `refframe.py` cannot reach them and this needs a different angle.
+The likeliest one is the *slave*: it has its own extract and nothing has asked
+whether the palette is uploaded there. Failing that it wants a known-good
+emulator for one screenshot. The frame-select polarity no CPU trace can settle
+at all; it needs the same screenshot.
+
+**4. Then M6, which is most of what is left.** Sound is untouched: the FIFOs
+accept writes and report space so the driver never stalls, and the samples go
+nowhere. The slave's PWM interrupt is already on the machine's own clock, 365.96
+to a frame, so the timing that an audio path needs is in place — what is missing
+is a YM2612 and PSG core, a PWM sink, and somewhere to put the samples.
+
+**5. And the real end of it: retire Musashi.** `--recomp` now runs the whole
+game on translated code with 291 structural hand-overs, and the interpreter is
+kept for exactly two things — the adapter's assembled stubs below `0x100`, and
+the routines the engine builds in work RAM at `0xFF0000`. Neither can be
+statically discovered, so the honest end state is not "no interpreter" but "an
+interpreter that only ever runs code that did not exist at build time". Making
+`--recomp` the default is the decision that says the recompiler is the product
+and Musashi is the oracle, and the gate for it landed above.
 
 ### Carried debts
 

@@ -78,9 +78,13 @@
  * triggers through a register write happens identically either way.
  *
  * The interpreter is paid in cycles and the recompiled code in instructions, so
- * a slice is converted by what an instruction costs. `--recomp-cpi` sets it; 8
- * is about the average for this engine's mix on a 68000, where the cheapest
- * register-to-register forms are 4 cycles and a memory operand is 8 to 12.
+ * a slice is converted by what an instruction costs. `--recomp-cpi` sets it,
+ * and the reference measures it rather than the manual: the 68000 runs 11,236
+ * instructions between two vertical interrupts, and a frame is 127,840 cycles,
+ * which is 11.4 apiece for this engine's actual mix. It was 8, guessed from the
+ * cheapest register-to-register forms being 4 cycles and a memory operand 8 to
+ * 12 — and at 8 the recompiled 68000 ran 42% more instructions a frame than the
+ * interpreted one did, which is the sort of thing only a trace gate finds.
  *
  * It used to be a count of control *transfers*, which could not bound anything:
  * a poll loop inside one recompiled function is a `goto` and never returns to
@@ -88,7 +92,7 @@
  * own register write, and became a hang the moment the two CPUs interleaved.
  */
 static int use_recomp;
-static unsigned recomp_cpi = 8;
+static unsigned recomp_cpi = 11;
 static M68K rcpu;
 static uint32_t rc_pc;
 static uint32_t rc_missing;      /* transfers to an address with no block */
@@ -519,7 +523,8 @@ int main(int argc, char **argv) {
     gen.vint_pending = 1;
     printf("68000 reset: PC=0x%06X  (%s)\n", cpu_pc(),
            use_recomp ? "recompiled" : "Musashi");
-    if (trace68k && !trace68k_open(trace68k, trace68k_lines)) return 1;
+    if (trace68k && !trace68k_open(trace68k, trace68k_lines, use_recomp))
+        return 1;
 
     SDL_Window *win = NULL; SDL_Renderer *ren = NULL; SDL_Texture *tex = NULL;
     static uint32_t px[W * H];

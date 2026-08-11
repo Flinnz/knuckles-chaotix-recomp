@@ -154,7 +154,25 @@ extern const unsigned m68k_function_count;
  */
 #define M68K_YIELD 1u
 extern int32_t m68k_fuel;
+
+/* Block-entry trace, for `tools/diff68k.py --blocks`.
+ *
+ * Under `--recomp` the interpreter runs almost nothing, so `src/trace68k.c`'s
+ * Musashi hook sees almost nothing, and the translated build was held to
+ * "same picture, same command count" and no more. This is the SH-2 side's
+ * answer: the reference logs every instruction, so filtering its stream to the
+ * addresses that start a block yields exactly this sequence, and between two
+ * block entries both machines ran the same straight-line code.
+ *
+ * `a` is a cartridge offset, which is the only stable coordinate — the same
+ * bytes are reachable through more than one window — so the diff folds the
+ * reference's addresses the same way before comparing.
+ */
+extern int m68k_trace;
+void m68k_block(const M68K *c, uint32_t addr);
+
 #define M68K_BLOCK(c, a, n) do {                                \
+    if (m68k_trace) m68k_block((c), (a));                       \
     if (m68k_fuel <= 0) { (c)->pc = (a); return M68K_YIELD; }   \
     m68k_fuel -= (n);                                           \
 } while (0)
