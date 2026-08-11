@@ -65,6 +65,12 @@ run: build/mars
 # breadth it is there to measure — 3,000,000 saves 91 MB and 14 distinct
 # addresses, which is the wrong way round.
 #
+# The SH-2 budget is 2,000,000 because the slave now runs at its measured rate
+# of one instruction per cycle rather than one per two, so it produces twice the
+# entries in the same game time — and the reference's slave extract is 3.5
+# million instructions of mostly idle loop. At 1,000,000 the walk ran out at 62%
+# of it, which the diff correctly calls stopping short.
+#
 # The 68000 round-trips were left out of this for a while, which was the wrong
 # call the moment its front end started changing: `coverage` widens discovery and
 # only the round-trip can say the widening was right. Both run here now, and the
@@ -93,7 +99,7 @@ check: build/mars
 	python3 tools/test_recomp68k.py
 	./build/mars --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 6000000 --trace-sh2 build/tracesh2.txt \
-	    --trace-sh2-lines 1000000 >/dev/null
+	    --trace-sh2-lines 2000000 >/dev/null
 	python3 tools/diff68k.py --ref-lines 20213 --window 400000 --rows 0 --detail 0
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \

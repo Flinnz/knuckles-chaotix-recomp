@@ -324,7 +324,11 @@ def main():
                     help="summary rows to print before truncating")
     ap.add_argument("--detail", type=int, default=2,
                     help="non-fatal divergences to print in full")
+    ap.add_argument("--detail-at", default="", metavar="PC[,PC...]",
+                    help="print the divergences at these reference addresses "
+                         "in full, wherever they fall in the list")
     args = ap.parse_args()
+    args.detail_at = {int(a, 16) for a in args.detail_at.split(",") if a}
 
     cache = cache_paths(args.extract_to)
     ref_path = args.ref or cache[args.cpu]

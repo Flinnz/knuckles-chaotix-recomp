@@ -327,9 +327,16 @@ def report(cpu, ref, ours, marks, divs, agreed, args, unit="instruction",
                   % (len(divs) - n))
             break
 
-    # Detail: the fatal divergence, plus the first few others for context.
-    detail = [d for d in divs if d.fatal or d.exhausted][:1]
-    detail += [d for d in divs if not (d.fatal or d.exhausted)][:args.detail]
+    # Detail: the fatal divergence, plus the first few others for context — or,
+    # when an address is named, that address's own rows however far down the
+    # list they are. A summary row says a group exists; only the full record
+    # says what it is, and the group worth reading is rarely the first one.
+    at = getattr(args, "detail_at", None)
+    if at:
+        detail = [d for d in divs if ref[d.i].pc in at][:max(args.detail, 1)]
+    else:
+        detail = [d for d in divs if d.fatal or d.exhausted][:1]
+        detail += [d for d in divs if not (d.fatal or d.exhausted)][:args.detail]
     detail.sort(key=lambda d: d.i)
     for d in detail:
         i, j = d.i, d.j

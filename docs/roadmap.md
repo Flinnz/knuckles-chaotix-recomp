@@ -1293,6 +1293,67 @@ The other half of the fix is free and worth noting: an `[Omitted: N]` line
 counts against the trace's line budget, so deleting the spurious ones buys game
 time. The slave's trace covers more of the run in the same 1,000,000 lines.
 
+### The SH-2s were running at half speed, and the logs said so in one command
+
+Reading the residual divergences turned into measuring a clock, because the
+first one read was a clock. The 68000 enters its vertical interrupt 124
+instructions further into the engine's work than the reference does, every
+frame — and asking why led to the question nobody had asked: how many
+instructions does each CPU actually execute in a frame?
+
+The logs answer it directly. They interleave every CPU and mark the 68000's
+vertical interrupts, which is a frame boundary all three share, so counting the
+lines between two marks — the collapsed runs included, or an idle loop vanishes
+— *is* the measurement. `tools/refrate.py` does that in four seconds. Over
+eighteen steady frames:
+
+| | instructions a frame | cycles an instruction |
+|---|---|---|
+| 68000 | 11,598 | 11.02 |
+| master SH-2 | 235,076 | 1.631 |
+| slave SH-2 | 380,695 | 1.007 |
+
+The 68000 confirms `recomp_cpi = 11`. The SH-2s were both on a flat 2, so the
+master was running at 80% of its true rate and **the slave at half**. The slave
+is the stark one: its whole clock is the PWM interrupt every 1,048 SH-2 cycles,
+and the reference runs 1,040 instructions between two of them where we ran 524.
+
+The old figure was not a guess either — it was measured, on the wrong thing.
+"The slave's idle loop burns 2,826 instructions where a one-per-cycle budget ran
+5,256" is a *boot* rendezvous, and how long the slave spins there depends
+entirely on when our 68000 answers, which during the boot is when a BIOS
+stand-in answers rather than when the real BIOS would have. Two errors
+cancelled. A whole frame, counted eighteen times, has nothing to cancel against.
+
+The two SH-2s differ because their work does — the slave sits in a delay loop in
+the cache array with nothing to stall on, the master decompresses cartridge art
+— so the rate is per CPU, carried per thousand cycles with its remainder so the
+division does not truncate 4,192 times a frame.
+
+| | before | after |
+|---|---|---|
+| 68000 whole extract | 35,412 agreed, 500 div | **42,256** agreed, **434** div |
+| recompiled 68000, `--blocks` | 4,800 agreed, 475 div | **5,885** agreed, **382** div |
+| slave | 269 agreed, 6,853 div | 173 agreed, 6,766 div |
+| 68000 boot, master boot | unchanged | unchanged |
+
+Both 68000 diffs gained about a fifth more agreement, because a rendezvous is
+only answered at the right moment if the CPU on the other side is running at the
+right speed.
+
+**And the slave's remaining divergences are now one thing, twice.** 3,359 of them
+are register state at the interrupt entry `0x060001F8` and 3,336 are the flow
+rows that follow from it; there is exactly **one trip-count row in the whole
+extract**, where before the counts were wrong everywhere. What they say is that
+the reference takes the PWM interrupt at the *same point in the idle loop every
+single time* — all 3,360 entries have `r0 = 0` and `pr = 0x060002E2`, which is
+the top of the dispatch loop, and the loop is 206 instructions long and runs
+five times between interrupts. Landing there by chance 3,360 times out of 3,360
+is not possible; the reference is deferring the interrupt to the loop boundary,
+which is what an emulator's idle-loop handling does. That makes this group an
+artefact of the oracle rather than an error of ours, and it is the last thing on
+the slave.
+
 ### Next
 
 Everything the oracle can reach cheaply has now been reached, and the shape of
@@ -1300,12 +1361,23 @@ the work changes here: what is left divides into a few hours of tidying, one
 piece of real reverse engineering, and the milestone that is most of the
 remaining project.
 
-**1. Read the residual divergences one at a time.** 162 register differences
-and 83 places control flow parts on the 68000, led by `0x8836F6` and
-`0x883244`; on the slave, the interrupt entries at `0x060001F8`. These are no
-longer trip counts and no longer a mechanism — the clocks are right, the
-rendezvous are real, the interrupts are on their own timers. They want reading,
-and the tooling to read them exists. Expect several to be one bug.
+**1. The 68000's residual 434, which are now four groups and all one subject.**
+Every one of them is *when the vertical interrupt lands* relative to the
+engine's work, and `--detail-at` reads any of them in full:
+
+| rows | where | what |
+|---|---|---|
+| 102 + 102 | `0x8802AE`, `0x8836F6` | the interrupt entry itself, and the registers the handler restores from the stack — which differ precisely because the interrupt was taken somewhere else |
+| 74 | `0x883244` | one trip fewer through the DREQ feed |
+| 33 + 33 | `0x8834C0`, `0x8834C4` | the phase of the engine's own wait for the vblank flag |
+| 21 + 21 | `0x8831B6`, `0x8836E6` | the reference finds comm 0 still busy and skips the palette upload; we find it free |
+
+The first group is the measurement to start from: at the moment the vblank
+fires, our engine is 124 instructions further into the frame's work than the
+reference's. Both raise it at line 224 and both run the frame to within 0.1%,
+so what differs is where the work *starts* — and the last group says the master
+is a part of that, since a frame where the reference skips the palette upload is
+a frame with 74 fewer instructions in it.
 
 **2. The two things the picture still rests on.** The palette conversion is
 unchecked, because the reference's own CRAM writes fall inside loops its tracer

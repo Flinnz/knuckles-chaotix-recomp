@@ -44,15 +44,25 @@
  * chosen to look right.
  *
  * The fuel is spent in instructions, so the clock ratio has to be divided by
- * the cycles an instruction actually costs. One per cycle is the SH-2's best
- * case and too generous in practice: the reference settles it directly, because
- * the slave's idle loop is pure waiting and its length is therefore a
- * measurement. It burns 2,826 instructions there where a one-per-cycle budget
- * ran 5,256 — 1.86 cycles an instruction, which is what a loop of register
- * reads and a taken branch costs on this core. The delay loop the slave idles
- * in agrees from the manual: `dt` is one cycle and the `bf` back is three when
- * taken, so four cycles for two instructions. */
-#define SH2_CYCLES_PER_INSN 2
+ * the cycles an instruction actually costs — and that is a measurement, not a
+ * constant of the architecture. `tools/refrate.py` counts the reference's own
+ * lines between two of the 68000's vertical interrupt markers, which is a frame
+ * boundary all three CPUs share, collapsed runs included. Over eighteen steady
+ * frames: 11,598 instructions on the 68000, **235,076 on the master and 380,695
+ * on the slave**, against 127,840 68000 cycles to the frame and three times
+ * that on the SH-2 side.
+ *
+ * So 1.631 cycles an instruction on the master and 1.007 on the slave. The two
+ * differ because their work does: the slave sits in a delay loop in the cache
+ * array with nothing to stall on, where the master is decompressing cartridge
+ * art. One flat 2 was half the slave's real rate — its whole clock is the PWM
+ * interrupt every 1,048 SH-2 cycles, and the reference runs 1,040 instructions
+ * between two of them where we ran 524.
+ *
+ * Per thousand cycles, so the division carries its remainder rather than
+ * truncating 4,192 times a frame.
+ */
+static const unsigned sh2_cpi1000[2] = { 1631, 1007 };
 
 /* How often the CPUs change hands inside a scanline.
  *
@@ -223,6 +233,18 @@ static unsigned sh2_step_cycles(void) {
     unsigned n = sh2_cyc_acc / STEPS_PER_FRAME;
     sh2_cyc_acc %= STEPS_PER_FRAME;
     return n;
+}
+
+/* One SH-2's share of a hand-over, in instructions. The two are converted at
+ * their own measured rates — see sh2_cpi1000 — and each carries its own
+ * remainder, because a sub-slice is some ninety cycles and truncating that
+ * division 4,192 times a frame is a percent of the clock. */
+static unsigned sh2_insn_acc[2];
+static int sh2_step_fuel(int i, unsigned cycles) {
+    sh2_insn_acc[i] += cycles * 1000;
+    unsigned n = sh2_insn_acc[i] / sh2_cpi1000[i];
+    sh2_insn_acc[i] -= n * sh2_cpi1000[i];
+    return (int)n;
 }
 
 static void cpu_run(unsigned cycles) {
@@ -582,8 +604,7 @@ int main(int argc, char **argv) {
                 cpu_run(step_cycles());
 
                 unsigned sh2c = sh2_step_cycles();
-                int fuel = (int)(sh2c / SH2_CYCLES_PER_INSN);
-                sh2_run(&mars_cpu[0], fuel);
+                sh2_run(&mars_cpu[0], sh2_step_fuel(0, sh2c));
 
                 /* The slave's whole clock. Its interrupts used to be counted
                  * per frame and spread over the scanlines, which quantised each
@@ -601,7 +622,7 @@ int main(int argc, char **argv) {
                         mars.pwm_ints++;
                     }
                 }
-                sh2_run(&mars_cpu[1], fuel);
+                sh2_run(&mars_cpu[1], sh2_step_fuel(1, sh2c));
             }
         }
 
