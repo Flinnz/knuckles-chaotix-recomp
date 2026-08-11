@@ -47,14 +47,23 @@ run: build/mars
 # the signal is, and covering the rest needs a six-million-line trace to compare
 # against.
 #
-# The windows and the trace budget are both far larger than they were, and for
-# one reason: the CPUs now wait for each other. A poll that used to be answered
-# inside the 68000's own register write is a real wait, so our 68000 spins
-# 65,270 times at 0x881A06 where it used to spin none, and both SH-2s spend
-# their idle time idling instead of being unwound after 64 reads. The alignment
-# window has to be wider than the longest such wait or a genuine rejoin reads as
-# a fatal divergence, and the trace has to be longer than the idling or the run
-# reads as having stopped short.
+# The windows are far wider than they were, for one reason: the CPUs now wait
+# for each other. A poll that used to be answered inside the 68000's own
+# register write is a real wait, so our 68000 spins 65,270 times at 0x881A06
+# where it used to spin none, and both SH-2s spend their idle time idling
+# instead of being unwound after 64 reads. The window has to be wider than the
+# longest such wait or a genuine rejoin reads as a fatal divergence.
+#
+# The trace budgets survive the idling because both tracers collapse a run of
+# one instruction, or one block, in one unchanged state — the reference tracer's
+# own `[Omitted: N]`, which tracediff already reads. 3.3 GB of trace became
+# 1.35 GB and the master's agreement went up rather than down, because a budget
+# now buys game time instead of copies of an idle poll.
+#
+# The 68000's 6,000,000 is deliberately past what the run produces: the collapse
+# is what does the shrinking, and capping on top of it only costs `coverage` the
+# breadth it is there to measure — 3,000,000 saves 91 MB and 14 distinct
+# addresses, which is the wrong way round.
 #
 # The 68000 round-trips were left out of this for a while, which was the wrong
 # call the moment its front end started changing: `coverage` widens discovery and
@@ -77,7 +86,7 @@ check: build/mars
 	python3 tools/test_recomp68k.py
 	./build/mars --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 6000000 --trace-sh2 build/tracesh2.txt \
-	    --trace-sh2-lines 3000000 >/dev/null
+	    --trace-sh2-lines 1000000 >/dev/null
 	python3 tools/diff68k.py --ref-lines 20213 --window 400000 --rows 0 --detail 0
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \

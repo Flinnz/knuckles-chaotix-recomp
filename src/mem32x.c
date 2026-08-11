@@ -451,24 +451,34 @@ static FILE *sh2_trace_f;
  * master — the half with the interesting init — would never be recorded. */
 static unsigned long sh2_trace_left[2];
 
+/* A run of the same block in the same state, not yet written out: what it is a
+ * run of, the state, and how many entries have followed the one on the file. */
+static uint32_t run_addr[2];
+static SH2 run_state[2];
+static unsigned long run_n[2];
+static int run_open[2];
+
+/* Would the two produce the same trace line? Exactly the fields sh2_trace_line
+ * prints, so that "collapsed" and "identical" mean the same thing. */
+static int same_state(const SH2 *a, const SH2 *b) {
+    for (unsigned k = 0; k < 16; k++)
+        if (a->r[k] != b->r[k]) return 0;
+    return a->pr == b->pr && a->gbr == b->gbr && a->vbr == b->vbr
+        && a->mach == b->mach && a->macl == b->macl
+        && a->t == b->t && a->m == b->m && a->q == b->q
+        && a->s == b->s && a->imask == b->imask;
+}
+
 int sh2_trace_open(const char *path, unsigned long max_lines) {
     sh2_trace_f = fopen(path, "w");
     if (!sh2_trace_f) { perror(path); return 0; }
     sh2_trace_left[0] = sh2_trace_left[1] = max_lines;
+    run_open[0] = run_open[1] = 0;
     sh2_trace = 1;
     return 1;
 }
 
-void sh2_trace_close(void) {
-    if (sh2_trace_f) fclose(sh2_trace_f);
-    sh2_trace_f = NULL;
-    sh2_trace = 0;
-}
-
-void sh2_block(SH2 *c, uint32_t addr) {
-    if (!sh2_trace_f) return;
-    if (!sh2_trace_left[c->slave & 1]) return;
-    sh2_trace_left[c->slave & 1]--;
+static void sh2_trace_line(const SH2 *c, uint32_t addr) {
     fprintf(sh2_trace_f,
             "%s  %08x  r0:%08x r1:%08x r2:%08x r3:%08x r4:%08x r5:%08x "
             "r6:%08x r7:%08x r8:%08x r9:%08x r10:%08x r11:%08x r12:%08x "
@@ -481,6 +491,68 @@ void sh2_block(SH2 *c, uint32_t addr) {
             c->macl, c->pr,
             c->m ? 'M' : 'm', c->q ? 'Q' : 'q', c->imask & 0xF,
             c->s ? 'S' : 's', c->t ? 'T' : 't');
+}
+
+/* Close an open run with the count of what was left out.
+ *
+ * This is the reference tracer's own shape, and matching it exactly is the
+ * point: a printed line, then `[Omitted: N]`, then the next *different* line.
+ * Writing a trailing copy of the block as well seemed harmless and was not —
+ * it gives our stream a repeat the reference's format never produces, and the
+ * slave's alignment fell from 269 blocks to 196 on it.
+ */
+static void sh2_trace_flush(int i) {
+    if (!run_open[i]) return;
+    run_open[i] = 0;
+    if (run_n[i] && sh2_trace_left[i]) {
+        sh2_trace_left[i]--;
+        fprintf(sh2_trace_f, "%s Instruction: [Omitted: %lu]\n",
+                i ? "SHS" : "SHM", run_n[i]);
+    }
+    run_n[i] = 0;
+}
+
+void sh2_trace_close(void) {
+    if (sh2_trace_f) {
+        sh2_trace_flush(0);
+        sh2_trace_flush(1);
+        fclose(sh2_trace_f);
+    }
+    sh2_trace_f = NULL;
+    sh2_trace = 0;
+}
+
+/* One line per basic block entered — except that a CPU with nothing to do
+ * re-enters one block millions of times, and writing every one of those buries
+ * the run in its own idling. 2.67 million of the slave's first three million
+ * lines were the `dt`/`bf` delay loop it waits in between PWM interrupts.
+ *
+ * A run of the same block *in the same state* therefore keeps its first entry
+ * and a count. Nothing is lost by construction — every line left out would have
+ * been a copy of the one written — and `[Omitted: N]` is the reference tracer's
+ * own format for it, which `tools/tracediff.py` already parses.
+ *
+ * Collapsing on the address alone was tried and is worse where it matters.
+ * It folds the slave's `dt`/`bf` delay loop, whose r0 counts down, and the
+ * reference prints every one of those entries: with fewer records than the
+ * reference has, the aligner cannot find the four consecutive matches it wants
+ * and the slave fell from 269 blocks in lock step to 196. The master, whose
+ * idle poll really is the same line over and over, gained either way.
+ */
+void sh2_block(SH2 *c, uint32_t addr) {
+    if (!sh2_trace_f) return;
+    int i = c->slave & 1;
+    if (run_open[i] && addr == run_addr[i] && same_state(c, &run_state[i])) {
+        run_n[i]++;
+        return;
+    }
+    sh2_trace_flush(i);
+    if (!sh2_trace_left[i]) return;
+    sh2_trace_left[i]--;
+    sh2_trace_line(c, addr);
+    run_addr[i] = addr;
+    run_state[i] = *c;
+    run_open[i] = 1;
 }
 
 /* The table is sorted by address, so binary search it. It lists every basic

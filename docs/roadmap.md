@@ -1085,20 +1085,41 @@ Still open: 162 register differences and 83 places control flow parts on the
 68000, led by `0x8836F6` and `0x883244`; and on the slave the interrupt entries
 at `0x060001F8` that still disagree in register state.
 
+### A trace that survives idling
+
+Both gates were buried in their own idling: 3.3 GB of trace across the two
+files, of which the slave's 2.67 million lines on one `dt`/`bf` delay loop and
+the master's 393,634 on one poll block were the bulk. Both tracers now collapse
+a run of the same instruction — the same block, for the SH-2 — in the same
+unchanged state, into the reference tracer's own `[Omitted: N]`, which
+`tracediff` already reads. `diff68k` and `diffsh2` fold the count back into the
+preceding record's instruction total, so a collapsed spin still reports its trip
+count rather than reading as having run once.
+
+Nothing is lost by construction: every line left out would have been a copy of
+the one written, and the 68000's two diffs come back **bit for bit identical**
+across the change, which is what says so.
+
+**Collapsing on the address alone was tried and is worse.** It folds runs the
+reference prints in full — the slave's delay loop counts r0 down, so its entries
+differ and the reference logs each one — and with fewer records than the
+reference has, the aligner cannot find the four consecutive matches it wants.
+The slave fell from 269 blocks in lock step to 196 on it. Requiring the state to
+be unchanged as well keeps the master's win and costs the slave nothing.
+
+3.3 GB -> **1.35 GB**, and the master's agreement went *up*, 129 blocks to
+**193**, because a budget now buys game time instead of copies of an idle poll.
+The 68000's budget is deliberately past what the run produces: the collapse is
+what does the shrinking, and capping on top of it only costs `coverage` the
+breadth it exists to measure — cutting it in half saved 91 MB and 14 distinct
+addresses, which is the wrong way round.
+
 ### Next
 
 **1. What is left of the phase**, now that the clocks are right: 162 register
 differences and 83 places control flow parts on the 68000, led by `0x8836F6`
 and `0x883244`, and the slave's interrupt entries at `0x060001F8`. These are no
 longer trip counts, so they want reading one at a time rather than a mechanism.
-
-**2. A trace that survives idling.** Both SH-2 gates now need a 3-million-line
-budget and produce a 1.8 GB file, because 98% of it is a CPU correctly doing
-nothing — 393,634 of the master's first 400,000 lines were one poll block. The
-reference tracer collapses its own runs into `[Omitted: N]` and
-`tools/tracediff.py` already reads that format, so emitting it for consecutive
-entries of the same block with identical registers costs nothing and cannot
-hide a difference. The alignment windows are large for the same reason.
 
 **3. The screenshot check.** The one real verification gap in the rendering
 path — nothing has confirmed the packed-pixel decode, the palette conversion or

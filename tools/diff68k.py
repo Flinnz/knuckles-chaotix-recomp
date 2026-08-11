@@ -223,6 +223,14 @@ def main():
     cpu = tracediff.Cpu(NAMES, 6, dis.at, show_regs)
     ref, marks = parse(args.ref, want_text=True)
     ours, _ = parse(args.ours)
+    # Our tracer collapses a run of one instruction in one state the way the
+    # reference collapses its own, so an `[Omitted: N]` on our side stands for N
+    # more of the instruction *before* it — `parse` hangs the gap on the record
+    # that follows. Fold it back, or a collapsed spin reads as having run once.
+    for k in range(1, len(ours)):
+        if ours[k].gap:
+            ours[k - 1].ran += ours[k].gap
+            ours[k].gap = 0
     if args.ref_lines:
         ref = [r for r in ref if r.lineno <= args.ref_lines]
     print("reference %d instructions, ours %d" % (len(ref), len(ours)))

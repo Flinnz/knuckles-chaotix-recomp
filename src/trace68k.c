@@ -23,10 +23,26 @@
 static FILE *tf;
 static unsigned long emitted, limit;
 
-static void hook(unsigned int pc) {
-    if (limit && emitted >= limit) return;
-    emitted++;
+/* An open run of the same instruction in the same state — see sh2_block() in
+ * src/mem32x.c, which does this for the SH-2 side and explains why. The 68000
+ * needs it for the same reason now that it really waits for the SH-2: it spins
+ * 65,270 times at 0x881A06 alone, every iteration identical. */
+static unsigned int run_pc;
+static uint32_t run_r[16], run_sr, run_osp;
+static unsigned long run_n;
+static int run_open;
 
+static void flush_run(void) {
+    if (!run_open) return;
+    run_open = 0;
+    if (run_n && (!limit || emitted < limit)) {
+        emitted++;
+        fprintf(tf, "CPU Instruction: [Omitted: %lu]\n", run_n);
+    }
+    run_n = 0;
+}
+
+static void hook(unsigned int pc) {
     uint32_t r[16];
     for (int i = 0; i < 16; i++)
         r[i] = (uint32_t)m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_D0 + i));
@@ -35,6 +51,19 @@ static void hook(unsigned int pc) {
      * as sp, which is the other of USP/ISP depending on the S bit. */
     uint32_t osp = (uint32_t)m68k_get_reg(NULL, (sr & 0x2000) ? M68K_REG_USP
                                                              : M68K_REG_ISP);
+
+    if (run_open && pc == run_pc && sr == run_sr && osp == run_osp
+            && !memcmp(r, run_r, sizeof r)) {
+        run_n++;
+        return;
+    }
+    flush_run();
+    if (limit && emitted >= limit) return;
+    emitted++;
+    run_pc = pc; run_sr = sr; run_osp = osp;
+    memcpy(run_r, r, sizeof r);
+    run_open = 1;
+
     char f[9];
     f[0] = (sr & 0x8000) ? 'T' : 't';
     f[1] = (sr & 0x2000) ? 'S' : 's';
@@ -64,6 +93,7 @@ int trace68k_open(const char *path, unsigned long max_lines) {
 
 void trace68k_close(void) {
     if (!tf) return;
+    flush_run();
     fclose(tf);
     tf = NULL;
     m68k_set_instr_hook_callback(NULL);

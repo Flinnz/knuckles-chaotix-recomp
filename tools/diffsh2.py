@@ -342,6 +342,15 @@ def main():
     ours, _ = parse(args.ours, tag)
     for r in ours:
         r.ran = length.get(r.pc, 1)
+    # Our tracer collapses a run of one block the way the reference collapses
+    # its own, so an `[Omitted: N]` on our side stands for N more entries of the
+    # block *before* it — `parse` hangs a gap on the record that follows. Fold
+    # those back into that block's instruction count, or every collapsed idle
+    # loop reads as a trip count of one.
+    for k in range(1, len(ours)):
+        if ours[k].gap:
+            ours[k - 1].ran += ours[k].gap * length.get(ours[k - 1].pc, 1)
+            ours[k].gap = 0
     if args.ref_blocks:
         ref = ref[:args.ref_blocks]
     print("%s: %d block(s) known to the recompiler" % (args.cpu, len(blocks)))
