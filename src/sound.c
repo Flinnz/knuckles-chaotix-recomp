@@ -35,6 +35,7 @@
 #include <SDL.h>
 #include "mars.h"
 #include "sound.h"
+#include "psg.h"
 
 /* ------------------------------------------------------------- the FIFOs ---
  *
@@ -50,6 +51,12 @@ typedef struct {
 } Fifo;
 
 static Fifo pwm[2];          /* PWM_L, PWM_R */
+
+unsigned sound_mask = 3;     /* see sound.h: 1 the PWM, 2 the PSG */
+
+/* The Mega Drive's PSG, which mixes into the same output — see the section
+ * further down that feeds it. */
+static PSG psg;
 
 static uint32_t pwm_writes[2], pwm_dropped[2], pwm_played, pwm_starved;
 /* What the stream looks like, which is how a run says whether the 32X made any
@@ -169,8 +176,15 @@ static void SDLCALL sound_mix(void *ud, Uint8 *stream, int len) {
 static void play(uint16_t lw, uint16_t rw) {
     unsigned mode = mars.pwm_ctl;
     /* LMD and RMD, bits 1-0 and 3-2: zero is the output switched off. */
-    int l = (mode & 3) ? dcblock(0, pwm_level(lw)) : 0;
-    int r = ((mode >> 2) & 3) ? dcblock(1, pwm_level(rw)) : 0;
+    int l = (mode & 3) && (sound_mask & 1) ? pwm_level(lw) : 0;
+    int r = ((mode >> 2) & 3) && (sound_mask & 1) ? pwm_level(rw) : 0;
+    /* The Mega Drive's audio arrives at the adapter and is mixed with the PWM
+     * before the output, so the PSG is added here rather than played
+     * separately. It is mono, and it goes to both. */
+    int m = psg_level(&psg);
+    if (!(sound_mask & 2)) m = 0;
+    l = dcblock(0, l + m);
+    r = dcblock(1, r + m);
 
     pwm_played++;
     if (wav) {
@@ -207,22 +221,24 @@ static void play(uint16_t lw, uint16_t rw) {
  */
 static uint8_t ym_reg[2][256];       /* the two halves, latched */
 static uint8_t ym_addr[2];
-static uint32_t ym_writes[2], psg_writes, psg_from68k;
-static uint8_t psg_latch;
+static uint32_t ym_writes[2];
+static FILE *chip_trace;             /* every write, for tools/diffz80.py */
 
 void sound_ym_write(unsigned port, uint8_t v) {
     unsigned half = (port >> 1) & 1;
+    if (chip_trace) fprintf(chip_trace, "Y%u %02X\n", port, v);
     if (port & 1) { ym_reg[half][ym_addr[half]] = v; ym_writes[half]++; }
     else ym_addr[half] = v;
 }
 
 void sound_psg_write(uint8_t v) {
-    psg_writes++;
-    /* A byte with bit 7 set names a channel and a kind; one without carries the
-     * high bits of whatever the last such byte named. Kept so the register
-     * file is here when there is something to do with it. */
-    if (v & 0x80) psg_latch = v;
+    if (chip_trace) fprintf(chip_trace, "P %02X\n", v);
+    psg_write(&psg, v);
 }
+
+/* The PSG runs off the Z80's clock and keeps running whether or not the Z80
+ * does — a bus request stops the CPU, not the chip. */
+void sound_psg_tick(unsigned clocks) { psg_tick(&psg, clocks); }
 
 /* ---------------------------------------------------------- the PWM clock ---
  *
@@ -274,9 +290,19 @@ static void wav_header(FILE *f, unsigned rate, uint32_t frames) {
     fwrite(h, 1, sizeof h, f);
 }
 
-int sound_open(const char *wavpath, const char *tracepath, int device) {
+int sound_open(const char *wavpath, const char *tracepath, const char *chips,
+               int device) {
+    psg_reset(&psg);
     if (tracepath && !(pwm_trace = fopen(tracepath, "w"))) {
         perror(tracepath);
+        return 0;
+    }
+    /* Every byte the two chips are given, in order, so tools/diffz80.py can
+     * hold the stream against the reference's own. It is the sharpest statement
+     * available about the Mega Drive's sound: the instruction diff says the
+     * driver runs right, and this says what it produced. */
+    if (chips && !(chip_trace = fopen(chips, "w"))) {
+        perror(chips);
         return 0;
     }
     if (wavpath) {
@@ -318,6 +344,7 @@ void sound_close(void) {
         wav = NULL;
     }
     if (pwm_trace) { fclose(pwm_trace); pwm_trace = NULL; }
+    if (chip_trace) { fclose(chip_trace); chip_trace = NULL; }
 }
 
 /* How much the device still has to play, in its own frames. */
@@ -351,10 +378,17 @@ void sound_report(void) {
     printf("       L %04X-%04X changing %u time(s), R %04X-%04X changing %u\n",
            pwm_lo[0] == 0xFFFF ? 0 : pwm_lo[0], pwm_hi[0], pwm_changes[0],
            pwm_lo[1] == 0xFFFF ? 0 : pwm_lo[1], pwm_hi[1], pwm_changes[1]);
-    printf("  YM2612: %u + %u register write(s), last address %02X/%02X; "
-           "PSG %u write(s)\n",
-           ym_writes[0], ym_writes[1], ym_addr[0], ym_addr[1], psg_writes);
-    (void)psg_from68k; (void)psg_latch; (void)ym_reg;
+    printf("  YM2612: %u + %u register write(s), last address %02X/%02X\n",
+           ym_writes[0], ym_writes[1], ym_addr[0], ym_addr[1]);
+    /* The attenuators are the headline: a driver that has muted all four is
+     * playing nothing whatever else it writes, and this game's does exactly
+     * that through the whole of the reference extract. */
+    printf("  PSG: %u write(s), attenuation %X %X %X %X, period %03X %03X %03X "
+           "noise %X — %s\n",
+           psg.writes, psg.vol[0], psg.vol[1], psg.vol[2], psg.vol[3],
+           psg.period[0], psg.period[1], psg.period[2], psg.period[3] & 7,
+           psg_audible(&psg) ? "audible" : "all channels muted");
+    (void)ym_reg;
     if (wav_frames)
         printf("       wrote %u frames of PWM-rate audio\n", wav_frames);
     /* Read after sound_close() has stopped the callback thread, which is the

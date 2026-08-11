@@ -284,7 +284,11 @@ static unsigned z80_step_cycles(void) {
 }
 
 static void z80_slice(void) {
-    z80_credit += (int)z80_step_cycles();
+    unsigned n = z80_step_cycles();
+    /* The PSG is on the same clock and is not the Z80's to stop: a bus request
+     * halts the CPU and leaves the chip playing whatever it was given. */
+    sound_psg_tick(n);
+    z80_credit += (int)n;
     if (z80_credit <= 0) return;
     z80_credit -= (int)genz80_slice(z80_credit);
 }
@@ -585,7 +589,7 @@ int main(int argc, char **argv) {
     int headless_frames = 0;
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
     const char *dump_32x = NULL, *wav = NULL, *tracepwm = NULL;
-    const char *tracez80 = NULL, *dump_z80 = NULL;
+    const char *tracez80 = NULL, *dump_z80 = NULL, *tracechips = NULL;
     unsigned long tracez80_lines = 400000;
     int mute = 0, audio = 0;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
@@ -615,10 +619,14 @@ int main(int argc, char **argv) {
             tracez80 = argv[++i];
         else if (!strcmp(argv[i], "--dump-z80") && i + 1 < argc)
             dump_z80 = argv[++i];
+        else if (!strcmp(argv[i], "--trace-chips") && i + 1 < argc)
+            tracechips = argv[++i];
         else if (!strcmp(argv[i], "--trace-z80-lines") && i + 1 < argc)
             tracez80_lines = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--mute"))
             mute = 1;
+        else if (!strcmp(argv[i], "--sound") && i + 1 < argc)
+            sound_mask = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--audio"))
             audio = 1;      /* a device even without a window, so a headless
                              * run can be listened to — and so the device path
@@ -662,7 +670,8 @@ int main(int argc, char **argv) {
     /* The same for the audio path — the slave's driver fills its FIFOs before
      * the first frame is over. A headless run gets the WAV and the trace and no
      * device, which is also what keeps `make check` at full speed. */
-    if (!sound_open(wav, tracepwm, (audio || !headless_frames) && !mute)) return 1;
+    if (!sound_open(wav, tracepwm, tracechips,
+                    (audio || !headless_frames) && !mute)) return 1;
     /* And the Z80, which the 68000 holds in reset until it has uploaded a
      * driver — so the trace has to be open before the 68000's first
      * instruction, not before the Z80's. */

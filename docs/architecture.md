@@ -172,6 +172,14 @@ and pulsed reset, restarting at `0x0000` with `xor a / ld bc,0x1FD9`. It runs
 9,528 instructions between two vertical interrupts, which are the only thing
 that wakes it.
 
+**Nothing is audible during the logo, on any of the three.** The driver's init
+attenuates all four PSG channels to 15 and it never lifts one for as long as the
+reference logs run; the 32X's PWM output is a constant `0x200` over the same
+span; and the YM2612 gets 80 register writes, which is a voice being set up
+rather than played. The music starts later — at 1,800 frames all three are
+going, the PSG with three channels at attenuations 8, 5 and 7 and periods that
+work out to a chord.
+
 ## Dispatch idioms
 
 Three forms account for essentially all table-driven control flow, and

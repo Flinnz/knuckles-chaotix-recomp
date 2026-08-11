@@ -67,6 +67,8 @@ make run                                      # play it; recompiled 68000
 python3 tools/diffpwm.py                      # and hold it to what it played
 python3 tools/diffz80.py                      # the sound driver, instruction by
                                               # instruction, against the real Z80
+python3 tools/test_psg.py                     # the PSG against its own arithmetic
+./build/mars --frames 1800 --sound 2 --wav p.wav        # what the PSG alone plays
 ./build/mars --dump-32x build/mars32x.bin     # our frame buffers, palette, regs
 python3 tools/refframe.py --ppm f.ppm         # rebuild the real machine's from
 python3 tools/refframe.py --compare build/mars32x.bin   # the trace, and compare
@@ -139,11 +141,14 @@ picture from each half of the machine.
   now paces the run at the machine's own speed
 - **The Z80** runs the sound driver the 68000 uploads into it, and agrees with
   the reference on 32,719 of its 33,984 logged instructions with no divergence
-  control flow does not recover from. Its writes reach a YM2612 and a PSG that
-  latch them and do not yet make a sound
-- Next: those two chips, which is where the audible sound is; and the vertical
-  interrupt's *phase* — where in the engine's frame it lands — which is what
-  nearly all the remaining trace differences are
+  control flow does not recover from. The 164 bytes it puts into the two sound
+  chips are the reference's own, in order
+- **The PSG plays them.** Nothing is audible during the SEGA logo — the driver
+  mutes all four channels and the 32X's PWM is a constant — but past it there is
+  music from both halves of the machine, and `--sound` separates them
+- Next: the YM2612, which is the rest of the sound; and the vertical interrupt's
+  *phase* — where in the engine's frame it lands — which is what nearly all the
+  remaining trace differences are
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.

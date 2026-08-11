@@ -29,16 +29,26 @@ void sound_pwm_tick(unsigned sh2_cycles);
 void sound_ym_write(unsigned port, uint8_t v);
 void sound_psg_write(uint8_t v);
 
+/* Advance the PSG by that many of its own clocks — the Z80's, master over
+ * fifteen — which it takes whether or not the Z80 is running. */
+void sound_psg_tick(unsigned clocks);
+
 /* Open the sink. `wav` names a file to write the machine's own sample stream
  * to, at its own rate, and is what a headless run has instead of a device;
  * `device` asks for an SDL audio device as well. Either may be absent. */
-int  sound_open(const char *wav, const char *trace, int device);
+int  sound_open(const char *wav, const char *trace, const char *chips,
+                int device);
 void sound_close(void);
 
 /* Hold the emulator back while the device still has more than a few frames of
  * audio buffered, which makes the audio clock the frame clock. Does nothing
  * without a device, so a headless run is not slowed by it. */
 void sound_pace(void);
+
+/* Which sources reach the output: 1 the 32X's PWM, 2 the Mega Drive's PSG.
+ * The same idea as `--layers` on the video side, and the only way to say which
+ * half of the machine a sound came from. */
+extern unsigned sound_mask;
 
 /* What came out, for the end-of-run report. */
 void sound_report(void);

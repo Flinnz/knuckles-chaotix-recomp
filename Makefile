@@ -14,10 +14,10 @@ CFLAGS  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
 SRC = build/sh2_recomp.c build/m68k_recomp.c src/m68000.c \
       src/mem32x.c src/gen68k.c src/genvdp.c src/z80.c src/genz80.c \
-      src/sound.c src/trace68k.c src/mars_main.c \
+      src/psg.c src/sound.c src/trace68k.c src/mars_main.c \
       $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c $(MUSASHI)/softfloat/softfloat.c
 
-build/mars: $(SRC) src/mars.h src/sh2.h src/sound.h src/z80.h src/genz80.h \
+build/mars: $(SRC) src/mars.h src/sh2.h src/sound.h src/psg.h src/z80.h src/genz80.h \
             src/m68000.h src/m68kconf.h Makefile $(GEN)/m68kops.c
 	clang $(CFLAGS) -o $@ $(SRC) $(SDLLD)
 
@@ -131,7 +131,17 @@ run: build/mars
 # other gate here does: the core, and the *upload*. The Z80's program is not in
 # the cartridge in any form a static tool could find — the 68000 assembles it
 # into RAM at run time — so a byte wrong in the copy is a wrong instruction, and
-# the trace says so on the line it happens.
+# the trace says so on the line it happens. It ends by comparing the bytes that
+# reached the YM2612 and the PSG against the reference's own, which is the
+# product rather than the process: the driver running right is the means, and
+# the same 164 bytes arriving at the two chips in the same order is the end.
+#
+# `test_psg.py` is there because the trace cannot cover the PSG. This game mutes
+# all four of its channels through the whole extract, so nothing the reference
+# recorded says whether the core works; what can be checked is the chip's own
+# arithmetic — clock / (32 * period) for a tone, two decibels an attenuation
+# step, and the shift rates of the noise register — each computed by the test
+# rather than copied from the implementation.
 check: build/mars
 	python3 tools/emit_asm.py --verify
 	python3 tools/emit_asm.py --verify --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x"
@@ -139,13 +149,14 @@ check: build/mars
 	python3 tools/disasm68k.py --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x" \
 	    emit --verify
 	python3 tools/test_recomp.py
+	python3 tools/test_psg.py
 	python3 tools/recompile68k.py --build
 	python3 tools/test_recomp68k.py
 	./build/mars --interp --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 6000000 --trace-sh2 build/tracesh2.txt \
 	    --trace-sh2-lines 2000000 --trace-pwm build/tracepwm.txt \
 	    --trace-z80 build/tracez80.txt --trace-z80-lines 2000000 \
-	    --dump-z80 build/z80ram.bin >/dev/null
+	    --dump-z80 build/z80ram.bin --trace-chips build/tracechips.txt >/dev/null
 	python3 tools/diff68k.py --ref-lines 20213 --window 400000 --rows 0 --detail 0
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \

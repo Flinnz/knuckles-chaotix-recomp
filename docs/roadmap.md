@@ -2054,21 +2054,78 @@ silencing them — arrive there too. Modelling the Z80 also took the 68000's
 unmapped accesses from 276 a run to 1, and every other number in the run is
 unchanged to the instruction.
 
+### The PSG plays, and so does the PWM once the logo is over
+
+`src/psg.c` is the SN76489 in the VDP: three tone channels counting down from a
+10-bit period, a noise channel shifting a 16-bit register, a 4-bit attenuator
+each, and one write port where a byte with bit 7 set latches a register and one
+without extends it. It mixes into the same output the PWM does, because on a 32X
+that is where the Mega Drive's audio goes.
+
+**Neither the trace nor this game can check it, so two other things do.** The
+driver attenuates all four channels to 15 in its init and never lifts one in
+anything the reference logs contain — 4 volume writes and 36 tone writes across
+the extract, a music track playing with its own chip muted — so the reference
+says nothing whatever about whether the core works.
+
+What can be checked is the chip's own arithmetic, and `tools/test_psg.py`
+computes each expectation rather than copying it out of the implementation: a
+tone channel's frequency is clock / (32 × period), tested at 1, 285 and 1023; an
+attenuation step is a factor of 10^-0.1; periodic noise repeats every sixteen
+shifts and white noise does not repeat in four thousand; the three fixed noise
+rates are the clock over 512, 1024 and 2048 and the fourth is channel 2's
+period; and a period of zero parks the channel rather than oscillating at half
+the counter clock. Eighteen cases.
+
+And the *input* can be checked exactly. `tools/diffz80.py` now ends by comparing
+the bytes that reached the two chips against the bytes that reached the
+reference's — every store to `$4000`-`$4003` or `$7F11` in the log, with the
+register state before it saying what the byte was. **All 164 agree, in order**,
+plus four leading PSG bytes of ours that are the 68000's own and that no per-CPU
+log can carry. The instruction diff says the driver runs right; this says what
+it produced.
+
+**Past the SEGA logo there is music, and both halves of the machine are making
+it.** The earlier section's "there is nothing to hear" was true of the reference
+extract, which is 1.7 seconds; run 1,800 frames and the picture is different.
+The PSG has three channels at attenuations 8, 5 and 7, and `--sound`, which
+separates the two sources the way `--layers` separates the video's, says what
+each is worth:
+
+| | peak | RMS over the second half |
+|---|---|---|
+| `--sound 1`, the 32X's PWM | 32,767 | 2,562 |
+| `--sound 2`, the Mega Drive's PSG | 3,638 | 816 |
+| both | 32,767 | 2,687 |
+
+The PWM is not silent either: 659,860 samples over those frames, changing value
+461,657 times where the whole reference extract was one constant. And the PSG's
+output is music rather than merely non-zero — a Goertzel over the isolated
+stream finds A#3 and F4 together at twenty seconds and C4 and G4 at
+twenty-five, each with the octave-and-fifth harmonics a square wave has, and
+those fundamentals are the tone periods the driver wrote.
+
+What is chosen rather than measured is the balance: four PSG channels at full
+volume come to half of the output's range, against the PWM's full swing. What a
+Mega Drive's PSG is worth against a 32X's PWM is an analogue question the traces
+cannot answer.
+
 ### Next
 
-**1. The YM2612 and the PSG, which are now the whole of what is missing.** Both
-paths reach them — the Z80 writes the YM through both port pairs and the PSG at
-$7F11, the 68000 writes the PSG directly — and `src/sound.c` latches the
-register file and counts. Nothing turns any of it into samples. The PSG is the
-small one and is worth doing first: four channels, a shift-register noise
-generator, and about a hundred lines. The YM2612 is the milestone's remaining
-bulk.
+**1. The YM2612, which is now the whole of what is missing.** Its register
+writes arrive and are latched — 10,376 to the first half and 9,804 to the second
+over 1,800 frames, against 160 bytes in the reference extract that already
+match the reference's byte for byte — and nothing turns them into samples. Six
+FM channels of four operators each, an envelope generator, an LFO, and channel
+6's DAC mode, which is how a Mega Drive plays a drum sample.
 
-There is no trace oracle for either — the reference logs instructions, not
-sound — so the check has to come from the register writes instead: the Z80's
-stream of (register, value) pairs is exactly reproducible against the
-reference's, and what a core does with them is then a question about the core
-alone rather than about the machine.
+The check will have to be the same two-part one the PSG got, because the
+reference logs instructions and not sound: the byte stream in is exactly
+comparable and already compared, so what a core does with it is a question
+about the core alone. What that leaves is an arithmetic test of the parts that
+have arithmetic — the phase generator's increment from block and F-number, the
+envelope's rates, the operator connection algorithms — and no oracle at all for
+the sound itself short of a second implementation.
 
 **2. The slave diff's bound.** Still 2,000 reference blocks, but for a different
 reason than before: the aligner walks collapsed runs now, and what limits the
@@ -2175,11 +2232,15 @@ does not spend the same day finding the same thing.
   of them lands within a twelfth of it, and the vertical interrupt is raised at
   the top of line 224 rather than at a pixel in it. It is most of what is left
   of the slave's diff; the 68000's clock is no longer part of it.
-* ~~**No audio.**~~ *Two thirds settled.* The 32X's PWM path is modelled end to
-  end and gated against the reference's own samples, and the Z80 runs its
-  driver and is gated against the reference's own instructions. What the PWM
-  plays is silence; the audible sound in the opening is the YM2612 and the PSG,
-  which receive their register writes and do nothing with them.
+* ~~**No audio.**~~ *Mostly settled — there is music.* The 32X's PWM plays and
+  is gated against the reference's own samples, the Z80 runs its driver and is
+  gated against the reference's own instructions, and the PSG plays what that
+  driver sends it. The YM2612 receives its register writes and does nothing
+  with them, which is the rest of the sound.
+* **The mix balance is chosen, not measured.** Four PSG channels at full volume
+  come to half the output's range against the PWM's full swing; at 1,800 frames
+  the two measure 816 and 2,562 RMS. What a Mega Drive's PSG is worth against a
+  32X's PWM is an analogue question, and nothing in the traces answers it.
 * **The Z80's clock is 0.22% fast.** The reference retires 9,528 instructions
   between two vertical interrupts and we retire 9,549. Every cycle count in
   `cyc_main` and every prefixed form has been checked against the manual once;
@@ -2212,17 +2273,17 @@ does not spend the same day finding the same thing.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
-**M6 — sound** 🔵 *three of the four pieces are in; the two chips are not*
+**M6 — sound** 🔵 *there is music; the YM2612 is what is left*
 
 PWM is modelled — a three-word FIFO per channel, a sample clock distinct from
 the timer interrupt, a WAV sink and an SDL device the run paces itself against —
 and `tools/diffpwm.py` holds what it plays to what the reference played, sample
 for sample. The Z80 runs its driver, gated the same way at 32,719 of 33,984
-instructions. What is left is the YM2612 and the PSG, which is where all of this
-game's audible sound is. The other half of this milestone — replacing the 68000
-interpreter with recompiled code — was done earlier and is the default; what
-remains of it is optimisation, and the interpreter stays for the code the engine
-writes at run time.
+instructions, and the 164 bytes it puts into the two sound chips are the
+reference's own. The PSG plays them. What is left is the YM2612. The other half
+of this milestone — replacing the 68000 interpreter with recompiled code — was
+done earlier and is the default; what remains of it is optimisation, and the
+interpreter stays for the code the engine writes at run time.
 
 ## Verification strategy
 
