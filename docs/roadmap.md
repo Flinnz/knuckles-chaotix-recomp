@@ -1557,30 +1557,107 @@ is 159,190 68000 cycles, or **16.3 cycles an instruction**. Musashi charges 26
 cycles for that pair — 13 apiece. A 68000 read of a 32X register costs about
 **six or seven cycles more than a read of RAM**, and we charge nothing for it.
 
-One number, measured, and the last identified cause of the 68000's residue.
+*One number, measured — and measured against the wrong clock. The next section
+is what replaced it, and the residue turned out to be ours rather than the
+adapter's.*
+
+### There is no adapter penalty; the clock that found one was the wrong clock
+
+`tools/refpoll.py` is the scanner the plan above asked for, and the first thing
+it did was retire the finding that motivated it.
+
+The 16.3 came of timing a boot window by the master's instruction count at 1.631
+cycles an instruction — the rate `tools/refrate.py` measures over *steady*
+frames. The master does not run at that rate here. Through that poll it is
+**1.30**, because it is spinning in a loop of its own rather than decompressing
+cartridge art. Scale 12.97 by 1.631/1.30 and 16.29 falls out, which is the
+number that was written down.
+
+So the question is what to time the boot *with*, and the phase where the answer
+was wrong is the phase with the fewest clocks in it. Three candidates, two of
+which do not survive contact:
+
+* The 68000's **taken vertical interrupt** is exactly 127,840 cycles from the
+  next — and the engine boots with interrupts masked. 937,053 instructions go by
+  without a single marker.
+* The **VDP's own vblank line** is logged whether or not the CPU takes it, which
+  sounds like exactly the missing clock and is not: 72 of them arrive in bursts
+  with no instructions in between.
+* The slave's **PWM interrupt** is a hardware timer, it does not care what any
+  CPU is doing, and it ticks 367.2 times a frame — 348.1 68000 cycles apiece,
+  fine enough to time a run of a few thousand instructions. It stops only when
+  the slave does, so every figure derived from it is reported with its tick
+  count next to it: a span with no ticks has not been timed at all.
+
+The PWM tick times the runs, and the steady frames — the phase where the taken
+interrupt *is* available — say what a tick is worth. That calibration returns
+the master to 1.631 and the 68000 to 11,611 instructions a frame, both exact,
+which is what says it is the same clock the rest of the project measured with.
+
+Then six loops the scanner found on its own, three that read work RAM and three
+that read a 32X register across the adapter:
+
+| loop | charged | measured | reads |
+|---|---|---|---|
+| `880B1C` `move.l d0,(a0)` ×4 ; `dbf` | 11.60 | **11.59** | RAM |
+| `8F4492` `move.w d2,(a1)` ; `dbf` | 9.00 | **9.04** | RAM |
+| `8834C0` `tst.b ($ffffd1)` ; `beq` | 11.00 | **10.98** | RAM |
+| `8818A4` `tst.w ($a15120)` ; `bne` | 13.00 | **12.97** | 32X |
+| `881A36` `tst.w ($a15120)` ; `bne` | 13.00 | **12.98** | 32X |
+| `881948` `tst.w ($a15120)` ; `bne` | 13.00 | **12.97** | 32X |
+
+Nine cycles an instruction to thirteen, adapter and RAM alike, every one of them
+within **0.4%** of what the 68000 manual charges — and the RAM loops are the
+control that says the clock itself is sound. **A 68000 read of a 32X register
+costs exactly what a read of anything else in that addressing mode costs.**
+There is nothing to model and the carried debt that said otherwise is struck.
+
+### The residue was ours: one flat number where the engine has two phases
+
+The symptom was real even though the cause was not, and `--rate68k` prints it
+directly — the 68000's own instructions a frame, which is the question
+`sh2_insns` has always asked of the SH-2s:
+
+| frame | `--interp` | `--recomp` | reference |
+|---|---|---|---|
+| 14-30, the comm poll | **9,834** at 13.00 c/i | 11,622 at 11.00 | 12.97 c/i |
+| 33-40, steady | **11,619** at 11.00 | 11,622 at 11.00 | 11,611 at 11.00 |
+
+Musashi is exactly right in both phases, to three figures, because it charges
+each instruction what it costs. The recompiled build is flat in both, because
+`recomp_cpi` is **one number** — and 11 is the right number for exactly one of
+the two phases. It was calibrated on the steady state, where the reference's own
+mix comes out at 11.00 cycles an instruction on the nose; through the boot, where
+the engine sits in a 13-cycle poll of a 32X register, it runs the 68000 **18%
+fast**.
+
+That is the whole of the 68000 residue, it is in the build that is the default,
+and the phase it is wrong in is precisely the phase "2.5 frames early" was
+measured in. The interpreter was never early at all.
 
 ### Next
 
-Three things, in the order they are worth doing.
+**1. Give the recompiled 68000 real per-block cycle costs.** The block macro
+already carries a count — `M68K_BLOCK(c, addr, n)` spends `n` of the fuel — and
+that count is instructions, which is why a conversion constant has to exist at
+all. Sum each block's *cycles* at build time instead and the constant, and the
+whole class of error under it, goes away: the fuel becomes a cycle budget and
+`cpu_run` hands it `cpu_credit` directly, the way it already hands Musashi one.
 
-**1. Charge the 68000 for reaching across the adapter.** Half a day, and it is
-the whole of what is left on the 68000 diff. A read or write of the 32X register
-block at `0xA15100`-`0xA153FF` — and probably the frame buffer window at
-`0x840000` — costs the 68000 wait states we do not model at all. The measurement
-is above: about **six or seven cycles** on top of what Musashi charges for a
-register read. Pin it with the same scanner over two or three more loops with a
-different instruction mix, and hold it in `cpu_credit`, which already carries
-cycles between hand-overs; under `--recomp` the same debt goes through
-`recomp_cpi`'s conversion, so it wants a term there too rather than a second
-model.
+The costs come from Musashi's own `m68ki_cycles[0]` table, dumped by a small
+tool that links it alone, so the recompiled build agrees with the oracle by
+construction rather than by a second reading of the manual — and the oracle is
+now measured right against the reference in both phases. The one thing a static
+sum cannot know is the branch it ends on: Musashi's table holds the *taken* cost
+and adjusts on the other edge, and the recompiler emits both edges, so it can
+charge the difference where it happens.
 
-*The gate for it, in advance:* the `0x8818A4` poll should come out at 16.3
-cycles an instruction, the boot phase at 7,808 instructions a frame, the
-master's first command at 12.2 frames rather than 9.8 — and the 22 comm-0 rows
-and the palette-queue depth behind them should go with it. *Watch for:* the
-steady state is already exact at 11,611 instructions a frame, so a penalty that
-leaks into it shows up immediately as that number drifting. That is the check,
-and it is cheap.
+*The gate for it, written in advance:* `--recomp --rate68k` matching `--interp`
+frame for frame — **9,834 instructions a frame at 13.00 cycles through frames
+14-30, and 11,619 at 11.00 from 33 on**. *Watch for:* the steady state is right
+today by luck of the average, so a change that gets the poll phase right and the
+steady state wrong is a net loss, and the second column is the cheap check for
+it.
 
 **2. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
 writes and report space so the driver never stalls, and the samples go nowhere.
@@ -1596,12 +1673,35 @@ Collapsing ours the same way costs the master a quarter of its agreement, so the
 fix is not the tracer: it is an aligner that understands a collapsed run as a
 *range* of positions rather than one.
 
-*Not worth doing, and measured rather than assumed:* finer hand-overs — 32 and
-64 sub-slices to the line are both worse than 16; reordering the CPUs inside a
-hand-over — it brackets the answer and hits neither side; and reproducing the
-reference's interrupt *landing points* — it defers the slave's PWM interrupt to
-one point in a 206-instruction loop, 3,360 times out of 3,360, which is
-idle-loop handling in the emulator rather than a fact about the machine.
+### Not worth doing, and measured rather than assumed
+
+The point of this list is that each line cost an experiment, so the next session
+does not spend the same day finding the same thing.
+
+* **A wait-state penalty for crossing the adapter.** There is none to charge.
+  Six loops on the PWM clock, three reading work RAM and three reading a 32X
+  register, all within 0.4% of what the 68000 manual charges — the section above
+  has the table. Charging anything at all would move the steady state off 11,611,
+  which is right today.
+* **Timing anything in the boot phase by the master's instruction count.** It is
+  the clock that invented the penalty. The master runs at 1.631 cycles an
+  instruction in the steady state and 1.30 through the comm poll, and using the
+  first to time the second inflates every figure by 25%. `tools/refpoll.py`
+  reports both clocks side by side for exactly this reason; where they disagree,
+  the PWM tick is the one with hardware behind it.
+* **The VDP's own vblank marker as a frame clock.** It is in the log, it is
+  independent of whether the CPU takes the interrupt, and it is not a clock: 72
+  of them arrive in bursts with no instructions in between.
+* **Finer hand-overs.** 32 and 64 sub-slices to the line are both worse than 16.
+* **Reordering the CPUs inside a hand-over.** It brackets the answer and hits
+  neither side.
+* **Reproducing the reference's interrupt *landing points*.** It defers the
+  slave's PWM interrupt to one point in a 206-instruction loop, 3,360 times out
+  of 3,360, which is idle-loop handling in the emulator rather than a fact about
+  the machine.
+* **A VDP bus-contention model** — the first attempt at the 68000's clock. It
+  changed the instruction count by nothing at all, which is what said the budget
+  was not what governed. See the note above `cpu_credit` in `src/mars_main.c`.
 
 ### Carried debts
 
@@ -1614,11 +1714,16 @@ idle-loop handling in the emulator rather than a fact about the machine.
   not a property.* The autofill start register was being read as a byte address
   where it holds a word address, so every fill landed at half its address and
   zeroed the line table the master had just written. 224 of 224 now.
-* **The 68000 does not pay to cross the adapter.** A read of a 32X register
-  costs it about six or seven cycles more than a read of RAM — measured, at
-  16.3 cycles an instruction for the `tst.w ($a15120)` / `bne` poll against
-  Musashi's 13 — and we charge nothing. It is why the engine reaches the
-  master's first command 2.5 frames early, and it is the next thing to fix.
+* ~~**The 68000 does not pay to cross the adapter.**~~ *Settled, and there was
+  nothing to pay.* The 16.3 cycles an instruction that said otherwise was 12.97
+  timed with the master's steady-state rate through a window where the master
+  runs at 1.30. On the PWM clock a 32X register read costs the 68000 exactly
+  what the manual charges, across six loops and both kinds of memory.
+* **The recompiled 68000 keeps time with one number.** `recomp_cpi` is 11, which
+  is the reference's own steady-state rate to the digit and 18% fast through the
+  boot's 13-cycle comm poll. Musashi gets both phases right; the translated
+  build — the default — gets one. It is the whole of the 68000 residue and the
+  next thing to fix.
 * **Interrupt phase.** The CPUs interleave now, but the vertical interrupt is
   raised at a fixed point in the line and the PWM interrupts on line boundaries,
   where the reference has both on their own clocks. It is what is left of the

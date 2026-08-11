@@ -186,6 +186,18 @@ void gen68k_init_vectors(void);
  * after an idle gap shorter than a frame. */
 void gen68k_frame_start(void);
 
+/* What the 68000 got through, which is the question `sh2_insns` already asks of
+ * the SH-2s and for the same reason: the reference retires 11,611 instructions
+ * a frame in the steady state and about 9,830 through the boot, where it sits
+ * in a 13-cycle poll of a 32X register, and a build whose clock is wrong shows
+ * up here as the wrong rate long before a trace diff could say so.
+ *
+ * Bumped from two places because there are two 68000s. The recompiled build
+ * knows what it ran from the fuel it did not spend; Musashi is counted through
+ * its instruction hook, which the tracer also installs — so the increment lives
+ * in that hook too rather than being lost whenever `--trace68k` is on. */
+extern unsigned long cpu_insns;
+
 /* One line per 68000 instruction, in the reference tracer's format, for
  * `tools/diff68k.py` to compare against a known-good emulator's log. */
 /* `blocks` records one line per recompiled basic block entered instead of one

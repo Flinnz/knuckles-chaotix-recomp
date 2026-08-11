@@ -46,6 +46,9 @@ static void flush_run(void) {
 }
 
 static void hook(unsigned int pc) {
+    /* This hook replaces the counting one — see cpu_insns in src/mars.h — so it
+     * has to keep the count itself or every traced run reports none. */
+    cpu_insns++;
     uint32_t r[16];
     for (int i = 0; i < 16; i++)
         r[i] = (uint32_t)m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_D0 + i));

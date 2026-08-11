@@ -80,6 +80,10 @@ static const unsigned sh2_cpi1000[2] = { 1631, 1007 };
  */
 #define SUBSLICES_PER_LINE 16
 
+/* How many frames of the 68000's own rate `--rate68k` keeps. Enough to cover
+ * the boot and enough of the steady state to see it settle. */
+#define RATE_FRAMES 64
+
 /* --- which 68000 runs ------------------------------------------------------
  *
  * The recompiled C by default, Musashi under `--interp`. Both drive the same
@@ -150,6 +154,14 @@ static void rc_report(void) {
     }
 }
 
+/* Musashi's instructions, counted where they are executed. The hook is
+ * installed whichever 68000 is running: under `--recomp` the interpreter still
+ * runs the hand-overs, and those are instructions the frame retired like any
+ * other. */
+unsigned long cpu_insns;
+static int rate68k_report;
+static void cpu_count_hook(unsigned int pc) { (void)pc; cpu_insns++; }
+
 static void cpu_reset(void) {
     /* Musashi is initialised either way: it is what runs the addresses that
      * have no recompiled block, which is code that did not exist at build
@@ -157,6 +169,7 @@ static void cpu_reset(void) {
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
+    m68k_set_instr_hook_callback(cpu_count_hook);
     if (!use_recomp) {
         /* The 68000 manual leaves the condition codes undefined after reset,
          * and Musashi happens to come up with Z set. Zero them so a trace
@@ -278,7 +291,9 @@ static void cpu_run(unsigned cycles) {
     int known = 1;
     rc_pc = m68k_run(&rcpu, rc_pc, slice ? slice : 1, &known);
     /* What the fuel did not come back with is what the blocks ran. */
-    cpu_credit -= (int)(((int)(slice ? slice : 1) - m68k_fuel) * (int)recomp_cpi);
+    int ran = (int)(slice ? slice : 1) - m68k_fuel;
+    cpu_insns += (unsigned long)(ran > 0 ? ran : 0);
+    cpu_credit -= (int)(ran * (int)recomp_cpi);
     if (known) return;
     if (!rc_missing++) rc_missing_at = rc_pc;
     rc_count(rc_pc);
@@ -517,6 +532,8 @@ int main(int argc, char **argv) {
             use_recomp = 0;
         else if (!strcmp(argv[i], "--recomp-cpi") && i + 1 < argc)
             recomp_cpi = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--rate68k"))
+            rate68k_report = 1;
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -590,6 +607,11 @@ int main(int argc, char **argv) {
     int running = 1;
     unsigned frames = 0;
     unsigned limit = headless_frames ? (unsigned)headless_frames : 0;
+    /* The first frames of the 68000's rate, kept so `--rate68k` can print the
+     * boot rather than the average over a run that is nearly all steady state.
+     * The boot is the only phase where the two have ever disagreed. */
+    static unsigned long rate68k[RATE_FRAMES];
+    unsigned long insns_last = 0;
     while (running) {
         /* The frame is run in slices with a PWM interrupt between each, rather
          * than as one block with the interrupts bunched at the end. The slave's
@@ -654,6 +676,8 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (frames < RATE_FRAMES) rate68k[frames] = cpu_insns - insns_last;
+        insns_last = cpu_insns;
         frames++;
         if (!headless_frames) {
             SDL_Event ev;
@@ -794,6 +818,19 @@ int main(int argc, char **argv) {
            "slave %lu (%lu/frame, reference 380,695)\n",
            sh2_insns[0], sh2_insns[0] / (frames ? frames : 1),
            sh2_insns[1], sh2_insns[1] / (frames ? frames : 1));
+    printf("  68000 instructions: %lu (%lu/frame, reference 11,611 steady)\n",
+           cpu_insns, cpu_insns / (frames ? frames : 1));
+    if (rate68k_report) {
+        /* Per frame rather than averaged, because the average is the steady
+         * state: the boot is a tenth of a 300-frame run and it is the only
+         * phase where this has ever been wrong. `tools/refpoll.py --rate` is
+         * the same series for the reference. */
+        unsigned n = frames < RATE_FRAMES ? frames : RATE_FRAMES;
+        printf("    per frame, and the cycles an instruction that implies:\n");
+        for (unsigned i = 0; i < n; i++)
+            printf("      %-4u %8lu %8.2f\n", i + 1, rate68k[i],
+                   rate68k[i] ? (double)CYCLES_PER_FRAME / rate68k[i] : 0.0);
+    }
     if (use_recomp) {
         printf("  recompiled 68000: %u handover(s) to the interpreter",
                rc_missing);
