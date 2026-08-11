@@ -49,6 +49,11 @@ run: build/mars
 # only the round-trip can say the widening was right. Both run here now, and the
 # last step asks the other half of the question — whether anything the 68000
 # actually executed is missing from what discovery found.
+#
+# `test_recomp68k.py` runs one assembled program through Musashi and through the
+# recompiled C over identical memory and compares both the values and the
+# condition codes, so the flag rules are held to an independent implementation
+# rather than to a reading of the manual.
 check: build/mars
 	python3 tools/emit_asm.py --verify
 	python3 tools/emit_asm.py --verify --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x"
@@ -56,6 +61,8 @@ check: build/mars
 	python3 tools/disasm68k.py --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x" \
 	    emit --verify
 	python3 tools/test_recomp.py
+	python3 tools/recompile68k.py --build
+	python3 tools/test_recomp68k.py
 	./build/mars --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 2000000 --trace-sh2 build/tracesh2.txt >/dev/null
 	python3 tools/diff68k.py --ref-lines 20213 --rows 0 --detail 0

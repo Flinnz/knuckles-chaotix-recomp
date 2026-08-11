@@ -164,16 +164,22 @@ class Analyzer:
                     self.xrefs[t].add(off)
                     self._add_block(t)
                 return
+            # A call's return address has to be a block of its own. Nothing in
+            # the listing needs that, but a recompiler does: `rts` hands the
+            # popped address to the trampoline, which can only enter at a block
+            # it has a row for. The SH-2 side found the same thing.
             if ins.kind == CALL:
                 t = self._target_offset(ins)
                 if t is not None:
                     self.xrefs[t].add(off)
                     self.add_function(t, ins.mnem)
+                self._add_block(end)
                 off = end
                 continue
             if ins.kind == CALL_IND:
                 if not self._dispatch(ins, recent):
                     self.indirect.append((off, ins.mnem))
+                self._add_block(end)
                 off = end
                 continue
             if ins.kind == JUMP_IND:

@@ -31,6 +31,24 @@ SIZE_SUF = {1: "b", 2: "w", 4: "l"}
 
 
 @dataclass
+class EA:
+    """One effective address in machine terms rather than as text.
+
+    The text form is what objdump can be diffed against; this is what a code
+    generator needs, and both come out of the same parse so they cannot drift.
+    Populated in decode order, so `Insn.eas[0]` is the source of a two-operand
+    instruction and `eas[1]` its destination.
+    """
+    mode: int
+    reg: int
+    text: str
+    disp: int = 0                     # (d16,An), (d8,An,Xn), (d16,PC)
+    index: Optional[tuple] = None     # (is_areg, reg, is_long, scale)
+    addr: Optional[int] = None        # absolute, or a resolved PC-relative one
+    imm: Optional[int] = None         # immediate, signed
+
+
+@dataclass
 class Insn:
     addr: int
     size: int = 2                  # total length in bytes
@@ -43,6 +61,11 @@ class Insn:
     # True when the original bytes cannot be reproduced from this instruction's
     # assembly text — see Cursor.lossy.
     lossy: bool = False
+    eas: tuple = ()                # decoded effective addresses, in order
+    # The immediate an instruction carries in its own extension words rather
+    # than in an effective address: `andi #x,ea`, a static bit number, a `movem`
+    # register mask, `link`'s frame size, `trap`'s vector.
+    imm: Optional[int] = None
 
     def text(self):
         return f"{self.mnem} {self.ops}" if self.ops else self.mnem
@@ -87,6 +110,8 @@ class Cursor:
         # junk there, which no assembler syntax can express — so such an
         # instruction has to be emitted as raw data to stay byte-exact.
         self.lossy = False
+        self.eas = []            # structured operands, for the code generator
+        self.imm = None          # an immediate the instruction carries itself
 
     def word(self):
         v = self.fetch(self.pos)
@@ -127,6 +152,28 @@ def brief_ext(w, base_text, disp_origin=None, emit=False):
     return f"{base_text}@({disp & 0xFFFFFFFFFFFFFFFF if disp < 0 else disp:x},{idx})"
 
 
+def reg_ea(cur, is_areg, n, at=None):
+    """Record a register operand that the text builds directly.
+
+    Half the two-operand encodings name one side in the opcode word rather than
+    through an effective address — `add.w <ea>,%d3` is one EA and a register
+    field — so without this `Insn.eas` would hold only half the operands and a
+    code generator would have to know which half from the mnemonic. `at` places
+    it, since the register can be either the source or the destination.
+    """
+    e = EA(mode=1 if is_areg else 0, reg=n, text=areg(n) if is_areg else dreg(n))
+    cur.eas.append(e) if at is None else cur.eas.insert(at, e)
+    return e.text
+
+
+def mem_ea(cur, mode, reg, at=None):
+    """The same for `-(An)`/`(An)+` pairs written as text: addx, subx, cmpm."""
+    e = EA(mode=mode, reg=reg,
+           text=f"{areg(reg)}@" + ("+" if mode == 3 else "-" if mode == 4 else ""))
+    cur.eas.append(e) if at is None else cur.eas.insert(at, e)
+    return e.text
+
+
 def ea_decode(mode, reg, opsize, cur, emit=False):
     """Render one effective address, consuming its extension words.
 
@@ -135,56 +182,66 @@ def ea_decode(mode, reg, opsize, cur, emit=False):
     size from the value, so a bare number would silently re-encode a long
     absolute as a short one and break the round-trip.
 
-    Returns (text, is_pcrel_target_or_None).
+    Returns (text, is_pcrel_target_or_None), and records the same address in
+    machine terms on `cur.eas` for the code generator.
     """
-    if mode == 0:
-        return dreg(reg), None
-    if mode == 1:
-        return areg(reg), None
-    if mode == 2:
-        return f"{areg(reg)}@", None
-    if mode == 3:
-        return f"{areg(reg)}@+", None
-    if mode == 4:
-        return f"{areg(reg)}@-", None
+    def keep(text, **kw):
+        cur.eas.append(EA(mode=mode, reg=reg, text=text, **kw))
+        return text
+
+    def idx_of(w):
+        return ((w & 0x8000) != 0, (w >> 12) & 7, (w & 0x0800) != 0,
+                1 << ((w >> 9) & 3))
+
+    if mode in (0, 1):
+        return keep(dreg(reg) if mode == 0 else areg(reg)), None
+    if mode in (2, 3, 4):
+        return keep(f"{areg(reg)}@" + ("+" if mode == 3 else "-" if mode == 4 else "")), None
     if mode == 5:
         d = _s16(cur.word())
         # gas rewrites a zero displacement into plain (An), which is two bytes
         # shorter. The `:w` suffix pins the (d16,An) form the cartridge uses.
-        if emit and d == 0:
-            return f"{areg(reg)}@(0:w)", None
-        return f"{areg(reg)}@({d})", None
+        t = f"{areg(reg)}@(0:w)" if emit and d == 0 else f"{areg(reg)}@({d})"
+        return keep(t, disp=d), None
     if mode == 6:
-        return brief_ext(cur.word(), areg(reg), emit=emit), None
+        x = cur.word()
+        return keep(brief_ext(x, areg(reg), emit=emit),
+                    disp=_s8(x & 0xFF), index=idx_of(x)), None
     if mode == 7:
         if reg == 0:
-            return f"0x{_s16(cur.word()) & 0xFFFFFFFF:x}" + (":w" if emit else ""), None
+            a = _s16(cur.word()) & 0xFFFFFFFF
+            return keep(f"0x{a:x}" + (":w" if emit else ""), addr=a), None
         if reg == 1:
-            return f"0x{cur.long():x}" + (":l" if emit else ""), None
+            a = cur.long()
+            return keep(f"0x{a:x}" + (":l" if emit else ""), addr=a), None
         if reg == 2:
             origin = cur.pos
             d = _s16(cur.word())
             t = (origin + d) & 0xFFFFFFFF
-            return f"%pc@(0x{t:x})", t
+            return keep(f"%pc@(0x{t:x})", disp=d, addr=t), t
         if reg == 3:
             origin = cur.pos
-            return brief_ext(cur.word(), None, disp_origin=origin, emit=emit), None
+            x = cur.word()
+            return keep(brief_ext(x, None, disp_origin=origin, emit=emit),
+                        disp=_s8(x & 0xFF), index=idx_of(x),
+                        addr=(origin + _s8(x & 0xFF)) & 0xFFFFFFFF), None
         if reg == 4:
             if opsize == 4:
                 v = _s32(cur.long())
+                raw = v
             elif opsize == 1:
                 # A byte immediate occupies only the low half of its extension
                 # word. objdump prints that byte signed; emitting it signed
                 # would make gas sign-extend across the unused high half and
                 # change the encoded word, so emit mode keeps it unsigned.
                 ext = cur.word()
-                raw = ext & 0xFF
+                raw = _s8(ext & 0xFF)
                 if ext >> 8:
                     cur.lossy = True
-                v = raw if emit else _s8(raw)
+                v = (ext & 0xFF) if emit else raw
             else:
-                v = _s16(cur.word())
-            return f"#{v}", None
+                v = raw = _s16(cur.word())
+            return keep(f"#{v}", imm=raw), None
     return "<bad>", None
 
 
@@ -261,7 +318,8 @@ def decode(fetch, addr, emit=False):
 
     def done(mnem, ops="", kind=NORMAL, target=None, opsize=None):
         return Insn(addr=addr, size=cur.length, mnem=mnem, ops=ops, kind=kind,
-                    target=target, opsize=opsize, word=w, lossy=cur.lossy)
+                    target=target, opsize=opsize, word=w, lossy=cur.lossy,
+                    eas=tuple(cur.eas), imm=cur.imm)
 
     def bad():
         return Insn(addr=addr, size=2, mnem=".short", ops=f"0x{w:04x}",
@@ -286,7 +344,7 @@ def decode(fetch, addr, emit=False):
             if not ok:
                 return bad()
             ea, _ = ea_decode(mode, reg, 1, cur, emit)
-            return done(name, f"{dreg(rx)},{ea}")
+            return done(name, f"{reg_ea(cur, False, rx, 0)},{ea}")
         top = (w >> 8) & 0xF
         if top in (0x0, 0x2, 0x4, 0x6, 0xA, 0xC):
             name = {0x0: "ori", 0x2: "andi", 0x4: "subi", 0x6: "addi",
@@ -305,15 +363,16 @@ def decode(fetch, addr, emit=False):
             # Same rule as an immediate EA: the byte form uses only the low
             # half of its extension word, so emit it unsigned.
             if sz == 4:
-                imm = _s32(cur.long())
+                imm = cur.imm = _s32(cur.long())
             elif sz == 1:
                 ext = cur.word()
                 raw = ext & 0xFF
                 if ext >> 8:
                     cur.lossy = True
+                cur.imm = _s8(raw)
                 imm = raw if emit else _s8(raw)
             else:
-                imm = _s16(cur.word())
+                imm = cur.imm = _s16(cur.word())
             ea, _ = ea_decode(mode, reg, sz, cur, emit)
             return done(sized(name, sz), f"#{imm},{ea}", opsize=sz)
         if top == 0x8:                                  # static bit ops
@@ -324,7 +383,7 @@ def decode(fetch, addr, emit=False):
             if not ok:
                 return bad()
             ext = cur.word()
-            bit = ext & 0xFF
+            bit = cur.imm = ext & 0xFF
             if ext >> 8:
                 cur.lossy = True
             ea, _ = ea_decode(mode, reg, 1, cur, emit)
@@ -344,7 +403,8 @@ def decode(fetch, addr, emit=False):
             return bad()
         src, _ = ea_decode(mode, reg, sz, cur, emit)
         if dmode == 1:
-            return done(sized("movea", sz), f"{src},{areg(dreg_)}", opsize=sz)
+            return done(sized("movea", sz),
+                        f"{src},{reg_ea(cur, True, dreg_)}", opsize=sz)
         dst, _ = ea_decode(dmode, dreg_, sz, cur, emit)
         return done(sized("move", sz), f"{src},{dst}", opsize=sz)
 
@@ -407,7 +467,7 @@ def decode(fetch, addr, emit=False):
         if (w & 0xFB80) == 0x4880:                      # movem
             sz = 4 if w & 0x0040 else 2
             to_mem = not (w & 0x0400)
-            mask = cur.word()
+            mask = cur.imm = cur.word()
             # to memory: control-alterable or -(An); from memory: control or (An)+
             ok = (is_control(mode, reg) and is_alterable(mode, reg)) or mode == 4 \
                 if to_mem else (is_control(mode, reg) or mode == 3)
@@ -420,7 +480,8 @@ def decode(fetch, addr, emit=False):
         if (w & 0xFFF0) == 0x4E40:
             return done("trap", f"#{w & 0xF}", kind=TRAP)
         if (w & 0xFFF8) == 0x4E50:
-            return done("linkw", f"{areg(reg)},#{_s16(cur.word())}")
+            cur.imm = _s16(cur.word())
+            return done("linkw", f"{areg(reg)},#{cur.imm}")
         if (w & 0xFFF8) == 0x4E58:
             return done("unlk", areg(reg))
         if (w & 0xFFF8) == 0x4E60:
@@ -463,7 +524,7 @@ def decode(fetch, addr, emit=False):
             if not (ea_valid(mode, reg) and is_data(mode, reg)):
                 return bad()
             ea, _ = ea_decode(mode, reg, 2, cur, emit)
-            return done("chkw", f"{ea},{dreg(rx)}")
+            return done("chkw", f"{ea},{reg_ea(cur, False, rx)}")
         return bad()
 
     # ---------------------------------------------------------------- 0x5
@@ -529,12 +590,13 @@ def decode(fetch, addr, emit=False):
                     return bad()
                 ea, _ = ea_decode(mode, reg, sz, cur, emit)
                 nm = {0x9: "suba", 0xD: "adda", 0xB: "cmpa"}[op]
-                return done(sized(nm, sz), f"{ea},{areg(rx)}", opsize=sz)
+                return done(sized(nm, sz),
+                            f"{ea},{reg_ea(cur, True, rx)}", opsize=sz)
             nm = {0x8: ("divu", "divs"), 0xC: ("mulu", "muls")}[op][1 if direction else 0]
             if not ea_valid(mode, reg) or mode == 1:
                 return bad()
             ea, _ = ea_decode(mode, reg, 2, cur, emit)
-            return done(nm + "w", f"{ea},{dreg(rx)}")
+            return done(nm + "w", f"{ea},{reg_ea(cur, False, rx)}")
 
         sz = (1, 2, 4)[szf]
         if direction:
@@ -556,12 +618,16 @@ def decode(fetch, addr, emit=False):
             if op in (0x9, 0xD) and mode in (0, 1):
                 nm = "subx" if op == 0x9 else "addx"
                 if mode == 0:
-                    return done(sized(nm, sz), f"{dreg(reg)},{dreg(rx)}", opsize=sz)
+                    return done(sized(nm, sz),
+                                f"{reg_ea(cur, False, reg)},"
+                                f"{reg_ea(cur, False, rx)}", opsize=sz)
                 return done(sized(nm, sz),
-                            f"{areg(reg)}@-,{areg(rx)}@-", opsize=sz)
+                            f"{mem_ea(cur, 4, reg)},{mem_ea(cur, 4, rx)}",
+                            opsize=sz)
             if op == 0xB and mode == 1:
                 return done(sized("cmpm", sz),
-                            f"{areg(reg)}@+,{areg(rx)}@+", opsize=sz)
+                            f"{mem_ea(cur, 3, reg)},{mem_ea(cur, 3, rx)}",
+                            opsize=sz)
             if op == 0xB:
                 nm = "eor"                    # eor can target a data register
                 if not is_data_alt(mode, reg):
@@ -571,14 +637,16 @@ def decode(fetch, addr, emit=False):
                 if not is_mem_alt(mode, reg):
                     return bad()
             ea, _ = ea_decode(mode, reg, sz, cur, emit)
-            return done(sized(nm, sz), f"{dreg(rx)},{ea}", opsize=sz)
+            return done(sized(nm, sz),
+                        f"{reg_ea(cur, False, rx, 0)},{ea}", opsize=sz)
 
         if not ea_valid(mode, reg):
             return bad()
         if mode == 1 and (sz == 1 or op in (0x8, 0xC)):
             return bad()
         ea, _ = ea_decode(mode, reg, sz, cur, emit)
-        return done(sized(base, sz), f"{ea},{dreg(rx)}", opsize=sz)
+        return done(sized(base, sz),
+                    f"{ea},{reg_ea(cur, False, rx)}", opsize=sz)
 
     # ---------------------------------------------------------------- 0xE
     if op == 0xE:
