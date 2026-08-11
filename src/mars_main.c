@@ -248,6 +248,13 @@ static unsigned sh2_step_cycles(void) {
     return n;
 }
 
+/* What each SH-2 actually got through, so the run can be held against the
+ * measurement the rates come from: `tools/refrate.py` counts 235,076
+ * instructions a frame on the master and 380,695 on the slave. A CPU that is
+ * idling rather than working shows up here as a shortfall the trace comparison
+ * would take a whole extract to say. */
+static unsigned long sh2_insns[2];
+
 /* One SH-2's share of a hand-over, in instructions. The two are converted at
  * their own measured rates — see sh2_cpi1000 — and each carries its own
  * remainder, because a sub-slice is some ninety cycles and truncating that
@@ -615,11 +622,17 @@ int main(int argc, char **argv) {
              * reference's master is busy through 22 of its 102 vblanks, and the
              * engine skips work in those. */
             for (unsigned s = 0; s < SUBSLICES_PER_LINE; s++) {
+                /* Where the beam is inside the line, for the two VDPs' HBLK
+                 * bits. One step a hand-over is as fine as this clock gets. */
+                gen.hpos = s * 256u / SUBSLICES_PER_LINE;
                 cpu_poll_irq();
                 cpu_run(step_cycles());
 
                 unsigned sh2c = sh2_step_cycles();
-                sh2_run(&mars_cpu[0], sh2_step_fuel(0, sh2c));
+                /* The 32X VDP's autofill runs on the same clock as everything
+                 * else, and the master polls FEN until it finishes. */
+                mars.fen_left -= mars.fen_left < sh2c ? mars.fen_left : sh2c;
+                sh2_insns[0] += sh2_run(&mars_cpu[0], sh2_step_fuel(0, sh2c));
 
                 /* The slave's whole clock. Its interrupts used to be counted
                  * per frame and spread over the scanlines, which quantised each
@@ -637,7 +650,7 @@ int main(int argc, char **argv) {
                         mars.pwm_ints++;
                     }
                 }
-                sh2_run(&mars_cpu[1], sh2_step_fuel(1, sh2c));
+                sh2_insns[1] += sh2_run(&mars_cpu[1], sh2_step_fuel(1, sh2c));
             }
         }
 
@@ -777,6 +790,10 @@ int main(int argc, char **argv) {
            gen.unknown_r, gen.unknown_w, mars.unknown);
     printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",
            mars_cpu[0].pc, mars_cpu[1].pc);
+    printf("  SH-2 instructions: master %lu (%lu/frame, reference 235,076), "
+           "slave %lu (%lu/frame, reference 380,695)\n",
+           sh2_insns[0], sh2_insns[0] / (frames ? frames : 1),
+           sh2_insns[1], sh2_insns[1] / (frames ? frames : 1));
     if (use_recomp) {
         printf("  recompiled 68000: %u handover(s) to the interpreter",
                rc_missing);

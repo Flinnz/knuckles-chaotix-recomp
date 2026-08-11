@@ -1452,30 +1452,87 @@ the engine builds in work RAM at `0xFF0000` and jumps to. 295 hand-overs in 300
 frames, all of them those. No static front end can find either, so this is the
 end state rather than a step toward one.
 
-### Next
+### The 32X VDP still had a free-running counter where the beam should be
 
-The oracle has now been asked everything cheap, and twice it answered with a
-real bug rather than a tolerance. What is left is one subject on the 68000, one
-milestone that is most of the remaining project, and a tooling debt.
+Chasing the vblank phase went through three things that were not it before
+finding the one that was.
 
-**1. The vertical interrupt's phase.** Every one of the 388 differences left on
-the 68000 is *when the interrupt lands* relative to the engine's work:
+*The frame length is right.* Between two vertical interrupts we run 11,611
+instructions and the reference runs 11,609 to 11,615 — and a whole frame's
+histogram, ours against theirs, holds the same 202 addresses with a total
+difference of **+7 instructions**. Whatever is left is not the clock.
 
-| rows | where | what |
+*Finer hand-overs are worse, measured twice.* 32 sub-slices to the line gives
+53,447 agreed and 64 gives 53,444, against 16's 53,451. And *reordering* the
+hand-over so the master runs before the 68000 rather than after flips the
+command-interrupt group from "we answer one poll early" to "one poll late" —
+1 against 3 becomes 3 against 1 — which brackets the truth from both sides and
+lands on neither. A cooperative scheduler has a granularity floor and this is
+it.
+
+**What was actually wrong is that the 32X VDP's status register was still a
+counter.** `vdp_status()` set VBLK for eight reads in every sixty-four and HBLK
+for two in every eight — the stand-in the Genesis side had before it got a
+scanline clock, which nobody came back for. It is not cosmetic, because the
+master synchronises its whole video init to that bit: at `0x06003116` it waits
+for VBLK to clear and then to set, which is "wait for the next vertical blank",
+and the reference spends **263,792 instructions** there where we spent 220.
+
+FEN was the same kind of thing and the reference measures it exactly. The
+clear loop at `0x06003188` starts an autofill and waits for FEN to drop, 256
+times an invocation, and the trace shows 304 instructions per fill — about 99
+turns of a three-instruction poll, or **two SH-2 cycles a word**. Ours was
+`mars.fbctl & 2`, the bit the CPU had written, which is never set. *Tried and
+rejected:* FEN as the display period itself, which is what a first reading of
+the 79,576-instructions-per-fill figure suggests — that figure divided by six
+*logged* fills where there were 256 real ones. It stalls 197,660 instructions at
+`0x06003106`, where the reference reads the same register once and walks on.
+
+| the master's own waits | before | after | reference |
+|---|---|---|---|
+| `0x06003126`, wait for vblank | 220 | **185,384** | 263,792 |
+| `0x0600319C`, wait for the fill | 2,550 | **87,345** | 77,658 |
+
+And the numbers this is held to, which are not all in the same direction:
+
+| | before | after |
 |---|---|---|
-| 102 + 102 | `0x8802AE`, `0x8836F6` | the interrupt entry, and the registers the handler restores from the stack — which differ precisely because it was taken somewhere else |
-| 74 | `0x883244` | our master clears the command interrupt one poll sooner than the reference's |
-| 33 + 33 | `0x8834C0`, `0x8834C4` | the phase of the engine's own wait for the vblank flag |
-| 21 + 21 | `0x8831B6`, `0x8836E6` | the reference finds comm 0 still busy and skips the palette upload; we find it free |
+| 68000 boot | 20,078 agreed, 26 div | 20,077, **20** |
+| master | 193 blocks, 20 div | **194**, **19** |
+| slave | 912 blocks, 473 div | **1,037**, 546 |
+| 68000 whole extract | 53,451 agreed, 388 div | 52,386, 449 |
+| recompiled 68000 | 9,025 blocks, 359 div | 8,736, 398 |
 
-Both machines raise the vblank at line 224 and both run the frame to within
-0.1%, so what differs is where the work *starts*, and the last group says the
-master is part of it — a frame in which the reference skips the palette upload
-is a frame with 74 fewer instructions in it. `--detail-at` reads any of these in
-full. The slave's own 473 are the same subject seen from the other side, and
-that half may not be ours to fix: the reference takes every one of its 3,360 PWM
-interrupts at the same point in a 206-instruction loop, which is idle-loop
-handling in the emulator rather than a fact about the machine.
+The two whole-extract numbers got worse and the cause is identified rather than
+guessed at: **our master finishes its work and idles where the reference's is
+still busy.** Both run the same number of instructions a frame — 237,434 against
+235,076, which the run now prints — but the reference spends 49% of them in the
+idle poll and we spend 83%. From reference line 40,553 onward its engine finds
+comm 0 busy at *every* vblank and skips the palette upload; ours never does. The
+knock-on is visible two ways: the queue at `0xFFD860` that the upload drains
+holds 32 entries in the reference and one in ours, and the master's video init
+costs it 4.3 frames against our 1.5.
+
+That is now the whole of the 68000 residue — one cause, on the other CPU.
+
+**1. The master idles where the reference works.** This is what the 68000's
+remaining 449 rows are, and it is one question on the other CPU: both masters
+execute the same 235,000 instructions a frame, and the reference spends 49% of
+them in its idle poll against our 83%. So its engine finds comm 0 busy at every
+vblank from reference line 40,553 on and skips the palette upload, and ours
+never does. Where the missing work is has a shape already — the reference's
+decompressor sits at `0x0600087A` and `0x06000866` where ours sits at
+`0x06000872` and `0x0600085C`, which is the same routine down a different path.
+
+What is *not* left, having been measured: the frame length (+7 instructions in a
+whole-frame histogram), the hand-over granularity (16 beats 32 and 64), and the
+order the CPUs take within a hand-over (it brackets the answer and hits neither
+side). `--detail-at` reads any row in full.
+
+The slave's own 546 are a different subject and may not be ours to fix: the
+reference takes every one of its 3,360 PWM interrupts at the same point in a
+206-instruction loop, which is idle-loop handling in the emulator rather than a
+fact about the machine.
 
 **2. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
 writes and report space so the driver never stalls, and the samples go nowhere.

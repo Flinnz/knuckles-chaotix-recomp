@@ -52,6 +52,10 @@ typedef struct {
 
     /* 32X VDP registers */
     uint16_t bitmap_mode, shift, fill_len, fill_start, fill_data, fbctl;
+    /* SH-2 cycles left on an autofill. The VDP is busy with the frame buffer
+     * while it runs and says so through FEN, which the master polls after every
+     * fill. See vdp_status() in src/mem32x.c for where the rate comes from. */
+    uint32_t fen_left;
 
     uint32_t ticks;          /* stands in for elapsed time when polling */
     uint32_t unknown;        /* accesses outside the modelled map */
@@ -75,6 +79,7 @@ typedef struct {
     uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
     uint32_t cmd_hist[16];   /* commands posted to comm 0, by kind */
     uint32_t line;           /* scanline the 68000 is running inside */
+    uint32_t hpos;           /* how far into it, 0-255, one step a hand-over */
     /* Two different things that used to be one flag. `vint_pending` is VDP
      * status bit 7, which the adapter's boot ROM leaves set before the
      * cartridge runs an instruction — 379,000 instructions of vblanks nothing

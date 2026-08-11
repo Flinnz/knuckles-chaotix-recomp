@@ -66,12 +66,48 @@ static void trap(const char *what, uint32_t a) {
 /* The SH-2 spends much of the boot polling hardware. Nothing here advances on
  * its own, so a free-running counter stands in for the passage of time and
  * lets those loops terminate. */
+/* The 32X VDP's frame buffer control register, which is also its status.
+ *
+ * VBLK and HBLK are the beam, and they are the *same* beam the Mega Drive side
+ * reports — one adapter, one display. They used to be a free-running counter
+ * here, set for 8 reads in every 64, which is what the Genesis side had before
+ * it got a scanline clock and what nobody came back for. It is not a cosmetic
+ * difference: the master synchronises its whole video init to this bit — at
+ * 0x06003116 it waits for VBLK to clear and then to set, which is "wait for the
+ * next vertical blank" — and against a counter that flips every eight reads it
+ * waited a few instructions where the reference waits 192,761. Everything the
+ * master then does was that much early, which is why the 68000 found comm 0
+ * free at vblanks where the reference finds it busy.
+ *
+ * FEN is the fill, and the reference measures it from both sides. The master's
+ * clear loop at 0x06003188 starts an autofill and waits for FEN to drop, and
+ * that wait is **79,576 instructions**, a third of a frame — while at
+ * 0x06003106, where no fill is outstanding, the same register is read once and
+ * the code walks straight past it. Nothing about a 256-word fill takes a third
+ * of a frame; what takes a third of a frame is waiting for the display period
+ * to end. So the fill is *performed* in the blanking interval, and FEN is "a
+ * fill is outstanding" — set when the data register is written during display,
+ * cleared when the beam reaches the vertical blank. Modelling it as the display
+ * period itself was tried and is wrong in exactly the way 0x06003106 shows: it
+ * stalls 197,660 instructions where the reference runs 4.
+ *
+ * It was `mars.fbctl & 2` — the bit the CPU had written, which is never set —
+ * so the wait was 2,550 instructions instead of 78,000, and the master's video
+ * init ran a whole frame early.
+ *
+ * PEN stays permissive. On hardware the palette is only writable outside the
+ * display period; nothing here polls it, and answering "always accessible"
+ * cannot stall a game that does not ask.
+ */
 static uint16_t vdp_status(void) {
-    uint32_t t = mars.ticks++;
     uint16_t s = 0;
-    if ((t & 0x3F) < 0x08) s |= 0x8000;      /* VBLK */
-    if ((t & 0x07) < 0x02) s |= 0x4000;      /* HBLK */
-    s |= mars.fbctl & 0x0003;                /* FEN / FS as written */
+    if (gen.line >= 224) s |= 0x8000;        /* VBLK */
+    /* HBLK reads set through the vertical blank as well as the horizontal one,
+     * which is what the reference's two samples of this register show: 0xE000
+     * with the beam off the display and 0x2000 with it on. */
+    if (gen.hpos >= 192 || gen.line >= 224) s |= 0x4000;
+    if (mars.fen_left) s |= 0x0002;          /* FEN: a fill is still running */
+    s |= mars.fbctl & 0x0001;                /* FS, which really is the CPU's */
     s |= 0x2000;                             /* PEN: palette accessible */
     return s;
 }
@@ -164,6 +200,10 @@ static void fifo_push(uint16_t w) {
  * 512-byte-stride buffer, and which stepping a byte address by two did not do.
  */
 static void autofill(void) {
+    /* The fill itself happens here and now; what is modelled is how long the
+     * VDP holds the frame buffer while doing it, because the master waits for
+     * exactly that. Two SH-2 cycles a word — see vdp_status(). */
+    mars.fen_left = (mars.fill_len + 1u) * 2u;
     uint32_t addr = mars.fill_start;
     for (uint32_t i = 0; i <= mars.fill_len; i++) {
         uint32_t o = (addr * 2u) & 0x1FFFEu;
