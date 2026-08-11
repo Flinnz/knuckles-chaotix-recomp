@@ -1114,6 +1114,53 @@ what does the shrinking, and capping on top of it only costs `coverage` the
 breadth it exists to measure — cutting it in half saved 91 MB and 14 distinct
 addresses, which is the wrong way round.
 
+### The picture gets an oracle, and it was wrong
+
+An instruction trace looks like the wrong tool for checking pixels, being a log
+of CPU state rather than of memory. It is not: every store is in there with the
+register state that produced it, so the writes replay. `tools/refframe.py` runs
+the master's 5.4 million instructions back through a model of the 32X address
+space and reconstructs the frame buffer, with no emulator involved, and
+`build/mars --dump-32x` writes ours in the same layout to compare.
+
+**The line table was being destroyed by our own autofill.** The reference
+settles what the table should be without any comparison at all, because the
+code that writes it is right there — `0x060031B0` loads `0x24000200` into r8,
+`0x100` into the counter, and `0x00010000` into r0, then walks *backwards*
+storing r0's low word and subtracting `0x100`. So entry *k* is `(k+1) * 0x100`,
+all 256 of them, and every one of the 224 on screen is non-zero. Ours had 128.
+
+The half that was missing is byte offsets `0x100`-`0x1FE`, which the loop writes
+*first* — so they were not missing, they were overwritten afterwards. The fill
+start register holds a **word** address, not a byte one: sixteen bits reach all
+65,536 words of the 128 KB buffer exactly, where as a byte address they would
+reach half of it. Taking it for a byte offset put every fill at half the address
+it belonged at, and what that landed on was the line table. The address also
+increments in its low 8 bits only, so a fill wraps inside a 256-*word* block,
+which is what makes it useful for clearing one scanline of a 512-byte-stride
+buffer; stepping a byte address by two did not do that either.
+
+*Gate met, in the only way this one can be:* **the 32X picture at 300 frames is
+the SEGA logo**, drawn correctly, where before the fix it was cloud panels over
+a half-clobbered table. That is the first time anything in the rendering path
+has been checked against something other than "it is not empty". The line table
+is 224 of 224 entries and matches the reference's own arithmetic exactly.
+
+This also closes a carried debt by contradicting it. "96 of the 224 lines have
+no line-table entry, so the 32X draws the top 128 and the Mega Drive shows
+through below. Stable, not a collapse" — stable it was, and a bug all along.
+
+**What the replay cannot do**, and it was not obvious: the reference tracer
+collapses tight loops, printing the first iteration and eliding the rest, so
+stores inside them were never logged. The line-table writer is the clearest
+case — 256 iterations an invocation, six lines in the whole extract, every one
+of them the first iteration with r8 still `0x24000200`. A reconstruction is
+therefore a lower bound, and where a loop is elided the arithmetic has to be
+read out of the code instead, which is what happened here. Its frame buffer
+agrees with ours on 79% of bytes and holds neither a line table nor a palette,
+both of which are written in loops it elided; that number is a floor, not a
+score.
+
 ### Next
 
 **1. What is left of the phase**, now that the clocks are right: 162 register
@@ -1152,8 +1199,10 @@ codegen, and the blocks now carry a prologue to put it in.
   instructions, and our 300-frame run posts exactly one. A mostly-empty asset
   table is what this point in the game looks like. The 10.8 million reads of
   address 0 are the sprite drawer walking slots that are legitimately unfilled.
-* **96 of the 224 lines have no line-table entry**, so the 32X draws the top 128
-  and the Mega Drive shows through below. Stable, not a collapse.
+* ~~**96 of the 224 lines have no line-table entry.**~~ *Settled — it was a bug,
+  not a property.* The autofill start register was being read as a byte address
+  where it holds a word address, so every fill landed at half its address and
+  zeroed the line table the master had just written. 224 of 224 now.
 * **Interrupt phase.** The CPUs interleave now, but the vertical interrupt is
   raised at a fixed point in the line and the PWM interrupts on line boundaries,
   where the reference has both on their own clocks. It is what is left of the
@@ -1165,10 +1214,12 @@ codegen, and the blocks now carry a prologue to put it in.
 * **The 32X frame-select polarity is a guess.** Displayed is taken to be
   `fb[FS]` and the CPUs get the other one; nothing has confirmed which way round
   it is.
-* **Nothing has been checked against a real screenshot.** Both pictures are
-  plausible — a Chaotix level from the Mega Drive half, decompressed art from
-  the 32X half — which is not the same as a verified match. The packed-pixel
-  decode, the palette conversion and the frame-select polarity all rest on it.
+* **The picture is recognisable now, not merely plausible.** At 300 frames the
+  32X half draws the SEGA logo, which is a thing that can be right or wrong
+  rather than a thing that is non-empty, and the line table matches the
+  reference's own arithmetic. What is still unchecked is the palette conversion
+  — the reference's own CRAM writes fall inside loops its tracer elides — and
+  the frame-select polarity, which no CPU trace can settle.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 

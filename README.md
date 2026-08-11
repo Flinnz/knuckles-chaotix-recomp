@@ -60,6 +60,10 @@ python3 tools/recompile.py --build            # SH-2 -> C, then compile it
 python3 tools/test_recomp.py                  # run recompiled SH-2, check answers
 python3 tools/recompile68k.py --build         # 68000 -> C, then compile it
 python3 tools/test_recomp68k.py               # recompiled 68000 vs Musashi
+
+./build/mars --dump-32x build/mars32x.bin     # our frame buffers, palette, regs
+python3 tools/refframe.py --ppm f.ppm         # rebuild the real machine's from
+python3 tools/refframe.py --compare build/mars32x.bin   # the trace, and compare
 ```
 
 ## How correctness is established

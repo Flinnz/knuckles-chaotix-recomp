@@ -148,15 +148,28 @@ static void fifo_push(uint16_t w) {
     dma_drain();
 }
 
+/* The fill start register holds a *word* address, not a byte one.
+ *
+ * Sixteen bits reach all 65,536 words of the 128 KB frame buffer exactly, which
+ * is the argument: as a byte address it would reach half of it. Taking it for a
+ * byte offset put every fill at half the address it belonged at, and what that
+ * landed on was the line table — the game fills from word 0x100 up, we wrote
+ * from byte 0x100, and 96 of the 224 line-table entries the master had just
+ * written were zeroed under it. That is the "96 of the 224 lines have no
+ * line-table entry" this project carried as a stable property of the picture
+ * for as long as it has had one.
+ *
+ * The address also increments in its low 8 bits only, so a fill wraps inside a
+ * 256-word block — which is what makes it useful for clearing one scanline of a
+ * 512-byte-stride buffer, and which stepping a byte address by two did not do.
+ */
 static void autofill(void) {
     uint32_t addr = mars.fill_start;
     for (uint32_t i = 0; i <= mars.fill_len; i++) {
-        uint32_t o = (addr & 0x1FFFFu);
+        uint32_t o = (addr * 2u) & 0x1FFFEu;
         mars_fb_draw()[o] = (uint8_t)(mars.fill_data >> 8);
         mars_fb_draw()[o + 1] = (uint8_t)mars.fill_data;
-        /* The fill wraps within a 512-byte line, which is what makes it
-         * useful for clearing one scanline at a time. */
-        addr = (addr & 0xFF00u) | ((addr + 2) & 0xFFu);
+        addr = (addr & 0xFF00u) | ((addr + 1) & 0xFFu);
     }
 }
 

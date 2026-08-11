@@ -398,6 +398,7 @@ int main(int argc, char **argv) {
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
+    const char *dump_32x = NULL;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     unsigned hold = 0;
     for (int i = 1; i < argc; i++)
@@ -415,6 +416,8 @@ int main(int argc, char **argv) {
             tracesh2_lines = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dump-vdp") && i + 1 < argc)
             dump_vdp = argv[++i];
+        else if (!strcmp(argv[i], "--dump-32x") && i + 1 < argc)
+            dump_32x = argv[++i];
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc)
             gen.layers = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)
@@ -590,6 +593,23 @@ int main(int argc, char **argv) {
             fwrite(gen.vdpreg, 1, sizeof gen.vdpreg, d);
             fclose(d);
             printf("  wrote %s (vram, cram, vsram, regs)\n", dump_vdp);
+        }
+    }
+
+    /* The 32X half of the picture, in the layout tools/refframe.py rebuilds
+     * from the reference's own stores: both frame buffers, then the palette,
+     * then the two registers that say how to read them. Comparing the two is
+     * the only check the rendering path has ever had against ground truth. */
+    if (dump_32x) {
+        FILE *d = fopen(dump_32x, "wb");
+        if (d) {
+            fwrite(mars.fb[0], 1, MARS_FB, d);
+            fwrite(mars.fb[1], 1, MARS_FB, d);
+            fwrite(mars.cram, 1, sizeof mars.cram, d);
+            fputc(mars.fbctl >> 8, d);       fputc(mars.fbctl & 0xFF, d);
+            fputc(mars.bitmap_mode >> 8, d); fputc(mars.bitmap_mode & 0xFF, d);
+            fclose(d);
+            printf("  wrote %s (fb0, fb1, cram, fbctl, bitmap mode)\n", dump_32x);
         }
     }
 
