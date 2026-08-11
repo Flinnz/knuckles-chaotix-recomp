@@ -36,6 +36,7 @@
 #include "mars.h"
 #include "sound.h"
 #include "psg.h"
+#include "ym3438.h"
 
 /* ------------------------------------------------------------- the FIFOs ---
  *
@@ -52,7 +53,9 @@ typedef struct {
 
 static Fifo pwm[2];          /* PWM_L, PWM_R */
 
-unsigned sound_mask = 3;     /* see sound.h: 1 the PWM, 2 the PSG */
+unsigned sound_mask = 7;     /* see sound.h: 1 the PWM, 2 the PSG, 4 the FM */
+
+static void ym_level(int *l, int *r);
 
 /* The Mega Drive's PSG, which mixes into the same output — see the section
  * further down that feeds it. */
@@ -183,6 +186,12 @@ static void play(uint16_t lw, uint16_t rw) {
      * separately. It is mono, and it goes to both. */
     int m = psg_level(&psg);
     if (!(sound_mask & 2)) m = 0;
+    /* And the FM, which is stereo — the only source here that is. Its own
+     * output is about ±3,000 summed over a sample, so six is the factor that
+     * puts a loud channel where a loud PSG channel is. */
+    int yl, yr;
+    ym_level(&yl, &yr);
+    if (sound_mask & 4) { l += yl * 6; r += yr * 6; }
     l = dcblock(0, l + m);
     r = dcblock(1, r + m);
 
@@ -212,23 +221,91 @@ static void play(uint16_t lw, uint16_t rw) {
 
 /* ------------------------------------------------- the Mega Drive's chips --
  *
- * Not synthesised — this is where a YM2612 and a PSG core will go. What it does
- * today is latch the register file and count, which is enough to say whether
- * the driver is doing anything and to compare the traffic against the
- * reference's: over its extract the Z80 makes 95 register writes to the YM's
- * first half, 77 to its second and 40 to the PSG, and the 68000 silences all
- * four PSG channels itself during its init.
+ * The PSG is ours; the YM2612 is Nuked-OPN2, which is derived from a die shot
+ * and is the thing every other implementation is checked against. There is no
+ * trace oracle for a sound chip — the reference logs instructions, not audio —
+ * so a hand-written OPN2 could not have been held to anything, where its
+ * register *input* already is: tools/diffz80.py compares the bytes that reach
+ * both chips against the bytes that reached the reference's.
+ *
+ * Nuked latches a write on its next clock rather than at once, and it keeps one
+ * pending value for the address and data ports together — so an address byte
+ * followed by a data byte with no clock in between loses the address. The
+ * driver writes exactly that pair, a few Z80 instructions apart, which is
+ * inside one hand-over here. `ym_clock` after every write is what makes the
+ * pair safe, and the cycle it spends is taken back out of the next tick's
+ * budget so the chip still runs at its own rate.
  */
-static uint8_t ym_reg[2][256];       /* the two halves, latched */
+static ym3438_t ym;
 static uint8_t ym_addr[2];
 static uint32_t ym_writes[2];
+static unsigned ym_div;              /* 68000 cycles towards the next of six */
+static unsigned ym_sub;              /* internal cycles into the current sample */
+static unsigned ym_debt;             /* cycles spent early, at a write */
+static int32_t ym_sum_l, ym_sum_r;   /* the 24 cycles of one sample */
+static int32_t ym_acc_l, ym_acc_r;   /* samples since the sink last looked */
+static unsigned ym_acc_n;
+static int ym_peak;
+static uint32_t ym_samples, ym_dac_writes;
+static int ym_dac_on;
 static FILE *chip_trace;             /* every write, for tools/diffz80.py */
 
+/* One internal cycle — a twenty-fourth of an output sample. In YM2612 mode
+ * each channel reaches the output on one cycle in four and the rest carry the
+ * DAC's own idle level, so a sample is the sum of all twenty-four rather than
+ * the last of them. */
+static void ym_clock(void) {
+    Bit16s buf[2];
+    OPN2_Clock(&ym, buf);
+    ym_sum_l += buf[0];
+    ym_sum_r += buf[1];
+    if (++ym_sub < 24) return;
+    ym_sub = 0;
+    ym_acc_l += ym_sum_l;
+    ym_acc_r += ym_sum_r;
+    ym_acc_n++;
+    ym_samples++;
+    if (ym_sum_l > ym_peak) ym_peak = ym_sum_l;
+    if (-ym_sum_l > ym_peak) ym_peak = -ym_sum_l;
+    ym_sum_l = ym_sum_r = 0;
+}
+
 void sound_ym_write(unsigned port, uint8_t v) {
-    unsigned half = (port >> 1) & 1;
     if (chip_trace) fprintf(chip_trace, "Y%u %02X\n", port, v);
-    if (port & 1) { ym_reg[half][ym_addr[half]] = v; ym_writes[half]++; }
-    else ym_addr[half] = v;
+    if (port & 1) {
+        ym_writes[(port >> 1) & 1]++;
+        /* Channel 6's DAC, which is how a Mega Drive plays a drum sample: one
+         * byte a time into 0x2A, with 0x2B switching the channel over to it. */
+        if (!(port & 2) && ym_addr[0] == 0x2A) ym_dac_writes++;
+        if (!(port & 2) && ym_addr[0] == 0x2B) ym_dac_on = (v & 0x80) != 0;
+    } else {
+        ym_addr[(port >> 1) & 1] = v;
+    }
+    OPN2_Write(&ym, port & 3, v);
+    ym_clock();
+    ym_debt++;
+}
+
+uint8_t sound_ym_read(unsigned port) {
+    return OPN2_Read(&ym, port & 3);
+}
+
+/* The chip has the 68000's clock and divides it by six. */
+void sound_ym_tick(unsigned m68k_cycles) {
+    ym_div += m68k_cycles;
+    while (ym_div >= 6) {
+        ym_div -= 6;
+        if (ym_debt) { ym_debt--; continue; }
+        ym_clock();
+    }
+}
+
+static void ym_level(int *l, int *r) {
+    if (!ym_acc_n) { *l = *r = 0; return; }
+    *l = (int)(ym_acc_l / (int32_t)ym_acc_n);
+    *r = (int)(ym_acc_r / (int32_t)ym_acc_n);
+    ym_acc_l = ym_acc_r = 0;
+    ym_acc_n = 0;
 }
 
 void sound_psg_write(uint8_t v) {
@@ -293,6 +370,12 @@ static void wav_header(FILE *f, unsigned rate, uint32_t frames) {
 int sound_open(const char *wavpath, const char *tracepath, const char *chips,
                int device) {
     psg_reset(&psg);
+    /* Nuked keeps the chip variant in a file-scope global rather than in the
+     * struct, so this has to be said before the reset and says it for every
+     * chip there is. The YM2612's discrete DAC is the difference that matters:
+     * it is what makes a quiet channel crossover-distort. */
+    OPN2_SetChipType(ym3438_mode_ym2612);
+    OPN2_Reset(&ym);
     if (tracepath && !(pwm_trace = fopen(tracepath, "w"))) {
         perror(tracepath);
         return 0;
@@ -378,8 +461,15 @@ void sound_report(void) {
     printf("       L %04X-%04X changing %u time(s), R %04X-%04X changing %u\n",
            pwm_lo[0] == 0xFFFF ? 0 : pwm_lo[0], pwm_hi[0], pwm_changes[0],
            pwm_lo[1] == 0xFFFF ? 0 : pwm_lo[1], pwm_hi[1], pwm_changes[1]);
-    printf("  YM2612: %u + %u register write(s), last address %02X/%02X\n",
-           ym_writes[0], ym_writes[1], ym_addr[0], ym_addr[1]);
+    printf("  YM2612: %u + %u register write(s), last address %02X/%02X; "
+           "DAC %u write(s), %s\n",
+           ym_writes[0], ym_writes[1], ym_addr[0], ym_addr[1],
+           ym_dac_writes, ym_dac_on ? "on" : "off");
+    /* The sample count is the clock: the chip divides the 68000's by 144, so
+     * 888.9 to a frame, and a rate that is wrong shows up here long before it
+     * would be audible. */
+    printf("       Nuked-OPN2: %u sample(s), peak %d before the x6 mix\n",
+           ym_samples, ym_peak);
     /* The attenuators are the headline: a driver that has muted all four is
      * playing nothing whatever else it writes, and this game's does exactly
      * that through the whole of the reference extract. */
@@ -388,7 +478,6 @@ void sound_report(void) {
            psg.writes, psg.vol[0], psg.vol[1], psg.vol[2], psg.vol[3],
            psg.period[0], psg.period[1], psg.period[2], psg.period[3] & 7,
            psg_audible(&psg) ? "audible" : "all channels muted");
-    (void)ym_reg;
     if (wav_frames)
         printf("       wrote %u frames of PWM-rate audio\n", wav_frames);
     /* Read after sound_close() has stopped the callback thread, which is the

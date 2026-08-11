@@ -49,11 +49,9 @@ int genz80_runnable(void) { return !z80_busreq && !z80_reset_held; }
 /* ---------------------------------------------------------- the Z80's bus -- */
 uint8_t z80_rd(uint16_t a) {
     if (a < 0x4000) return z80_ram[a & 0x1FFF];
-    /* The YM2612's status byte: bit 7 busy, bits 1-0 the timer flags. Zero is
-     * "idle, nothing expired", which is the answer that cannot hang a driver
-     * waiting on it — and neither the Z80 nor the 68000 reads it in this game,
-     * so it is a stand-in rather than a model. */
-    if (a < 0x6000) return 0x00;
+    /* The YM2612's status byte: bit 7 busy, bits 1-0 the timer flags, all of
+     * it modelled by the core now rather than stubbed. */
+    if (a < 0x6000) return sound_ym_read(a & 3);
     if (a < 0x8000) return 0xFF;
     return (uint8_t)m68k_read_memory_8(((z80_bank << 15) | (a & 0x7FFF))
                                        & 0xFFFFFFu);
@@ -99,7 +97,10 @@ void z80_io_wr(uint16_t port, uint8_t v) {
 /* ------------------------------------------------------- the 68000's side -- */
 int genz80_read(uint32_t a, uint8_t *out) {
     if (a >= 0xA00000u && a < 0xA04000u) { *out = z80_ram[a & 0x1FFF]; return 1; }
-    if (a >= 0xA04000u && a < 0xA06000u) { *out = 0x00; return 1; }  /* YM status */
+    if (a >= 0xA04000u && a < 0xA06000u) {          /* the YM2612's status */
+        *out = sound_ym_read(a & 3);
+        return 1;
+    }
     if ((a & ~1u) == 0xA11100u) {
         /* Bit 8 reads back set while the Z80 still has the bus. We grant it
          * immediately, so a request that has been made always reads granted —

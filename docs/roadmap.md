@@ -2110,24 +2110,79 @@ volume come to half of the output's range, against the PWM's full swing. What a
 Mega Drive's PSG is worth against a 32X's PWM is an analogue question the traces
 cannot answer.
 
+### The FM, and the whole machine making one sound
+
+Nuked-OPN2 is the YM2612, cloned into `third_party/` the way Musashi is and
+ignored by git the same way, so nothing of it enters the repository. The reason
+is the problem the PSG's section had to work around: **a sound chip has no trace
+oracle.** The reference logs instructions and not audio, so a hand-written OPN2
+could have been held to nothing, where a die-derived one is what every other
+implementation is measured against. Its register input is gated regardless —
+`tools/diffz80.py` already holds the 164 bytes that reach the two chips to the
+reference's own.
+
+What a wrapper around it has to get right is the clock and the write latch, and
+both are checkable.
+
+*The clock is the 68000's, divided by 144*, so a frame is 888.93 samples. Over
+1,800 frames the chip produces **1,600,075, which is 128,006 / 144 × 1,800 to
+the sample.**
+
+*Nuked latches a write on its next clock and keeps one pending value for the
+address and data ports together*, so an address byte followed by a data byte
+with no clock in between loses the address — and that pair is exactly what the
+driver writes, a few Z80 instructions apart and well inside one hand-over here.
+Clocking once after each write is what makes the pair safe, and the cycle it
+spends early is taken back out of the next tick's budget so the chip still runs
+at its own rate.
+
+**All three sources play, and they are playing the same piece.** At 1,800 frames
+— thirty seconds, well past the logo — `--sound` separates them:
+
+| | peak | RMS | stereo |
+|---|---|---|---|
+| `1` the 32X's PWM | 32,767 | 2,562 | 160 |
+| `2` the PSG | 3,638 | 816 | 0 |
+| `4` the YM2612 | 7,414 | 1,642 | 691 |
+| `7` all of it | 32,335 | 3,162 | 734 |
+
+The FM is the only stereo source, which is what its per-channel L/R enables are
+for; the PSG is mono by construction and the PWM's two channels carry nearly the
+same thing. Nothing clips. And a Goertzel over each isolated stream says they
+agree with each other: at twenty seconds the FM is on C3 with its C2, C4 and C5
+harmonics while the PSG holds C4 and G4, and at twenty-five they move together
+to D and G.
+
+Two things this game does not do. It never enables **channel 6's DAC** — zero
+writes to 0x2A over those 1,800 frames — so its drum samples are not coming
+through the FM. And it writes nothing audible to any of the three during the
+SEGA logo, which is why the first two sections of this milestone both ended in
+silence: the PSG muted, the PWM a constant 0x200, and the YM2612 taking 80
+register writes that are a voice being set up rather than played.
+
+The remaining chosen-not-measured number is the mix. The FM is scaled by six
+against the PWM's full swing and the PSG's half, which puts a loud FM channel
+where a loud PSG channel is. What the three are worth against each other on real
+hardware is an analogue question and the traces do not answer it.
+
 ### Next
 
-**1. The YM2612, which is now the whole of what is missing.** Its register
-writes arrive and are latched — 10,376 to the first half and 9,804 to the second
-over 1,800 frames, against 160 bytes in the reference extract that already
-match the reference's byte for byte — and nothing turns them into samples. Six
-FM channels of four operators each, an envelope generator, an LFO, and channel
-6's DAC mode, which is how a Mega Drive plays a drum sample.
+**1. Interrupt phase, which is what nearly every remaining trace difference
+is.** The 68000's 421 divergences over the whole extract, the slave's 482 and
+the master's 18 are dominated by *when* an interrupt lands rather than by what
+any CPU computes: the vertical interrupt is raised at the top of line 224 where
+the reference takes it at a pixel inside it, and a hand-over is a sixteenth of a
+line where the PWM's period is a twelfth of one. Nothing here is a wrong answer
+any more, which is why this is the largest thing left.
 
-The check will have to be the same two-part one the PSG got, because the
-reference logs instructions and not sound: the byte stream in is exactly
-comparable and already compared, so what a core does with it is a question
-about the core alone. What that leaves is an arithmetic test of the parts that
-have arithmetic — the phase generator's increment from block and F-number, the
-envelope's rates, the operator connection algorithms — and no oracle at all for
-the sound itself short of a second implementation.
+**2. The sound has no accuracy gate, only an input gate.** Every byte that
+reaches the two chips is the reference's, and what comes out of them is
+unmeasured against anything: the reference logs instructions and not audio.
+Nuked-OPN2 removes the question for the FM, and the PSG has its arithmetic
+test, but the *mix* — three sources at chosen relative levels — is a judgement
+and would stay one even with a better oracle.
 
-**2. The slave diff's bound.** Still 2,000 reference blocks, but for a different
+**3. The slave diff's bound.** Still 2,000 reference blocks, but for a different
 reason than before: the aligner walks collapsed runs now, and what limits the
 bound is how far our own trace reaches. It is roughly linear in trace size —
 2,000,000 lines cross about 2,500 blocks, 8,000,000 about 7,000 — so raising
@@ -2232,15 +2287,15 @@ does not spend the same day finding the same thing.
   of them lands within a twelfth of it, and the vertical interrupt is raised at
   the top of line 224 rather than at a pixel in it. It is most of what is left
   of the slave's diff; the 68000's clock is no longer part of it.
-* ~~**No audio.**~~ *Mostly settled — there is music.* The 32X's PWM plays and
-  is gated against the reference's own samples, the Z80 runs its driver and is
-  gated against the reference's own instructions, and the PSG plays what that
-  driver sends it. The YM2612 receives its register writes and does nothing
-  with them, which is the rest of the sound.
-* **The mix balance is chosen, not measured.** Four PSG channels at full volume
-  come to half the output's range against the PWM's full swing; at 1,800 frames
-  the two measure 816 and 2,562 RMS. What a Mega Drive's PSG is worth against a
-  32X's PWM is an analogue question, and nothing in the traces answers it.
+* ~~**No audio.**~~ *Settled.* All three sources play and every byte reaching
+  them is the reference's: the 32X's PWM gated sample for sample, the Z80 gated
+  instruction by instruction, the PSG tested against its own arithmetic, and
+  the YM2612 supplied by Nuked-OPN2.
+* **The mix balance is chosen, not measured.** The PWM has the output's full
+  swing, four PSG channels at full volume half of it, and the FM is scaled by
+  six; at 1,800 frames the three measure 2,562, 816 and 1,642 RMS. What they are
+  worth against each other on real hardware is an analogue question, and nothing
+  in the traces answers it.
 * **The Z80's clock is 0.22% fast.** The reference retires 9,528 instructions
   between two vertical interrupts and we retire 9,549. Every cycle count in
   `cyc_main` and every prefixed form has been checked against the manual once;
@@ -2273,17 +2328,21 @@ does not spend the same day finding the same thing.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
-**M6 — sound** 🔵 *there is music; the YM2612 is what is left*
+**M6 — sound** ✅ *done — the game plays its music*
 
-PWM is modelled — a three-word FIFO per channel, a sample clock distinct from
-the timer interrupt, a WAV sink and an SDL device the run paces itself against —
-and `tools/diffpwm.py` holds what it plays to what the reference played, sample
-for sample. The Z80 runs its driver, gated the same way at 32,719 of 33,984
-instructions, and the 164 bytes it puts into the two sound chips are the
-reference's own. The PSG plays them. What is left is the YM2612. The other half
-of this milestone — replacing the 68000 interpreter with recompiled code — was
-done earlier and is the default; what remains of it is optimisation, and the
-interpreter stays for the code the engine writes at run time.
+Every source is in and every input to them is gated. The 32X's PWM is modelled
+down to its three-word FIFOs and `tools/diffpwm.py` holds what it plays to what
+the reference played, sample for sample. The Z80 runs the driver the 68000
+uploads, gated at 32,719 of 33,984 instructions, and the 164 bytes it puts into
+the two Mega Drive chips are the reference's own, in order. The PSG is ours,
+with an arithmetic test of its own; the YM2612 is Nuked-OPN2. An SDL device
+paces the run at the machine's speed and `--sound` separates the three.
+
+What is not gated is the *sound itself*, because the reference logs instructions
+and not audio — see the note under Next. The other half of this milestone,
+replacing the 68000 interpreter with recompiled code, was done earlier and is
+the default; what remains of it is optimisation, and the interpreter stays for
+the code the engine writes at run time.
 
 ## Verification strategy
 

@@ -768,7 +768,11 @@ int main(int argc, char **argv) {
                  * bits. One step a hand-over is as fine as this clock gets. */
                 gen.hpos = s * 256u / SUBSLICES_PER_LINE;
                 cpu_poll_irq();
-                cpu_run(step_cycles());
+                unsigned mc = step_cycles();
+                /* The YM2612 has the 68000's own clock, so it is spent here
+                 * and in the same units. */
+                sound_ym_tick(mc);
+                cpu_run(mc);
                 /* The Z80 is the fourth CPU and takes its turn here, right
                  * after the 68000 whose bus it shares — it is held off
                  * entirely while the 68000 has requested that bus, which is

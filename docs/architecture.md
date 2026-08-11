@@ -177,8 +177,14 @@ attenuates all four PSG channels to 15 and it never lifts one for as long as the
 reference logs run; the 32X's PWM output is a constant `0x200` over the same
 span; and the YM2612 gets 80 register writes, which is a voice being set up
 rather than played. The music starts later — at 1,800 frames all three are
-going, the PSG with three channels at attenuations 8, 5 and 7 and periods that
-work out to a chord.
+going, the PSG with three channels at attenuations 8, 5 and 7 and the FM on a
+bass line an octave below them.
+
+The YM2612 runs at the 68000's clock divided by 144, which is 53,266 samples a
+second and 888.93 to a frame. This game never enables **channel 6's DAC**, the
+usual way a Mega Drive plays a drum sample: zero writes to `0x2A` in half a
+minute of play, so whatever percussion there is comes from the PSG's noise
+channel or from the 32X.
 
 ## Dispatch idioms
 

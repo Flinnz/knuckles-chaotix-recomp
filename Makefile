@@ -1,4 +1,5 @@
 MUSASHI = third_party/musashi
+NUKED   = third_party/nuked-opn2
 GEN     = build/musashi
 SDLCF  := $(shell pkg-config --cflags sdl2)
 SDLLD  := $(shell pkg-config --libs sdl2)
@@ -8,13 +9,13 @@ SDLLD  := $(shell pkg-config --libs sdl2)
 # ours in first claims the shared M68KCONF__HEADER guard and the vendored file
 # then expands to nothing.
 CFLAGS  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
-          -Isrc -I$(MUSASHI) -I$(GEN) $(SDLCF)
+          -Isrc -I$(MUSASHI) -I$(NUKED) -I$(GEN) $(SDLCF)
 
 # m68kcpu.c includes m68kfpu.c unconditionally, which needs softfloat even for
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
 SRC = build/sh2_recomp.c build/m68k_recomp.c src/m68000.c \
       src/mem32x.c src/gen68k.c src/genvdp.c src/z80.c src/genz80.c \
-      src/psg.c src/sound.c src/trace68k.c src/mars_main.c \
+      src/psg.c src/sound.c $(NUKED)/ym3438.c src/trace68k.c src/mars_main.c \
       $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c $(MUSASHI)/softfloat/softfloat.c
 
 build/mars: $(SRC) src/mars.h src/sh2.h src/sound.h src/psg.h src/z80.h src/genz80.h \

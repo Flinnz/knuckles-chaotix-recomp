@@ -25,11 +25,20 @@ Third-party dependencies (not vendored):
 ```bash
 brew install sdl2
 git clone --depth 1 https://github.com/kstenerud/Musashi.git third_party/musashi
+git clone --depth 1 https://github.com/nukeykt/Nuked-OPN2.git third_party/nuked-opn2
 make run
 ```
 
 Musashi (MIT, Karl Stenerud) provides the 68000 interpreter; `src/m68kconf.h`
 overrides its config down to a bare 68000 so the vendored copy stays untouched.
+
+Nuked-OPN2 (LGPL 2.1, Alexey Khokholov) provides the YM2612. It is derived from
+a die shot and is what every other implementation is measured against, which
+matters here because a sound chip has no trace oracle: the reference logs
+instructions, not audio. Everything else that makes a sound — the 32X's PWM, the
+Z80 that drives the chips, the PSG — is in `src/`.
+
+Neither is in the repository; `third_party/` is ignored.
 
 
 `m68k-elf-binutils` comes from Homebrew; `sh-elf` is built locally because no
@@ -68,7 +77,7 @@ python3 tools/diffpwm.py                      # and hold it to what it played
 python3 tools/diffz80.py                      # the sound driver, instruction by
                                               # instruction, against the real Z80
 python3 tools/test_psg.py                     # the PSG against its own arithmetic
-./build/mars --frames 1800 --sound 2 --wav p.wav        # what the PSG alone plays
+./build/mars --frames 1800 --sound 4 --wav fm.wav       # 1 PWM, 2 PSG, 4 YM2612
 ./build/mars --dump-32x build/mars32x.bin     # our frame buffers, palette, regs
 python3 tools/refframe.py --ppm f.ppm         # rebuild the real machine's from
 python3 tools/refframe.py --compare build/mars32x.bin   # the trace, and compare
@@ -143,12 +152,13 @@ picture from each half of the machine.
   the reference on 32,719 of its 33,984 logged instructions with no divergence
   control flow does not recover from. The 164 bytes it puts into the two sound
   chips are the reference's own, in order
-- **The PSG plays them.** Nothing is audible during the SEGA logo — the driver
-  mutes all four channels and the 32X's PWM is a constant — but past it there is
-  music from both halves of the machine, and `--sound` separates them
-- Next: the YM2612, which is the rest of the sound; and the vertical interrupt's
-  *phase* — where in the engine's frame it lands — which is what nearly all the
-  remaining trace differences are
+- **All three sound sources play.** Nothing is audible during the SEGA logo —
+  the driver mutes the PSG, the 32X's PWM is a constant and the FM is only being
+  set up — but past it there is music from every part of the machine at once:
+  32X PWM samples, PSG squares, and six channels of FM through Nuked-OPN2.
+  `--sound` separates them
+- Next: the vertical interrupt's *phase* — where in the engine's frame it lands
+  — which is what nearly all the remaining trace differences are
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.
