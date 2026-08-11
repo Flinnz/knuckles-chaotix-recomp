@@ -178,6 +178,21 @@ def cmd_coverage(args):
     """
     rom, az = analyse(args.rom)
     print(f"front end: {len(az.code):,} instruction offsets")
+
+    # "Covered" has to mean the recompiler can reach it, not just that the
+    # disassembler knows the bytes. A block discovery traced but that no
+    # function entry reaches falls out of `funcs`, so it is in the listing and
+    # in `code` — this check passed — and yet has no row in the dispatch table,
+    # which is a hole only the translated build ever falls into. 3,858 of 7,943
+    # blocks were in that state, and `--recomp` was spending nine tenths of a
+    # million hand-overs to the interpreter on one of them.
+    owned = {b for f in az.funcs.values() for b in f.blocks}
+    orphans = sorted(set(az.blocks) - owned)
+    print(f"  blocks: {len(az.blocks):,} traced, {len(owned):,} owned by a "
+          f"function" + (f", ORPHANED {len(orphans)}" if orphans else ""))
+    for off in orphans[:12]:
+        print(f"      0x{off:06X}")
+
     pat = re.compile(r"CPU  ([0-9a-f]{6})  ")
     bad = 0
     for path in (args.ref, args.trace):
@@ -210,7 +225,7 @@ def cmd_coverage(args):
         for a in sorted(missing)[:24]:
             print(f"      0x{a:06X}  x{missing[a]:,}")
         bad += len(missing)
-    return 1 if bad else 0
+    return 1 if bad or orphans else 0
 
 
 def cmd_fn(args):

@@ -47,6 +47,12 @@ int32_t m68k_fuel;
  * blocks rather than counted here — see M68K_BLOCK in m68000.h. Counting
  * transfers could not bound a poll loop at all, because an intra-function loop
  * is a `goto` in the generated C and never comes back here. */
+/* Can recompiled code be entered here? The interpreter needs to know, so that a
+ * hand-over can stop at the end of the gap rather than at the end of a slice. */
+int m68k_dispatchable(uint32_t addr) {
+    return lookup(canon68k(addr)) >= 0;
+}
+
 uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known) {
     m68k_fuel = budget ? (int32_t)budget : INT32_MAX;
     for (;;) {

@@ -474,6 +474,35 @@ class Analyzer:
                     cur.succs.add(target)
                 cur = None
 
+        self._assign()
+
+        # Every traced block has to end up owned by something.
+        #
+        # A function is built by walking `succs` from a registered entry, so a
+        # block that discovery traced but that no entry reaches falls out of the
+        # result entirely — it is in `code`, so the listing has it and
+        # `coverage` is satisfied, but the recompiler emits one C function per
+        # *function* and never sees it. That gap is invisible until something
+        # tries to run the translated code: 3,858 of the front end's 7,943
+        # blocks had no row in the dispatch table, among them the engine's
+        # vertical-interrupt wait at 0x8834C0, which is where `--recomp` was
+        # spending nine tenths of its million hand-overs to the interpreter.
+        #
+        # Adopting an orphan as its own entry cannot affect the round-trip,
+        # which is emitted from `code` rather than from functions, and cannot
+        # mis-attribute anything, because a block's exits are explicit and any
+        # owner will do.
+        orphans = sorted(set(self.blocks) - {b for f in self.funcs.values()
+                                             for b in f.blocks})
+        if orphans:
+            for off in orphans:
+                self.func_entries.add(off)
+                self.entry_reasons.setdefault(off, "orphaned block")
+            self._assign()
+        self.orphans_adopted = len(orphans)
+        return self.funcs
+
+    def _assign(self):
         self.funcs = {}
         for entry in sorted(self.func_entries):
             if entry not in self.blocks:
@@ -491,7 +520,6 @@ class Analyzer:
                 fn.blocks[b] = blk
                 stack.extend(blk.succs)
             self.funcs[entry] = fn
-        return self.funcs
 
     def stats(self):
         return {

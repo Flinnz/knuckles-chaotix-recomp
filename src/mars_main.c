@@ -94,6 +94,36 @@ static uint32_t rc_pc;
 static uint32_t rc_missing;      /* transfers to an address with no block */
 static uint32_t rc_missing_at;
 
+/* Where the hand-overs go, not just the first one. A million of them a run is
+ * either a million real gaps or a handful of addresses hit over and over, and
+ * only a count per address tells those apart. A small open-addressed table:
+ * this is diagnostics, so an address that does not fit is simply not counted
+ * rather than being allowed to evict a hot one. */
+#define RC_SITES 512
+static struct { uint32_t addr; uint32_t n; } rc_site[RC_SITES];
+
+static void rc_count(uint32_t a) {
+    unsigned h = (a * 2654435761u) % RC_SITES;
+    for (unsigned k = 0; k < RC_SITES; k++) {
+        unsigned i = (h + k) % RC_SITES;
+        if (rc_site[i].n == 0) { rc_site[i].addr = a; rc_site[i].n = 1; return; }
+        if (rc_site[i].addr == a) { rc_site[i].n++; return; }
+    }
+}
+
+static void rc_report(void) {
+    unsigned shown = 0;
+    for (;;) {
+        int best = -1;
+        for (unsigned i = 0; i < RC_SITES; i++)
+            if (rc_site[i].n && (best < 0 || rc_site[i].n > rc_site[best].n))
+                best = (int)i;
+        if (best < 0 || shown++ >= 8) break;
+        printf("      0x%06X  x%u\n", rc_site[best].addr, rc_site[best].n);
+        rc_site[best].n = 0;
+    }
+}
+
 static void cpu_reset(void) {
     /* Musashi is initialised either way: under --recomp it is the fallback for
      * addresses with no recompiled block. */
@@ -205,8 +235,21 @@ static void cpu_run(unsigned cycles) {
     cpu_credit -= (int)(((int)(slice ? slice : 1) - m68k_fuel) * (int)recomp_cpi);
     if (known) return;
     if (!rc_missing++) rc_missing_at = rc_pc;
+    rc_count(rc_pc);
     to_musashi();
-    cpu_credit -= m68k_execute(cpu_credit > 0 ? cpu_credit : 1);
+    /* Run the interpreter to the end of the *gap*, not to the end of the slice.
+     *
+     * Handing it a whole slice and taking back wherever it stopped is what made
+     * this self-sustaining: an arbitrary stopping PC is almost never the start
+     * of a block, so the next slice handed over again whether or not anything
+     * was really missing. Stopping as soon as the PC is dispatchable turns a
+     * gap into one hand-over however long the gap is — which matters most
+     * exactly where it was worst, the vblank wait at 0x8834C0, a spin with no
+     * recompiled block that was costing a hand-over every sub-slice. */
+    do {
+        cpu_credit -= m68k_execute(1);
+    } while (cpu_credit > 0
+             && !m68k_dispatchable((uint32_t)m68k_get_reg(NULL, M68K_REG_PC)));
     from_musashi();
 }
 
@@ -693,6 +736,7 @@ int main(int argc, char **argv) {
                rc_missing);
         if (rc_missing) printf(", first 0x%06X", rc_missing_at);
         printf("\n");
+        if (rc_missing) rc_report();
     }
 
     if (headless_frames) {

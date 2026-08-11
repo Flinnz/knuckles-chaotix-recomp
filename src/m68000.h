@@ -166,6 +166,10 @@ extern int32_t m68k_fuel;
  */
 uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known);
 
+/* Whether `m68k_run` could enter at this address — i.e. whether it is the start
+ * of a recompiled block. What the interpreter uses to know when a gap is over. */
+int m68k_dispatchable(uint32_t addr);
+
 /* Reset from the vector table, and take an autovectored interrupt.
  *
  * The exception frame is the 68000's: the interrupt switches to supervisor

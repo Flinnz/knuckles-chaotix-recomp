@@ -796,6 +796,9 @@ is a bad trade against a round-trip that is currently exact.
 
 ### M6a — the 68000 → C recompiler
 
+*Later: 4,491 functions and 7,944 blocks, once orphaned blocks were adopted —
+see "Half the front end was not reachable" below.*
+
 The front-end work above was for this. All 561 discovered functions translate,
 the result compiles clean for arm64 under `-Wall`, and 38 semantics cases agree
 with an independent implementation on both the value and the condition codes.
@@ -1161,6 +1164,50 @@ agrees with ours on 79% of bytes and holds neither a line table nor a palette,
 both of which are written in loops it elided; that number is a floor, not a
 score.
 
+### Half the front end was not reachable, and only `--recomp` could tell
+
+1,136,315 hand-overs to the interpreter in 300 frames, about 91% of all
+sub-slices. A histogram of where they go — the first thing the plan asked for,
+because only a count per address tells a million real gaps from a handful of
+addresses hit over and over — settles it in one run: **two addresses are 89% of
+them**, `0x8834C4` and `0x8834C0`, which is the engine's `tst.b ($ffffd1)` /
+`beq` wait for the vertical interrupt.
+
+Neither has a recompiled block. Nor does anything else in that region: the
+dispatch table held **4,085 blocks where the front end had traced 7,943**.
+
+A function is built by walking `succs` from a registered entry, so a block that
+discovery traced but that no entry reaches falls out of `funcs` entirely. It is
+still in `code`, so the listing has it and the round-trip covers it and
+`coverage` was satisfied — and the recompiler, which emits one C function per
+*function*, never saw it. Function `0x3334` ends at its `rts` and everything
+from there to `0x36D0` was orphaned, the vblank wait among it.
+
+Adopting an orphan as its own entry cannot affect the round-trip, which is
+emitted from `code` rather than from functions, and cannot mis-attribute
+anything, because a block's exits are explicit and any owner will do. 562
+functions become 4,491, and 4,085 dispatchable blocks become 7,944.
+
+**1,136,315 hand-overs -> 293**, and the run is 2.4x faster. What is left is
+exactly the structural remainder the plan predicted: 279 at `0x8802AE`, the
+adapter's own vector stub, which is not the cartridge's to name and which the
+runtime assembles — one per vblank — and 9 in work RAM at `0xFF0000` and
+neighbours, the routines the engine builds at run time and that no static front
+end can ever find. Same 248 commands, same frame buffer, same line table.
+
+**`coverage` now asks the question that would have caught it.** It checked that
+the disassembler knew the bytes; it checks that a block is owned as well, which
+is what the translated build actually needs. It also reports the two counts
+side by side, so the gap is a number rather than a silence.
+
+*Also fixed, and worth keeping even though it moved nothing here:* a hand-over
+used to give the interpreter a whole slice and take back wherever it stopped,
+and an arbitrary stopping PC is almost never the start of a block — so the next
+slice handed over again whether or not anything was really missing. It now runs
+to the end of the *gap*, stopping as soon as the PC is dispatchable. That makes
+a gap cost one hand-over however long it is; it did not help the vblank wait
+only because that gap never ended.
+
 ### Next
 
 **1. What is left of the phase**, now that the clocks are right: 162 register
@@ -1168,29 +1215,18 @@ differences and 83 places control flow parts on the 68000, led by `0x8836F6`
 and `0x883244`, and the slave's interrupt entries at `0x060001F8`. These are no
 longer trip counts, so they want reading one at a time rather than a mechanism.
 
-**3. The screenshot check.** The one real verification gap in the rendering
-path — nothing has confirmed the packed-pixel decode, the palette conversion or
-the frame-select polarity against ground truth. This no longer needs an
-emulator: the extended extract logs 48,699 executions of the frame buffer write
-at `0x060021EA`, each with the register state that produced it, so replaying
-them reconstructs what the real machine had on screen.
+**2. A trace gate for the recompiled 68000.** It has none — `src/trace68k.c`
+hooks Musashi and reads Musashi's registers, so under `--recomp` it logs only
+the interpreted fragments, and the mode is held to nothing but "same picture,
+same command count". That was tolerable while the interpreter was doing nine
+tenths of the work; now that it does 293 hand-overs in 300 frames, essentially
+the whole run is untested code. The per-block hook the SH-2 side uses is the
+same two lines of codegen, and the blocks already carry a prologue to put it in.
 
-**4. Cut the handovers down.** `--recomp` hands to the interpreter 1,147,341
-times in 300 frames, about 91% of all sub-slices, where only about one per frame
-should be structural — the genuine case is the handful of routines the engine
-assembles into work RAM at `0xFF0000`, which no static front end can find. The
-suspicion is a feedback loop rather than that many real gaps: a hand-over
-returns wherever Musashi stopped, and an arbitrary PC mid-block has no row in
-the table, so the next slice hands over again whether or not the address was
-ever unreachable. Only the first is recorded; a histogram is the first thing to
-build, and re-entering at the *containing* block rather than requiring a leader
-is the likely fix.
-
-The recompiled 68000 also has no trace gate at all — `src/trace68k.c` hooks
-Musashi and reads Musashi's registers, so under `--recomp` it logs only the
-interpreted fragments, and the mode is held to nothing but "same picture, same
-command count". The per-block hook the SH-2 side uses is the same two lines of
-codegen, and the blocks now carry a prologue to put it in.
+**3. What the picture still rests on.** The palette conversion is unchecked —
+the reference's own CRAM writes fall inside loops its tracer elides, so
+`refframe.py` cannot reach them and it needs a different angle. So is the
+frame-select polarity, which no CPU trace can settle at all.
 
 ### Carried debts
 
