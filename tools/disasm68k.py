@@ -49,9 +49,11 @@ def analyse(rom_path, sweep=True):
     az.mark_data(0x3C0, "byte", 0x30)       # MARS header
     az.run()
 
+    # Both sweeps to a fixpoint together: a handler found by one is code the
+    # other has not seen yet, and an installation site can sit inside it.
     if sweep:
-        for _ in range(8):
-            if not az.scan_after_returns():
+        for _ in range(16):
+            if not (az.scan_after_returns() + az.scan_installed_handlers()):
                 break
             az.run()
     return rom, az
@@ -147,6 +149,62 @@ def cmd_discover(args):
     print("\nentry reasons:", dict(Counter(az.entry_reasons.values()).most_common(8)))
 
 
+# Reached from the table the 32X adapter supplies at 0x000000, which nothing in
+# the cartridge names — so the front end is right not to have them, and
+# src/gen68k.c assembles the ones the game uses. Everything else the 68000
+# executes is the cartridge's own and should be discoverable.
+ADAPTER_STUBS = (0x8802A2, 0x8802AE)
+
+
+def cmd_coverage(args):
+    """Does the front end have every instruction the 68000 actually executes?
+
+    The SH-2 side has answered this since `tools/diffsh2.py` existed, and the
+    68000 side had not been asked. The first time it was, 44 addresses came back
+    — the whole vertical interrupt handler among them, because the only path to
+    it is a pointer the engine writes into work RAM at run time.
+
+    A trace is evidence, not proof: it can only find code that some run reached.
+    Nothing here is asserted from it — it names addresses, and discovery has to
+    reach them on its own terms or not at all.
+    """
+    rom, az = analyse(args.rom)
+    print(f"front end: {len(az.code):,} instruction offsets")
+    pat = re.compile(r"CPU  ([0-9a-f]{6})  ")
+    bad = 0
+    for path in (args.ref, args.trace):
+        if not os.path.exists(path):
+            print(f"  {path}: not present, skipped")
+            continue
+        seen = {}
+        with open(path) as f:
+            for line in f:
+                m = pat.search(line)
+                if m:
+                    a = int(m.group(1), 16)
+                    seen[a] = seen.get(a, 0) + 1
+        counts = dict(cartridge=0, ram=0, adapter=0, banked=0)
+        missing = {}
+        for a, n in seen.items():
+            if a >= 0xFF0000:
+                counts["ram"] += 1
+            elif a < 0x100 or a in ADAPTER_STUBS:
+                counts["adapter"] += 1
+            elif 0x900000 <= a < 0xA00000:
+                counts["banked"] += 1        # bank register decides; not static
+            elif to_offset(a, len(rom.data)) in az.code:
+                counts["cartridge"] += 1
+            else:
+                missing[a] = n
+        print(f"  {path}: {len(seen):,} distinct PC(s) — "
+              + ", ".join(f"{k} {v:,}" for k, v in counts.items())
+              + (f", MISSING {len(missing)}" if missing else ", all covered"))
+        for a in sorted(missing)[:24]:
+            print(f"      0x{a:06X}  x{missing[a]:,}")
+        bad += len(missing)
+    return 1 if bad else 0
+
+
 def cmd_fn(args):
     rom, az = analyse(args.rom)
     off = int(args.addr, 0)
@@ -223,8 +281,12 @@ def main():
     e = sub.add_parser("emit")
     e.add_argument("--verify", action="store_true")
     e.add_argument("--outdir", default="build")
+    c = sub.add_parser("coverage")
+    c.add_argument("--ref", default="build/ref68k.txt")
+    c.add_argument("--trace", default="build/trace68k.txt")
     args = p.parse_args()
-    return {"discover": cmd_discover, "fn": cmd_fn, "emit": cmd_emit}[args.cmd](args) or 0
+    return {"discover": cmd_discover, "fn": cmd_fn, "emit": cmd_emit,
+            "coverage": cmd_coverage}[args.cmd](args) or 0
 
 
 if __name__ == "__main__":

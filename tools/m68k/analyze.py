@@ -232,37 +232,80 @@ class Analyzer:
             break                       # any other definition ends the chain
         return max(stride, 2)
 
+    def _slot_size(self, a, limit=8):
+        """Bytes of one dispatch-table slot at `a`, or None if it is not one.
+
+        A slot holds a single control transfer, with `nop` allowed to pad it out
+        to the stride. `rts` counts: a table whose nth case is "do nothing" is
+        written as `nop / rts`, which is what the controller identification
+        table at 0x8F45D0 is half made of.
+        """
+        n = 0
+        while n < limit:
+            if not self.readable(a + n, 2):
+                return None
+            try:
+                e = decode(self.fetch, a + n)
+            except IndexError:
+                return None
+            if not self.readable(a + n, e.size) or n + e.size > limit:
+                return None
+            if e.mnem == "nop":
+                n += e.size
+                continue
+            if e.kind not in (JUMP, BRANCH, CALL, RET):
+                return None
+            if e.kind != RET:
+                t = self._target_offset(e)
+                if t is None or not self.readable(t, 2):
+                    return None
+            return n + e.size
+        return None
+
     def _recover_pcrel_table(self, ins, recent):
         """Recover `jmp/jsr %pc@(base,%dn:w)` — the 68000 dispatch idiom here.
 
-        Each entry is a single control-transfer instruction, padded with nops to
-        the stride, so the table self-terminates: walk entries until one stops
-        being a branch. That matches the explicit `cmpi #n` bounds check these
-        sites carry, without having to find it.
+        Each entry is a single control-transfer instruction padded out to the
+        stride, so the table self-terminates: walk entries until one stops being
+        one. That matches the explicit `cmpi #n` bounds check these sites carry,
+        without having to find it.
+
+        The stride is read off the arithmetic that scaled the index — except
+        where there is none, because the index was already scaled when it was
+        stored and the site just loads it. `0x8834D6` is that: `move.w
+        ($ffdfe0),d0` and straight into the `jsr`, so the chain ends on an
+        unknown definition and the floor of 2 stands. Slot zero settles it
+        without guessing, since an entry has to fit in its own slot and slot
+        zero there is a 4-byte `bra.w`. That table is the mode dispatch the
+        engine runs every frame and its six cases were all missing.
         """
         m = re.match(r"%pc@\(0x([0-9a-f]+),%d(\d):", ins.ops)
         if not m:
             return []
         base = int(m.group(1), 16)
-        stride = self._index_stride(recent, int(m.group(2)))
+        first = self._slot_size(base)
+        if first is None:
+            return []
+        stride = max(self._index_stride(recent, int(m.group(2))), first)
         targets = []
         for i in range(256):
             a = base + i * stride
-            if not self.readable(a, 2):
-                break
-            try:
-                e = decode(self.fetch, a)
-            except IndexError:
-                break
-            if e.kind not in (JUMP, BRANCH, CALL) or e.size > stride:
-                break
-            t = self._target_offset(e)
-            if t is None or not self.readable(t, 2):
+            n = self._slot_size(a, stride)
+            if n is None:
                 break
             targets.append(a)
         return targets
 
     # ------------------------------------------------------------------
+    # The scale field of a brief extension word is a 68020 addition that a
+    # 68000 ignores, so nothing assembled for this CPU ever sets it — which
+    # makes it a reliable sign that the bytes are not code. It also happens to
+    # be the one thing `m68k-elf-as` refuses outright for -m68000, so a
+    # misclassification carrying it fails the round-trip rather than passing
+    # quietly; both of the ones this caught were data, an offset table at
+    # 0x0771FC and the bytes after an `rts` at 0x003E5E.
+    _SCALED = re.compile(r":[wl]:[248]")
+
     def looks_like_code(self, off, max_insns=64, min_insns=4):
         """Conservative test that `off` begins a real instruction sequence."""
         if off is None or off & 1 or not self.readable(off, 2):
@@ -277,6 +320,8 @@ class Analyzer:
                 return False
             if ins.kind == INVALID or not self.readable(a, ins.size):
                 return False
+            if self._SCALED.search(ins.ops):
+                return False
             if ins.kind in (BRANCH, JUMP, CALL):
                 t = self._target_offset(ins)
                 if t is None or not self.readable(t, 2):
@@ -287,12 +332,77 @@ class Analyzer:
         return False
 
     def scan_after_returns(self):
+        """What follows an `rts`: unreachable by fall-through, so seed it.
+
+        The SH-2 side seeds after an unconditional `bra`/`jmp` as well, on the
+        same reasoning, and that does not carry over here. Tried, it adds 73
+        functions and breaks the whole-cartridge round-trip — because on the
+        68000 what sits behind a `jmp` is very often the table it dispatches
+        through, and a wrong start on a variable-length encoding costs far more
+        than it does on a fixed-width one. The gate is the point; leave it.
+        """
         added = 0
         for end, (kind, _) in list(self.block_ends.items()):
             if kind != RET or end in self.code or end in self.data_marks:
                 continue
             if self.looks_like_code(end) and self.add_function(end, "after rts"):
                 added += 1
+        return added
+
+    # An address the engine puts somewhere for something to jump through later.
+    _INSTALL_SRC = re.compile(r"^%pc@\(0x([0-9a-f]+)\),%(a\d|fp|sp)$")
+    _INSTALL_DST = re.compile(r"^%(a\d|fp|sp),0x([0-9a-f]+)$")
+    _WRITES_AREG = re.compile(r",%(a\d|fp|sp)(@[+-]?)?$|%(a\d|fp|sp)@[+-]")
+
+    def scan_installed_handlers(self):
+        """Entry points the engine names with a PC-relative `lea` and stores.
+
+        The interrupt handlers are reached through none of the transfers
+        discovery follows. The adapter's vector points at a stub in the
+        cartridge, the stub is `jmp` through a fixed word of work RAM, and the
+        engine writes the real address into that word while it runs:
+
+            883464  lea  %pc@(0x8836d2),%a0
+            883468  move.l %a0,($ffc032)        ; the vertical interrupt's slot
+
+        So nothing static reaches 0x8836D2, and the whole vertical interrupt
+        handler — which calls the comm-0 poster, the VDP updater and the pad
+        reader, every frame — was missing from the front end. It is the same
+        shape for every handler the engine swaps in, and there are twelve
+        different ones written to that one slot.
+
+        The `lea` computes its address PC-relative, so the target is already a
+        plain cartridge offset and nothing has to be inferred. The pair has to
+        be in one unbroken run of instructions with the register untouched
+        between them, and the target has to pass `looks_like_code`, which is the
+        same bar `scan_after_returns` clears.
+        """
+        added = 0
+        held, prev_end = {}, None
+        for off in sorted(self.code):
+            ins = self.insns[off]
+            if off != prev_end:
+                held.clear()
+            prev_end = off + ins.size
+
+            if ins.mnem == "lea":
+                m = self._INSTALL_SRC.match(ins.ops)
+                if m:
+                    held[m.group(2)] = int(m.group(1), 16)
+                    continue
+            if ins.mnem == "movel":
+                m = self._INSTALL_DST.match(ins.ops)
+                if m and m.group(1) in held:
+                    t = held.pop(m.group(1))
+                    if self.looks_like_code(t) and self.add_function(t, "installed"):
+                        added += 1
+                    continue
+            # Anything else that touches an address register ends its chain.
+            if ins.mnem.startswith("movem"):
+                held.clear()
+            else:
+                for m in self._WRITES_AREG.finditer(ins.ops):
+                    held.pop(m.group(1) or m.group(3), None)
         return added
 
     # ------------------------------------------------------------------

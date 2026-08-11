@@ -43,9 +43,18 @@ run: build/mars
 # the signal is — 158 of 177 blocks in lock step, against 176 of 23,077 further
 # out, where our trip counts through the poll loops diverge by design — and
 # covering the rest needs a six-million-line trace to compare against.
+#
+# The 68000 round-trips were left out of this for a while, which was the wrong
+# call the moment its front end started changing: `coverage` widens discovery and
+# only the round-trip can say the widening was right. Both run here now, and the
+# last step asks the other half of the question — whether anything the 68000
+# actually executed is missing from what discovery found.
 check: build/mars
 	python3 tools/emit_asm.py --verify
 	python3 tools/emit_asm.py --verify --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x"
+	python3 tools/disasm68k.py emit --verify
+	python3 tools/disasm68k.py --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x" \
+	    emit --verify
 	python3 tools/test_recomp.py
 	./build/mars --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 2000000 --trace-sh2 build/tracesh2.txt >/dev/null
@@ -54,6 +63,7 @@ check: build/mars
 	python3 tools/diffsh2.py --cpu master --window 300000 --ref-blocks 200 \
 	    --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu slave  --window 300000 --rows 0 --detail 0
+	python3 tools/disasm68k.py coverage
 	@echo "all gates pass"
 
 clean:
