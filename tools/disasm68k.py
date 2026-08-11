@@ -166,7 +166,15 @@ def cmd_coverage(args):
 
     A trace is evidence, not proof: it can only find code that some run reached.
     Nothing here is asserted from it — it names addresses, and discovery has to
-    reach them on its own terms or not at all.
+    reach them on its own terms or not at all. The corollary is that a longer
+    run asks a harder question, and the default 300-frame trace is a short one:
+
+        ./build/mars --frames 2000 --trace68k /tmp/long.txt \\
+            --trace68k-lines 40000000
+        python3 tools/disasm68k.py coverage --trace /tmp/long.txt
+
+    which is 23.5 million instructions and 5 GB, and where the 245 addresses
+    listed in docs/roadmap.md come from.
     """
     rom, az = analyse(args.rom)
     print(f"front end: {len(az.code):,} instruction offsets")

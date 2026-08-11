@@ -285,7 +285,18 @@ class Analyzer:
         base = int(m.group(1), 16)
         first = self._slot_size(base)
         if first is None:
-            return []
+            # Some of these origins are the dispatching instruction itself, so
+            # slot zero is the `jmp` and no index ever selects it: 0x8811D6 is
+            # `jmp %pc@(0x8811d6,%d0:w)` with its three cases starting at
+            # 0x8811DA. The emitter already knows origins overlap here — it
+            # demotes the instruction they land inside to raw bytes. Step over
+            # it rather than giving the table up.
+            if not base <= ins.addr:
+                return []
+            base = ins.addr + ins.size
+            first = self._slot_size(base)
+            if first is None:
+                return []
         stride = max(self._index_stride(recent, int(m.group(2))), first)
         targets = []
         for i in range(256):
@@ -394,7 +405,14 @@ class Analyzer:
                 m = self._INSTALL_DST.match(ins.ops)
                 if m and m.group(1) in held:
                     t = held.pop(m.group(1))
-                    if self.looks_like_code(t) and self.add_function(t, "installed"):
+                    # Two instructions is enough here where four is the bar for
+                    # a blind sweep, because the naming carries the weight the
+                    # length was standing in for. Interrupt handlers are short:
+                    # 0x883710 is `move.b #1,($ffffd1)` and `rte`, and 0x883BA8
+                    # — which the engine runs 1,408 times in 2,000 frames — is
+                    # three instructions. Both were being turned away.
+                    if (self.looks_like_code(t, min_insns=2)
+                            and self.add_function(t, "installed")):
                         added += 1
                     continue
             # Anything else that touches an address register ends its chain.
