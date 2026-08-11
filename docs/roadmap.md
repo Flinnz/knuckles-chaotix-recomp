@@ -1504,49 +1504,104 @@ And the numbers this is held to, which are not all in the same direction:
 | recompiled 68000 | 9,025 blocks, 359 div | 8,736, 398 |
 
 The two whole-extract numbers got worse and the cause is identified rather than
-guessed at: **our master finishes its work and idles where the reference's is
-still busy.** Both run the same number of instructions a frame — 237,434 against
-235,076, which the run now prints — but the reference spends 49% of them in the
-idle poll and we spend 83%. From reference line 40,553 onward its engine finds
-comm 0 busy at *every* vblank and skips the palette upload; ours never does. The
-knock-on is visible two ways: the queue at `0xFFD860` that the upload drains
-holds 32 entries in the reference and one in ours, and the master's video init
-costs it 4.3 frames against our 1.5.
+guessed at: **our master reaches the same place sooner.** From reference line
+40,553 onward the engine finds comm 0 busy at *every* vblank and skips the
+palette upload; ours never does, and the queue at `0xFFD860` that the upload
+drains holds 32 entries in the reference against one in ours.
 
-That is now the whole of the 68000 residue — one cause, on the other CPU.
+*The two figures first written here — "83% of ours are the idle poll against 49%
+of theirs", and a video init costing 4.3 frames against 1.5 — were wrong, and
+the next section is what replaced them.* They came of comparing our block-entry
+counts against the reference's instruction counts, which is not a comparison at
+all.
 
-**1. The master idles where the reference works.** This is what the 68000's
-remaining 449 rows are, and it is one question on the other CPU: both masters
-execute the same 235,000 instructions a frame, and the reference spends 49% of
-them in its idle poll against our 83%. So its engine finds comm 0 busy at every
-vblank from reference line 40,553 on and skips the palette upload, and ours
-never does. Where the missing work is has a shape already — the reference's
-decompressor sits at `0x0600087A` and `0x06000866` where ours sits at
-`0x06000872` and `0x0600085C`, which is the same routine down a different path.
+### The master has no missing work; the 68000 crosses the adapter too cheaply
 
-What is *not* left, having been measured: the frame length (+7 instructions in a
-whole-frame histogram), the hand-over granularity (16 beats 32 and 64), and the
-order the CPUs take within a hand-over (it brackets the answer and hits neither
-side). `--detail-at` reads any row in full.
+"The master idles where the reference works" was the wrong question, and asking
+it properly took one honest measurement: weight our block entries by the block's
+length before comparing them against the reference's instruction counts. Over
+the same **3,573,959 master instructions** the idle poll is 51.1% of the
+reference's and 39.1% of ours — not 49 against 83 — and the master's init is
+**374,279 instructions against 439,956**, both doing exactly three vblank syncs
+and six autofill loops.
 
-The slave's own 546 are a different subject and may not be ours to fix: the
-reference takes every one of its 3,360 PWM interrupts at the same point in a
-206-instruction loop, which is idle-loop handling in the emulator rather than a
-fact about the machine.
+Then the work itself, item by item. Both masters decompress the same twelve
+assets, in the same order, from the same cartridge addresses to the same SDRAM
+destinations, called from the same site — and **the eleven gaps between them
+agree to within one instruction**: 87,912 against 87,911, 36,337 against 36,336,
+103,440 against 103,439, and so on down. There is no missing work and no extra
+work. The master's behaviour is the same behaviour.
+
+What differs is *when it is asked*. Timed against the master's own clock, from
+the moment the BIOS hands it the cartridge:
+
+| | reference | ours |
+|---|---|---|
+| the 68000 zeroes comm 0 | +3,023 instructions | +123 |
+| the 68000 posts its first command | +15,482 | +13,158 |
+| the 68000 raises the command interrupt | +95,415 | +93,747 |
+| …which in *time* is | **12.22 frames** | **9.76 frames** |
+
+The 68000 runs the same instructions — 93,747 against 95,415, 1.7% apart — and
+arrives **2.5 frames early**. The instruction counts are right and the clock is
+wrong, which is the opposite of the usual failure.
+
+**The missing time is the adapter.** In the steady state our frame is 11,611
+instructions against the reference's 11,609-11,615, exact; through this phase
+ours is 9,605 a frame against 7,808, which is 13.3 cycles an instruction against
+16.4. What separates the two phases is what the 68000 polls — the engine's own
+flag in work RAM afterwards, and the **32X comm register** here. Timing one of
+those polls against the master's clock settles it: the `tst.w ($a15120)` / `bne`
+pair at `0x8818A4` runs 9,768 instructions in 292,723 master instructions, which
+is 159,190 68000 cycles, or **16.3 cycles an instruction**. Musashi charges 26
+cycles for that pair — 13 apiece. A 68000 read of a 32X register costs about
+**six or seven cycles more than a read of RAM**, and we charge nothing for it.
+
+One number, measured, and the last identified cause of the 68000's residue.
+
+### Next
+
+Three things, in the order they are worth doing.
+
+**1. Charge the 68000 for reaching across the adapter.** Half a day, and it is
+the whole of what is left on the 68000 diff. A read or write of the 32X register
+block at `0xA15100`-`0xA153FF` — and probably the frame buffer window at
+`0x840000` — costs the 68000 wait states we do not model at all. The measurement
+is above: about **six or seven cycles** on top of what Musashi charges for a
+register read. Pin it with the same scanner over two or three more loops with a
+different instruction mix, and hold it in `cpu_credit`, which already carries
+cycles between hand-overs; under `--recomp` the same debt goes through
+`recomp_cpi`'s conversion, so it wants a term there too rather than a second
+model.
+
+*The gate for it, in advance:* the `0x8818A4` poll should come out at 16.3
+cycles an instruction, the boot phase at 7,808 instructions a frame, the
+master's first command at 12.2 frames rather than 9.8 — and the 22 comm-0 rows
+and the palette-queue depth behind them should go with it. *Watch for:* the
+steady state is already exact at 11,611 instructions a frame, so a penalty that
+leaks into it shows up immediately as that number drifting. That is the check,
+and it is cheap.
 
 **2. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
 writes and report space so the driver never stalls, and the samples go nowhere.
-Everything around it is now in place, and the reference says how much is
-waiting — its slave spends real instructions in the driver at `0xC000012C`
-onward, where ours idles. What is missing is a YM2612 and PSG core, a PWM sink,
-and somewhere to put the samples.
+Everything around it is now in place — the slave's PWM interrupt is on the
+machine's own clock at 365.96 to a frame, and its driver is running real code at
+`0xC000012C` on every one of them. What is missing is a YM2612 and PSG core, a
+PWM sink, and somewhere to put the samples.
 
 **3. The slave diff wants its bound lifted.** It is held to 2,000 reference
 blocks because our stream is 93% delay-loop entries where the reference collapses
 each run, and the aligner cannot walk two streams of such different densities.
 Collapsing ours the same way costs the master a quarter of its agreement, so the
-fix is not the tracer: it is either the interrupt phase above, or an aligner that
-understands a collapsed run as a *range* of positions rather than one.
+fix is not the tracer: it is an aligner that understands a collapsed run as a
+*range* of positions rather than one.
+
+*Not worth doing, and measured rather than assumed:* finer hand-overs — 32 and
+64 sub-slices to the line are both worse than 16; reordering the CPUs inside a
+hand-over — it brackets the answer and hits neither side; and reproducing the
+reference's interrupt *landing points* — it defers the slave's PWM interrupt to
+one point in a 206-instruction loop, 3,360 times out of 3,360, which is
+idle-loop handling in the emulator rather than a fact about the machine.
 
 ### Carried debts
 
@@ -1559,6 +1614,11 @@ understands a collapsed run as a *range* of positions rather than one.
   not a property.* The autofill start register was being read as a byte address
   where it holds a word address, so every fill landed at half its address and
   zeroed the line table the master had just written. 224 of 224 now.
+* **The 68000 does not pay to cross the adapter.** A read of a 32X register
+  costs it about six or seven cycles more than a read of RAM — measured, at
+  16.3 cycles an instruction for the `tst.w ($a15120)` / `bne` poll against
+  Musashi's 13 — and we charge nothing. It is why the engine reaches the
+  master's first command 2.5 frames early, and it is the next thing to fix.
 * **Interrupt phase.** The CPUs interleave now, but the vertical interrupt is
   raised at a fixed point in the line and the PWM interrupts on line boundaries,
   where the reference has both on their own clocks. It is what is left of the
