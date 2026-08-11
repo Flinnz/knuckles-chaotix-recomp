@@ -67,7 +67,18 @@ typedef struct {
     uint32_t ticks, dma_done, cmd_posted, unknown_r, unknown_w;
     uint32_t cmd_hist[16];   /* commands posted to comm 0, by kind */
     uint32_t line;           /* scanline the 68000 is running inside */
+    /* Two different things that used to be one flag. `vint_pending` is VDP
+     * status bit 7, which the adapter's boot ROM leaves set before the
+     * cartridge runs an instruction — 379,000 instructions of vblanks nothing
+     * acknowledged — and which the reference reads back set at its very first
+     * status read. `vint_irq` is the request on the 68000's own interrupt
+     * lines, and only the frame loop raises that. Conflating them meant the
+     * boot's stale status bit fired an interrupt the moment the 68000 dropped
+     * its mask, which lands in the window before the engine has installed a
+     * handler: our first vblank went to the do-nothing `rte` at 0x880B2A,
+     * which the reference never executes. */
     uint8_t  vint_pending;   /* VDP status bit 7, until the 68000 acknowledges */
+    uint8_t  vint_irq;       /* the request line, until the acknowledge cycle */
     uint8_t  pad_cycle[3], pad_th[3];   /* six-button pad sequencing */
     unsigned pad_buttons;    /* what player one is holding; see PAD_* below */
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */

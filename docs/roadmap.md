@@ -1000,15 +1000,75 @@ sub-slices — because a hand-over returns wherever Musashi stopped, which is
 usually mid-block where no row exists, so the next slice hands over again. That
 is (4) below, now with a number worth chasing.
 
+### The 68000 keeps time
+
+The vertical interrupt was raised at line 224, given a fixed 2,000 cycles, and
+then lowered — so a 68000 masked across that window lost the frame's vblank
+outright, and the 2,000 cycles were 1.5% of a frame the machine never had. It is
+*held* now, offered at every hand-over until taken, and dropped where the
+hardware drops it: the acknowledge cycle, which `gen68k_int_ack` already hooked.
+
+That left the real question, which the diff had been stating plainly all along
+and which is a pacing question rather than an interrupt one: **between two
+vertical interrupts the reference runs 11,232 instructions and we ran 12,230**,
+every frame, stable to the instruction.
+
+*Tried and rejected: VDP bus contention.* The theory was that the VDP stealing
+cycles from the 68000 during active display was the missing 8%, which is real
+hardware behaviour Musashi knows nothing about. Modelling it changed the count
+by **nothing at all** — and that is what identified the actual cause, because a
+budget that can be cut by a tenth with no effect was not what governed.
+
+**`m68k_execute` runs whole instructions.** It overshoots whatever it was asked
+for and returns what it actually spent, and that difference was being thrown
+away. Discarding it once a scanline is harmless; discarding it sixteen times a
+line makes the overshoot, not the request, set the clock. `cpu_credit` carries
+the debt, so a slice's request is a rate again — overspend now and the next
+slices are shorter until it is paid back. 12,230 -> 11,032.
+
+The last 1.8% was arithmetic. `CYCLES_PER_LINE` is 487 where the figure is
+487.9, and dividing that by sixteen truncates again to 30 from 30.4 — 2,080
+cycles a frame between them. Handing `CYCLES_PER_FRAME` out across exactly the
+frame's hand-overs loses nothing: **11,224 to 11,249 against the reference's
+11,232 to 11,240**, which is 0.1%.
+
+What that does to the diff is not a smaller number of divergences — it is 532
+where it was 525, because a trip count off by one is a row exactly like one off
+by 998. It is that the rows changed size. Trip differences are now ±1 to ±18
+almost everywhere, where they were hundreds to thousands, and the large ones
+left are the four BIOS stand-ins that answer instantly by construction: the
+checksum (672,348), the VDP DMA busy bit (16,554), and the two comm rendezvous.
+
+Two smaller things came out of it. `gen.vint_pending` was doing two jobs —
+VDP status bit 7, which the adapter's boot ROM leaves set before the cartridge
+runs an instruction, and the request on the 68000's interrupt lines, which only
+a real vblank raises. They are separate fields now, because holding the request
+meant the boot's stale status bit would have fired an interrupt the moment the
+mask dropped.
+
+And **the front end was missing a one-instruction handler.** With the vblank
+held, our 68000 takes one in the window between the boot filling its trampolines
+and the engine installing its own handler, and runs the `rte` at `0x880B2A` —
+which the reference never reaches, because its boot is a million instructions
+slower where our stand-ins answer at once. `looks_like_code` wants four
+instructions before it will believe a blind sweep, and this is one. The evidence
+is better than length, though: `rte` cannot appear anywhere but as the last
+instruction of an exception handler, so an `rte` sitting where control cannot
+fall through is a handler by construction. 24,578 -> 24,579 instructions, both
+images still byte-exact, and `coverage` clean again.
+
+Still open, and now the clear remainder: 162 register differences and 83 places
+control flow parts, led by `0x8836F6` and `0x883244`. And the slave's PWM
+interrupts are still delivered on line boundaries where the reference has them
+on the timer's own cycle count, which is what its interrupt entries at
+`0x060001F8` disagree about.
+
 ### Next
 
-**1. Interrupt phase.** Both remaining groups of divergence are the same
-question asked of two CPUs: *when* does the interrupt land. The 68000's vertical
-interrupt is raised at line 224 and held for a fixed 2,000 cycles, and the
-reference takes it at a point in the wait loop at `0x8834C0` we arrive at with a
-different mask; the slave's PWM interrupts are delivered on line boundaries
-where the reference delivers them on the timer's own cycle count. This is the
-largest single thing left on both diffs and it is one mechanism, not two.
+**1. The slave's PWM phase**, the half of the interrupt question not yet
+answered. 365 interrupts a frame delivered at line boundaries, where the timer
+divides the SH-2 clock by `(cycle + 1) * TM`. The same debt-carrying trick the
+68000 just got applies directly.
 
 **2. A trace that survives idling.** Both SH-2 gates now need a 3-million-line
 budget and produce a 1.8 GB file, because 98% of it is a CPU correctly doing

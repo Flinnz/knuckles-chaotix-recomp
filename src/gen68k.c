@@ -338,7 +338,7 @@ static uint16_t vdp_status(void) {
  * does it — otherwise the level would still be asserted when the handler's
  * `rte` lowered the mask and it would re-enter immediately. */
 int gen68k_int_ack(int level) {
-    if (level == 6) gen.vint_pending = 0;
+    if (level == 6) gen.vint_pending = gen.vint_irq = 0;
     m68k_set_irq(0);
     return M68K_INT_ACK_AUTOVECTOR;
 }

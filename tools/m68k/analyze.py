@@ -362,9 +362,30 @@ class Analyzer:
         for end, (kind, _) in list(self.block_ends.items()):
             if kind != RET or end in self.code or end in self.data_marks:
                 continue
-            if self.looks_like_code(end) and self.add_function(end, "after rts"):
+            if ((self.lone_rte(end) or self.looks_like_code(end))
+                    and self.add_function(end, "after rts")):
                 added += 1
         return added
+
+    def lone_rte(self, off):
+        """A single `rte` is a whole interrupt handler, and `looks_like_code`
+        wants four instructions before it will believe a blind sweep.
+
+        The evidence here is better than length. `rte` cannot appear anywhere
+        but as the last instruction of an exception handler — nothing falls into
+        one and no ordinary routine ends in one — so an `rte` sitting where
+        control cannot fall through is a handler by construction. 0x880B2A is
+        exactly that, one instruction between an `rts` and the reserved-vector
+        handler the cartridge header names, and it is what the 68000 runs if a
+        vertical interrupt arrives before the engine has installed its own.
+        """
+        if off is None or off & 1 or not self.readable(off, 2):
+            return False
+        try:
+            ins = decode(self.fetch, off)
+        except IndexError:
+            return False
+        return ins.mnem == "rte"
 
     # An address the engine puts somewhere for something to jump through later.
     _INSTALL_SRC = re.compile(r"^%pc@\(0x([0-9a-f]+)\),%(a\d|fp|sp)$")

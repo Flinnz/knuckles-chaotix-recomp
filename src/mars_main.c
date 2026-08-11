@@ -32,7 +32,12 @@
 #define LINES_PER_FRAME 262          /* NTSC */
 #define CYCLES_PER_LINE (CYCLES_PER_FRAME / LINES_PER_FRAME)
 #define VBLANK_LINE 224              /* where the reference's markers put it */
-#define VBLANK_ACK_CYCLES 2000
+
+/* Tried and removed: a VDP bus-contention model, on the theory that the VDP
+ * stealing cycles during active display was why our 68000 ran 12,230
+ * instructions between vertical interrupts against the reference's 11,232. It
+ * changed the count by nothing at all, which is what said the diagnosis was
+ * wrong — the budget was not what governed. See cpu_credit below. */
 
 /* The 32X's SH-2s are clocked at 23.01 MHz against the 68000's 7.67 MHz —
  * exactly three times, which is where the ratio comes from rather than a number
@@ -143,23 +148,71 @@ static void from_musashi(void) {
  * the two share an address space and a register file so the handover costs
  * nothing but the copy.
  */
+/* Cycles banked from one hand-over to the next.
+ *
+ * `m68k_execute` runs whole instructions, so it overshoots whatever it was
+ * asked for and returns what it actually spent. Discarding that difference is
+ * harmless once a scanline and ruinous sixteen times a line: the overshoot, not
+ * the request, ends up setting the clock. It cost 8% — the reference runs 11,232
+ * instructions between two vertical interrupts and we ran 12,230, stable to the
+ * instruction and completely unmoved by changing the cycle budget, which is
+ * what says the budget was not what was governing.
+ *
+ * Carrying the debt makes a slice's request a *rate* again: overspend now and
+ * the next slices are shorter until it is paid back.
+ */
+static int cpu_credit;
+
+/* One hand-over's worth of 68000 cycles, with the remainder distributed rather
+ * than truncated. `CYCLES_PER_LINE` is already 487 where the true figure is
+ * 487.9, and dividing that by sixteen truncates again to 30 from 30.4 — 2,080
+ * cycles a frame between them, which is the 1.8% left after the debt carry
+ * above. Handing out CYCLES_PER_FRAME across exactly the frame's hand-overs
+ * loses nothing. */
+#define STEPS_PER_FRAME (LINES_PER_FRAME * SUBSLICES_PER_LINE)
+static unsigned cyc_acc;
+static unsigned step_cycles(void) {
+    cyc_acc += CYCLES_PER_FRAME;
+    unsigned n = cyc_acc / STEPS_PER_FRAME;
+    cyc_acc %= STEPS_PER_FRAME;
+    return n;
+}
+
 static void cpu_run(unsigned cycles) {
-    if (!use_recomp) { m68k_execute((int)cycles); return; }
-    unsigned slice = cycles / recomp_cpi;
+    cpu_credit += (int)cycles;
+    if (cpu_credit <= 0) return;             /* still paying off the last one */
+    if (!use_recomp) {
+        cpu_credit -= m68k_execute(cpu_credit);
+        return;
+    }
+    unsigned slice = (unsigned)cpu_credit / recomp_cpi;
     int known = 1;
     rc_pc = m68k_run(&rcpu, rc_pc, slice ? slice : 1, &known);
+    /* What the fuel did not come back with is what the blocks ran. */
+    cpu_credit -= (int)(((int)(slice ? slice : 1) - m68k_fuel) * (int)recomp_cpi);
     if (known) return;
     if (!rc_missing++) rc_missing_at = rc_pc;
     to_musashi();
-    m68k_execute((int)cycles);
+    cpu_credit -= m68k_execute(cpu_credit > 0 ? cpu_credit : 1);
     from_musashi();
 }
 
-static void cpu_irq(unsigned level) {
-    if (!use_recomp) { m68k_set_irq(level); return; }
-    if (level) {
-        if (m68k_interrupt(&rcpu, &rc_pc, level)) gen.vint_pending = 0;
-    }
+/* Offer the pending vertical interrupt, once per hand-over.
+ *
+ * The request is *held* until the 68000 takes it, which is what the hardware
+ * does — the VDP drops it on the acknowledge cycle, in gen68k_int_ack(). It
+ * used to be asserted at line 224, given a fixed 2,000 cycles and then lowered,
+ * so a 68000 masked across that window lost the frame's vblank outright, and
+ * the 2,000 cycles were 1.5% of a frame the machine never had.
+ *
+ * Musashi latches a level, so setting it repeatedly costs nothing and the
+ * ack callback lowers it. The recompiled 68000 has no latch: m68k_interrupt
+ * declines while the mask is up, so it is simply offered again next time.
+ */
+static void cpu_poll_irq(void) {
+    if (!gen.vint_irq) return;
+    if (!use_recomp) { m68k_set_irq(6); return; }
+    if (m68k_interrupt(&rcpu, &rc_pc, 6)) gen.vint_pending = gen.vint_irq = 0;
 }
 
 static uint32_t cpu_pc(void) {
@@ -451,13 +504,19 @@ int main(int argc, char **argv) {
         unsigned pwm = mars_pwm_per_frame(), acc = 0;
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
+            /* Raised as the beam reaches the line, before the 68000 runs any of
+             * it, which is where the reference's own markers put it —
+             * "Vblank SR=3 @ 224,n". It stays raised until acknowledged. */
+            if (line == VBLANK_LINE) gen.vint_pending = gen.vint_irq = 1;
+
             /* The three CPUs take turns through the line. A rendezvous costs
              * the waiting one a hand-over or two rather than being answered
              * inside its own register write, which is the whole point: the
              * reference's master is busy through 22 of its 102 vblanks, and the
              * engine skips work in those. */
             for (unsigned s = 0; s < SUBSLICES_PER_LINE; s++) {
-                cpu_run(CYCLES_PER_LINE / SUBSLICES_PER_LINE);
+                cpu_poll_irq();
+                cpu_run(step_cycles());
                 sh2_run(&mars_cpu[0], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
                 sh2_run(&mars_cpu[1], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
             }
@@ -470,17 +529,6 @@ int main(int argc, char **argv) {
                 mars_deliver_int(1, MARS_INT_PWM);
                 mars.pwm_ints++;
                 sh2_run(&mars_cpu[1], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
-            }
-            if (line == VBLANK_LINE) {
-                /* The status flag goes up here and comes down on the
-                 * acknowledge cycle, in gen68k_int_ack(). While the 68000 is
-                 * masked to level 7 — which is the whole boot — the interrupt
-                 * is never taken and the flag simply stays up, which is what
-                 * the reference reads back at all three of its status reads. */
-                gen.vint_pending = 1;
-                cpu_irq(6);
-                cpu_run(VBLANK_ACK_CYCLES);
-                cpu_irq(0);
             }
         }
 
