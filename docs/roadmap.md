@@ -838,7 +838,39 @@ the adapter's BIOS helper, where the cartridge image holds a vector pointer
 rather than the code that runs there, and `src/gen68k.c` assembles the real
 thing. Neither the 2,000-frame trace nor the reference reaches any of them.
 
-The runtime still interprets; swapping this in is next.
+### It runs the game
+
+`./build/mars --recomp` puts the recompiled code in the 68000's place. At 300
+frames it posts 304 commands against the interpreter's 298 and produces the same
+picture: 43,314 frame-buffer bytes, 128 of 224 line-table entries, 362 palette
+bytes — the same numbers either way. Musashi stays in the build and stays the
+default, because it is also what makes the swap possible.
+
+Three things had to be true, and two of them were not.
+
+**Recompiled code and the interpreter live in different address spaces.**
+Discovery works in cartridge offsets — the 68000 sees the same bytes through the
+direct window and through 0x880000, and an offset is the only stable coordinate
+— so the generated code names offsets while a PC handed back by the interpreter
+names an address. Below 0x400000 those are the same number, which is exactly why
+the boot ran either way and hid it until the engine proper was reached. The
+trampoline canonicalises now, and enters the function at the offset rather than
+the address it was asked for.
+
+**The first 256 bytes are not the cartridge's.** The game calls the adapter's
+BIOS helper at 0x0000C0, and the cartridge image there is a table of pointers,
+which is one of the seven things the recompiler will not translate. Recompiled
+code returning "no block" for anything below 0x100 sends it to the interpreter,
+which reads what `src/gen68k.c` actually assembled there — the same fact the
+coverage tool already encodes as its adapter-stub exclusion.
+
+**Some of what the 68000 runs is not in the cartridge at all.** It assembles
+routines into work RAM at 0xFF0000 and jumps to them, and no amount of static
+discovery finds code that does not exist until run time. So the answer is not a
+better front end: a recompiler for a machine like this needs an interpreter
+beside it, and the two share an address space and a register file so a handover
+costs a register copy. That is what `--recomp` is — recompiled where there is a
+block, interpreted where there is not.
 
 ### Next
 
@@ -860,11 +892,12 @@ give it directly, being instruction traces rather than memory dumps; it needs a
 real emulator run, or replaying the reference's frame buffer writes out of the
 pre-reset segments to reconstruct what the real machine had on screen.
 
-**4. Swap the recompiled 68000 in for Musashi.** The translator exists and its
-semantics are checked (below); what has not been done is running the game on it.
-That needs the interrupt path — `m68k_run` has no equivalent of
-`m68k_set_irq` — and it needs an answer for an address with no recompiled block,
-which is currently "stop and report".
+**4. Cut the handovers down.** `--recomp` runs the game on recompiled code
+(below) but hands to the interpreter 78,898 times in 300 frames — roughly once
+per scanline slice, where only about one per frame should be structural. Each
+handover then gives Musashi a whole line's cycles rather than just enough to get
+back, so the interpreter is still doing most of the work. Finding out what the
+other ~262 per frame are is the next thing to measure.
 
 ### Carried debts
 

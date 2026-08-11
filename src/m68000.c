@@ -12,6 +12,25 @@
  */
 #include "m68000.h"
 
+/* Discovery works in cartridge offsets, because the 68000 sees the same bytes
+ * through more than one window and an offset is the only stable coordinate —
+ * so the generated code names offsets, and a PC that arrives from the
+ * interpreter names an address. Below 0x400000 the two are the same number,
+ * which is why the boot ran either way and hid this until the engine proper
+ * was reached through the 0x880000 window. */
+static uint32_t canon68k(uint32_t a) {
+    /* The first 256 bytes are the adapter's, not the cartridge's: the vectors
+     * plus the BIOS helper the game calls at 0x0000C0, which src/gen68k.c
+     * assembles. Recompiled code holds the cartridge image of that region — a
+     * table of pointers — so it must never run there. Naming an offset the
+     * table cannot hold sends it to the interpreter, which reads what is
+     * actually there. */
+    if (a < 0x100u) return 0xFFFFFFFFu;
+    if (a >= 0x880000u && a < 0x900000u) return a - 0x880000u;
+    if (a >= 0x900000u && a < 0xA00000u) return a - 0x900000u;
+    return a;
+}
+
 static int lookup(uint32_t addr) {
     unsigned lo = 0, hi = m68k_function_count;
     while (lo < hi) {
@@ -22,10 +41,41 @@ static int lookup(uint32_t addr) {
     return -1;
 }
 
-uint32_t m68k_run(M68K *c, uint32_t addr) {
+uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known) {
     for (;;) {
-        int i = lookup(addr);
-        if (i < 0) return addr;
-        addr = m68k_functions[i].fn(c, addr);
+        uint32_t off = canon68k(addr);
+        int i = lookup(off);
+        if (i < 0) {
+            if (known) *known = 0;
+            return addr;
+        }
+        addr = m68k_functions[i].fn(c, off);
+        if (budget && --budget == 0) {
+            if (known) *known = 1;
+            return addr;
+        }
     }
+}
+
+void m68k_reset_recomp(M68K *c, uint32_t *pc) {
+    for (unsigned i = 0; i < 8; i++) c->d[i] = c->a[i] = 0;
+    c->usp = 0;
+    c->n = c->z = c->v = c->c = c->x = 0;
+    c->s = 1;
+    c->t = 0;
+    c->imask = 7;
+    c->a[7] = M68K_R32(0);
+    *pc = M68K_R32(4);
+}
+
+int m68k_interrupt(M68K *c, uint32_t *pc, unsigned level) {
+    if (level != 7 && level <= c->imask) return 0;
+    uint16_t sr = m68k_get_sr(c);
+    m68k_set_sr(c, (uint16_t)(sr | 0x2000));      /* supervisor: swaps SP */
+    c->a[7] -= 4; M68K_W32(c->a[7], *pc);
+    c->a[7] -= 2; M68K_W16(c->a[7], sr);
+    c->imask = (uint8_t)level;
+    c->t = 0;
+    *pc = M68K_R32((24u + level) * 4u);
+    return 1;
 }

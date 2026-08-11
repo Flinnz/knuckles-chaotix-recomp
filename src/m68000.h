@@ -138,8 +138,20 @@ typedef struct { uint32_t addr; uint32_t (*fn)(M68K *, uint32_t); } M68KEntry;
 extern const M68KEntry m68k_functions[];
 extern const unsigned m68k_function_count;
 
-/* Run from `addr` until something transfers somewhere with no recompiled block,
- * which is how an unrecovered indirect target reports itself. */
-uint32_t m68k_run(M68K *c, uint32_t addr);
+/* Run from `addr` for at most `budget` transfers and return where it stopped.
+ * `*known` comes back 0 when it stopped because there is no recompiled block
+ * there, which is how an unrecovered indirect target reports itself, and 1 when
+ * the budget simply ran out. A budget of 0 means "until it stops".
+ */
+uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known);
+
+/* Reset from the vector table, and take an autovectored interrupt.
+ *
+ * The exception frame is the 68000's: the interrupt switches to supervisor
+ * mode, pushes the return address and then the old status register, masks to
+ * its own level, and vectors through 24 + level. Nothing here reads that frame
+ * except `rte`, which pops it back. */
+void m68k_reset_recomp(M68K *c, uint32_t *pc);
+int m68k_interrupt(M68K *c, uint32_t *pc, unsigned level);
 
 #endif

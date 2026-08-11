@@ -15,6 +15,7 @@
 #include <SDL.h>
 #include "mars.h"
 #include "m68k.h"
+#include "m68000.h"
 
 #define H_SRC 0x3D4
 #define H_DST 0x3D8
@@ -32,6 +33,104 @@
 #define CYCLES_PER_LINE (CYCLES_PER_FRAME / LINES_PER_FRAME)
 #define VBLANK_LINE 224              /* where the reference's markers put it */
 #define VBLANK_ACK_CYCLES 2000
+
+/* --- which 68000 runs ------------------------------------------------------
+ *
+ * Musashi by default, the recompiled C under `--recomp`. Both drive the same
+ * address space — src/gen68k.c — so the only thing that changes is who executes
+ * the instructions, and every 32X rendezvous, DMA and interrupt the 68000
+ * triggers through a register write happens identically either way.
+ *
+ * The interpreter is paid in cycles and the recompiled code is not, so a slice
+ * is a count of control transfers instead. `--recomp-slice` sets it; the
+ * default is the ratio the boot lands on, and it only has to be close, because
+ * what the frame loop actually needs is that the vertical interrupt arrives at
+ * line 224 and that the SH-2 rendezvous fall inside the same frame they do now.
+ */
+static int use_recomp;
+static unsigned recomp_slice = 24;
+static M68K rcpu;
+static uint32_t rc_pc;
+static uint32_t rc_missing;      /* transfers to an address with no block */
+static uint32_t rc_missing_at;
+
+static void cpu_reset(void) {
+    /* Musashi is initialised either way: under --recomp it is the fallback for
+     * addresses with no recompiled block. */
+    m68k_init();
+    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+    m68k_pulse_reset();
+    if (!use_recomp) {
+        /* The 68000 manual leaves the condition codes undefined after reset,
+         * and Musashi happens to come up with Z set. Zero them so a trace
+         * comparison starts from the same defined state the reference emulator
+         * starts from. */
+        m68k_set_reg(M68K_REG_SR, 0x2700);
+        return;
+    }
+    m68k_reset_recomp(&rcpu, &rc_pc);
+}
+
+/* Hand the register file between the two cores.
+ *
+ * SR goes first because it decides which stack pointer A7 is: Musashi's
+ * M68K_REG_SP is whichever one the S bit selects, so setting it before SR would
+ * land the value in the wrong register. */
+static void to_musashi(void) {
+    for (unsigned i = 0; i < 8; i++) {
+        m68k_set_reg((m68k_register_t)(M68K_REG_D0 + i), rcpu.d[i]);
+        m68k_set_reg((m68k_register_t)(M68K_REG_A0 + i), rcpu.a[i]);
+    }
+    m68k_set_reg(M68K_REG_SR, m68k_get_sr(&rcpu));
+    m68k_set_reg(M68K_REG_SP, rcpu.a[7]);
+    m68k_set_reg(M68K_REG_USP, rcpu.usp);
+    m68k_set_reg(M68K_REG_PC, rc_pc);
+}
+
+static void from_musashi(void) {
+    for (unsigned i = 0; i < 8; i++) {
+        rcpu.d[i] = m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_D0 + i));
+        rcpu.a[i] = m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_A0 + i));
+    }
+    m68k_set_sr(&rcpu, (uint16_t)m68k_get_reg(NULL, M68K_REG_SR));
+    rcpu.a[7] = m68k_get_reg(NULL, M68K_REG_SP);
+    rcpu.usp = m68k_get_reg(NULL, M68K_REG_USP);
+    rc_pc = m68k_get_reg(NULL, M68K_REG_PC);
+}
+
+/* Recompiled where there is a block, interpreted where there is not.
+ *
+ * That is not a stopgap for the front end being incomplete — `coverage` says it
+ * has every instruction either trace executes. It is that some of what the
+ * 68000 runs is not in the cartridge at all: the engine assembles a handful of
+ * routines into work RAM at 0xFF0000 and jumps to them, and no amount of static
+ * discovery can find code that does not exist until run time. A recompiler for
+ * a machine like this needs an interpreter next to it for exactly those, and
+ * the two share an address space and a register file so the handover costs
+ * nothing but the copy.
+ */
+static void cpu_run(unsigned cycles) {
+    if (!use_recomp) { m68k_execute((int)cycles); return; }
+    unsigned slice = cycles * recomp_slice / CYCLES_PER_LINE;
+    int known = 1;
+    rc_pc = m68k_run(&rcpu, rc_pc, slice ? slice : 1, &known);
+    if (known) return;
+    if (!rc_missing++) rc_missing_at = rc_pc;
+    to_musashi();
+    m68k_execute((int)cycles);
+    from_musashi();
+}
+
+static void cpu_irq(unsigned level) {
+    if (!use_recomp) { m68k_set_irq(level); return; }
+    if (level) {
+        if (m68k_interrupt(&rcpu, &rc_pc, level)) gen.vint_pending = 0;
+    }
+}
+
+static uint32_t cpu_pc(void) {
+    return use_recomp ? rc_pc : m68k_get_reg(NULL, M68K_REG_PC);
+}
 
 /* Entered through sh2_call so tail transfers trampoline rather than nest. */
 #define MASTER_RESET 0x060001A0u
@@ -220,6 +319,10 @@ int main(int argc, char **argv) {
             gen.layers = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)
             hold = parse_hold(argv[++i]);
+        else if (!strcmp(argv[i], "--recomp"))
+            use_recomp = 1;
+        else if (!strcmp(argv[i], "--recomp-slice") && i + 1 < argc)
+            recomp_slice = (unsigned)strtoul(argv[++i], NULL, 0);
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -265,21 +368,15 @@ int main(int argc, char **argv) {
            mars_rom_checksum() == be16(&mars.rom[H_CHECKSUM]) ? "" : "  MISMATCH");
 
     gen68k_init_vectors();
-    m68k_init();
-    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-    m68k_pulse_reset();
-    /* The 68000 manual leaves the condition codes undefined after reset, and
-     * Musashi happens to come up with Z set. Zero them so a trace comparison
-     * starts from the same defined state the reference emulator starts from. */
-    m68k_set_reg(M68K_REG_SR, 0x2700);
+    cpu_reset();
     /* And the VDP's pending vertical interrupt is already up before the
      * cartridge runs an instruction: the adapter's boot ROM took 379,000 of
      * them to get here, masked at level 7 the whole way, so every vblank in
      * there set a flag nothing acknowledged. The reference's first status read,
      * at 0x0005B0, has it set. */
     gen.vint_pending = 1;
-    printf("68000 reset: PC=0x%06X SP=0x%06X\n",
-           m68k_get_reg(NULL, M68K_REG_PC), m68k_get_reg(NULL, M68K_REG_SP));
+    printf("68000 reset: PC=0x%06X  (%s)\n", cpu_pc(),
+           use_recomp ? "recompiled" : "Musashi");
     if (trace68k && !trace68k_open(trace68k, trace68k_lines)) return 1;
 
     SDL_Window *win = NULL; SDL_Renderer *ren = NULL; SDL_Texture *tex = NULL;
@@ -324,7 +421,7 @@ int main(int argc, char **argv) {
         unsigned pwm = mars_pwm_per_frame(), acc = 0;
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
-            m68k_execute(CYCLES_PER_LINE);
+            cpu_run(CYCLES_PER_LINE);
             if (line == VBLANK_LINE) {
                 /* The status flag goes up here and comes down on the
                  * acknowledge cycle, in gen68k_int_ack(). While the 68000 is
@@ -332,9 +429,9 @@ int main(int argc, char **argv) {
                  * is never taken and the flag simply stays up, which is what
                  * the reference reads back at all three of its status reads. */
                 gen.vint_pending = 1;
-                m68k_set_irq(6);
-                m68k_execute(VBLANK_ACK_CYCLES);
-                m68k_set_irq(0);
+                cpu_irq(6);
+                cpu_run(VBLANK_ACK_CYCLES);
+                cpu_irq(0);
             }
             for (acc += pwm; acc >= LINES_PER_FRAME; acc -= LINES_PER_FRAME) {
                 mars_deliver_int(1, MARS_INT_PWM);
@@ -383,7 +480,7 @@ int main(int argc, char **argv) {
 
     printf("\nafter %u frames:\n", frames);
     printf("  68000 PC=0x%06X   commands posted %u, serviced %u  (",
-           m68k_get_reg(NULL, M68K_REG_PC), gen.cmd_posted, mars.serviced);
+           cpu_pc(), gen.cmd_posted, mars.serviced);
     for (unsigned i = 0; i < 16; i++)
         if (gen.cmd_hist[i]) printf("%u:%u ", i, gen.cmd_hist[i]);
     printf(")\n");
@@ -454,6 +551,12 @@ int main(int argc, char **argv) {
     printf("\n");
     printf("  unmapped: 68k r=%u w=%u, sh2=%u; dispatch depth bails %u\n",
            gen.unknown_r, gen.unknown_w, mars.unknown, mars.deep);
+    if (use_recomp) {
+        printf("  recompiled 68000: %u handover(s) to the interpreter",
+               rc_missing);
+        if (rc_missing) printf(", first 0x%06X", rc_missing_at);
+        printf("\n");
+    }
     printf("  SH-2 unwound: %u idle, %u out of budget, %u too deep\n",
            mars.bail[MARS_BAIL_IDLE], mars.bail[MARS_BAIL_BUDGET],
            mars.bail[MARS_BAIL_DEPTH]);

@@ -106,9 +106,11 @@ picture from each half of the machine.
   and every instruction the gate traces execute is inside it
 - SH-2 **recompiler** running: all functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output
-- 68000 **recompiler** translating: all 561 functions to C, clean under `-Wall`,
-  with 38/38 semantics cases agreeing with Musashi on values *and* condition
-  codes. Not yet swapped in for the interpreter
+- 68000 **recompiler** running the game under `--recomp`: all 561 functions
+  translate to C, clean under `-Wall`, 38/38 semantics cases agree with Musashi
+  on values *and* condition codes, and the picture it draws is the interpreter's
+  to the byte. Musashi stays as the fallback for the routines the engine
+  assembles into work RAM at run time
 - **Runtime** runs both SH-2s and the 68000: Musashi interprets the 68000, the
   recompiled code runs the master and slave SH-2s, output goes to an SDL window
   and the keyboard drives a six-button pad
@@ -118,7 +120,8 @@ picture from each half of the machine.
   the same way
 - Next: interleave the two CPUs — the SH-2 currently runs inside the 68000's
   register writes, so every rendezvous answers on the first poll, which is 380
-  of the 452 differences left — and run the game on the recompiled 68000
+  of the 452 differences left — and cut down how often `--recomp` hands back to
+  the interpreter
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.

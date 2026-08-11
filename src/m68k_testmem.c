@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
     c.a[7] = m68k_read_memory_32(0);
     c.s = 1;
     c.imask = 7;
-    uint32_t stopped = m68k_run(&c, base);
+    uint32_t stopped = m68k_run(&c, base, 0, NULL);
     dump("recomp ", results, count);
     fprintf(stderr, "  recompiled run left off at 0x%06X\n", stopped);
     return 0;
