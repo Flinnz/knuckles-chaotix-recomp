@@ -53,6 +53,7 @@ python3 tools/validate_decoder.py             # SH-2 decoder vs sh-elf-objdump
 python3 tools/disasm68k.py discover           # find 68000 code
 python3 tools/disasm68k.py fn 0x3f0           # disassemble one 68000 function
 python3 tools/disasm68k.py emit --verify      # emit 68000 listing, prove round-trip
+python3 tools/disasm68k.py coverage           # did discovery miss anything it ran?
 python3 tools/validate_m68k.py                # 68000 decoder vs m68k-elf-objdump
 
 python3 tools/recompile.py --build            # SH-2 -> C, then compile it
@@ -84,27 +85,35 @@ and diffed against the cartridge.
 Both hold for the JU and E images. A single mis-decoded instruction,
 mis-rendered operand, or literal pool mistaken for code would break them.
 
+**A third check asks the other way round**: is there code the machine runs that
+discovery never found? A reference emulator's instruction log and our own are
+both filtered to the addresses the front end has, and anything left over is a
+gap. The SH-2 has answered this since its diff existed; the 68000 was first
+asked in 2026-08 and came back with 44 addresses, the vertical interrupt handler
+among them — reached only through a pointer the engine writes into work RAM at
+run time. Both sides are now clean, and `make check` runs all of it.
+
 ## Status
 
-Front ends are complete and the SH-2 half runs natively against a 32X memory
-map. The game does not boot: the 68000, which is the actual engine, is not
-implemented yet.
+The game boots and draws. Both CPUs run against a 32X memory map, the 68000 in
+lock step with a reference emulator through its whole boot, and there is a
+picture from each half of the machine.
 
-- SH-2 front end **complete**: 208 functions, 1,772 blocks, 15 dispatch tables
-- 68000 front end **complete**: 368 functions, 2,957 blocks, whole-ROM round-trip
-- SH-2 **recompiler** running: all 208 functions translate to C and compile for
+- SH-2 front end **complete**: 247 functions, 1,971 blocks, 15 dispatch tables
+- 68000 front end: 559 functions, 6,450 blocks, whole-cartridge round-trip,
+  and every instruction either trace executes is inside it
+- SH-2 **recompiler** running: all functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output
-- **Runtime** runs both CPUs: Musashi drives the 68000, the recompiled code
-  drives the master SH-2, output goes to an SDL window. The 68000 boots, clears
-  the 32X adapter checks and takes control of the 32X VDP, with 9 unmapped
-  accesses across a 600-frame run
-- **Blocked on the SH-2 ready handshake**: the 68000 spins waiting for `"M_OK"`
-  and `"S_OK"` in the comm registers, which the master and slave SH-2s post when
-  their init completes. The slave is not running yet
-- 50 indirect transfers unresolved across both CPUs, mostly runtime function
-  pointers needing interprocedural dataflow
-- Next: follow the engine's data-driven tables to raise 68000 coverage, then
-  start the recompiler
+- **Runtime** runs both SH-2s and the 68000: Musashi interprets the 68000, the
+  recompiled code runs the master and slave SH-2s, output goes to an SDL window
+  and the keyboard drives a six-button pad
+- **Against the reference**: 20,072 of the 68000's 20,178 boot instructions
+  agree exactly, and 52,381 of 54,081 across the whole extract, with no
+  divergence control flow does not recover from. Both SH-2s walk their extracts
+  the same way
+- Next: interleave the two CPUs — the SH-2 currently runs inside the 68000's
+  register writes, so every rendezvous answers on the first poll, which is 380
+  of the 452 differences left
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.

@@ -72,6 +72,10 @@ unresolved. Code found so far is 1.3% of the ROM, which is expected at this
 stage: most of the cartridge is compressed art, and the engine is reached
 through data-driven tables that the next pass needs to follow.
 
+*Later:* 559 functions, 6,450 blocks, 24,377 instructions, 2.8% of the ROM —
+see "The 68000 front end had never been asked what it was missing" below. Both
+images still reassemble byte for byte.
+
 **M3 — SH-2 → C recompiler** 🔵 *core done, coverage pending*
 
 All 208 discovered SH-2 functions translate to C with no unhandled constructs,
@@ -711,6 +715,58 @@ path can be tested without a person at the keyboard — with `right` held the
 game's own identification routine reads 0x77 out of the port at `0x8F4604` where
 it reads 0x7F with nothing held.
 
+### The 68000 front end had never been asked what it was missing
+
+`tools/diffsh2.py` ends every run with "every instruction the reference ran is
+inside a block we have". Nothing asked that of the 68000. Asked for the first
+time — both traces filtered to the addresses discovery has — the answer was 44,
+and one of them was the routine that runs every frame.
+
+**Interrupt handlers are installed, not called.** The adapter's vector points at
+a stub in the cartridge, the stub is `jmp` through a fixed word of work RAM, and
+the engine writes the real address in while it runs:
+
+    883464  lea    %pc@(0x8836d2),%a0
+    883468  move.l %a0,($ffc032)          the vertical interrupt's slot
+
+So nothing static reaches `0x8836D2`, and the whole vertical interrupt handler —
+which calls the comm-0 poster, the VDP updater and the pad reader, 102 times
+over the extract — was outside the front end. The `lea` is PC-relative, so its
+target is already a cartridge offset and nothing has to be inferred; seeding
+from the pair is exact. Twelve different handlers are written to that one slot,
+and the boot fills every trampoline with a `jmp $880B2A` first.
+
+**Two dispatch tables were being given up on**, for reasons that belong to the
+walker rather than the tables. `0x8834D6` loads an index that was already scaled
+when it was stored, so there is no arithmetic to read the stride off — but an
+entry has to fit in its own slot, and slot zero there is a 4-byte `bra.w`, which
+settles it without guessing. And a table whose nth case is "do nothing" writes
+it as `nop / rts`, which is half of the controller identification table at
+`0x8F45D0`, so a slot may hold a return. Between them, the engine's six-case
+mode dispatch and the six-button pad path.
+
+**A 68020 field is a reliable sign the bytes are not 68000 code.** Widening
+discovery walked into two data regions, and the round-trip caught both. What
+they have in common is a brief extension word with the scale field set — which
+a 68000 ignores and nothing assembled for one ever emits. It is also the one
+thing `m68k-elf-as` refuses outright, so leaving it in fails the round-trip
+rather than passing quietly. `looks_like_code` rejects it now.
+
+Tried and rejected: seeding after an unconditional `bra`/`jmp`, the way the SH-2
+side does. It adds 73 functions and breaks the whole-cartridge round-trip. On
+the 68000 what sits behind a `jmp` is very often the table it dispatches
+through — one of the two data regions above is exactly that — and a wrong start
+on a variable-length encoding costs what it does not cost on a fixed-width one.
+
+**368 -> 559 functions, 11,655 -> 24,377 instructions, 1.3% -> 2.8% of the ROM**,
+both images still byte-exact. The only address either trace executes that the
+front end does not have is `0x8802AE`, the adapter's own vector stub, which is
+not the cartridge's to name.
+
+`make check` now runs both 68000 round-trips — left out for a while, which was
+the wrong call the moment the front end started changing — and ends on
+`disasm68k.py coverage`, the check that found all of this.
+
 ### Next
 
 **1. Interleave the two CPUs.** 380 of the 452 remaining divergences are the one
@@ -730,6 +786,15 @@ conversion or the frame-select polarity against ground truth. The logs cannot
 give it directly, being instruction traces rather than memory dumps; it needs a
 real emulator run, or replaying the reference's frame buffer writes out of the
 pre-reset segments to reconstruct what the real machine had on screen.
+
+**4. The 68000 recompiler**, which is what the front-end work above is for. The
+coverage check is the precondition it was missing: a recompiler is only as
+complete as discovery, and until this week nothing could say whether discovery
+had the code the machine runs. It can now, and the answer on both traces is yes.
+What it cannot say is anything about code no run has reached — 2.8% of the
+cartridge is found and the rest is compressed art and code behind data-driven
+tables — so the honest order is to recompile what is discovered, run it against
+the same oracle, and let the missing-target counter name the next gap.
 
 ### Carried debts
 
