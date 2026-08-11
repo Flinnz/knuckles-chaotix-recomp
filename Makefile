@@ -84,12 +84,14 @@ run: build/mars
 # last step asks the other half of the question — whether anything the 68000
 # actually executed is missing from what discovery found.
 #
-# The last diff is the recompiled 68000's own gate. `--recomp` used to be held
-# to "same picture, same command count" and nothing else, which was tolerable
-# while the interpreter did nine tenths of the work and is not now that it does
-# 291 hand-overs in 300 frames. It is compared at block granularity because a
-# block label is the only place translated code can be hooked — the reference
-# logs every instruction, so filtered to those addresses its stream is ours.
+# The last diff is the recompiled 68000's own gate, and since the translated
+# build is now the default the *first* run is the one that has to ask for the
+# interpreter by name. `--recomp` used to be held to "same picture, same command
+# count" and nothing else, which was tolerable while the interpreter did nine
+# tenths of the work and is not now that it does 291 hand-overs in 300 frames.
+# It is compared at block granularity because a block label is the only place
+# translated code can be hooked — the reference logs every instruction, so
+# filtered to those addresses its stream is ours.
 #
 # `test_recomp68k.py` runs one assembled program through Musashi and through the
 # recompiled C over identical memory and compares both the values and the
@@ -104,7 +106,7 @@ check: build/mars
 	python3 tools/test_recomp.py
 	python3 tools/recompile68k.py --build
 	python3 tools/test_recomp68k.py
-	./build/mars --frames 300 --trace68k build/trace68k.txt \
+	./build/mars --interp --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 6000000 --trace-sh2 build/tracesh2.txt \
 	    --trace-sh2-lines 2000000 >/dev/null
 	python3 tools/diff68k.py --ref-lines 20213 --window 400000 --rows 0 --detail 0

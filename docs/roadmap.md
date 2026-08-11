@@ -1348,11 +1348,12 @@ extract**, where before the counts were wrong everywhere. What they say is that
 the reference takes the PWM interrupt at the *same point in the idle loop every
 single time* — all 3,360 entries have `r0 = 0` and `pr = 0x060002E2`, which is
 the top of the dispatch loop, and the loop is 206 instructions long and runs
-five times between interrupts. Landing there by chance 3,360 times out of 3,360
-is not possible; the reference is deferring the interrupt to the loop boundary,
-which is what an emulator's idle-loop handling does. That makes this group an
-artefact of the oracle rather than an error of ours, and it is the last thing on
-the slave.
+five times between interrupts. `r0` is zero for about five of those 206
+instructions, so landing there 3,360 times out of 3,360 is not chance: the
+reference *defers* the interrupt to that boundary. Idle-loop handling in the
+emulator is the likeliest reason, and either way it is not something a faithful
+model reproduces without knowing the rule — so this group is probably the
+oracle's shape rather than ours to fix.
 
 ### The picture was reading its palette out of 68000 code
 
@@ -1431,53 +1432,64 @@ The H count now has its own field and does nothing else, which is honest: we
 deliver no horizontal interrupt to either SH-2, and the reference takes none in
 the extract — every one of its 3,360 slave interrupts is the PWM at level 6.
 
+### The recompiler is the default
+
+`--recomp` was a flag on a build that Musashi drove. It is the other way round
+now: translated code runs the 68000 unless `--interp` asks for the interpreter,
+and both produce the same picture to the byte — 15,116 frame-buffer bytes, the
+same 224-entry line table, the same palette — from 281 commands against 280.
+
+What made the flip defensible is not that the hand-overs got rare, it is that
+the translated build has a *gate of its own*: `diff68k.py --blocks` holds it to
+the reference at block granularity, it walks the whole extract, and 9,025 of
+9,848 block entries agree. "Same picture, same command count" could never have
+said that, and it was the only thing saying anything for a long time.
+
+Musashi does not go away, and the honest description of what is left for it is
+not "a fallback" but **the code that did not exist at build time**: the
+adapter's stubs below `0x100`, which `src/gen68k.c` assembles, and the routines
+the engine builds in work RAM at `0xFF0000` and jumps to. 295 hand-overs in 300
+frames, all of them those. No static front end can find either, so this is the
+end state rather than a step toward one.
+
 ### Next
 
-Everything the oracle can reach cheaply has now been reached, and the shape of
-the work changes here: what is left divides into a few hours of tidying, one
-piece of real reverse engineering, and the milestone that is most of the
-remaining project.
+The oracle has now been asked everything cheap, and twice it answered with a
+real bug rather than a tolerance. What is left is one subject on the 68000, one
+milestone that is most of the remaining project, and a tooling debt.
 
-**1. The 68000's residual 434, which are now four groups and all one subject.**
-Every one of them is *when the vertical interrupt lands* relative to the
-engine's work, and `--detail-at` reads any of them in full:
+**1. The vertical interrupt's phase.** Every one of the 388 differences left on
+the 68000 is *when the interrupt lands* relative to the engine's work:
 
 | rows | where | what |
 |---|---|---|
-| 102 + 102 | `0x8802AE`, `0x8836F6` | the interrupt entry itself, and the registers the handler restores from the stack — which differ precisely because the interrupt was taken somewhere else |
-| 74 | `0x883244` | one trip fewer through the DREQ feed |
+| 102 + 102 | `0x8802AE`, `0x8836F6` | the interrupt entry, and the registers the handler restores from the stack — which differ precisely because it was taken somewhere else |
+| 74 | `0x883244` | our master clears the command interrupt one poll sooner than the reference's |
 | 33 + 33 | `0x8834C0`, `0x8834C4` | the phase of the engine's own wait for the vblank flag |
 | 21 + 21 | `0x8831B6`, `0x8836E6` | the reference finds comm 0 still busy and skips the palette upload; we find it free |
 
-The first group is the measurement to start from: at the moment the vblank
-fires, our engine is 124 instructions further into the frame's work than the
-reference's. Both raise it at line 224 and both run the frame to within 0.1%,
-so what differs is where the work *starts* — and the last group says the master
-is a part of that, since a frame where the reference skips the palette upload is
-a frame with 74 fewer instructions in it.
+Both machines raise the vblank at line 224 and both run the frame to within
+0.1%, so what differs is where the work *starts*, and the last group says the
+master is part of it — a frame in which the reference skips the palette upload
+is a frame with 74 fewer instructions in it. `--detail-at` reads any of these in
+full. The slave's own 473 are the same subject seen from the other side, and
+that half may not be ours to fix: the reference takes every one of its 3,360 PWM
+interrupts at the same point in a 206-instruction loop, which is idle-loop
+handling in the emulator rather than a fact about the machine.
 
-**2. The two things the picture still rests on.** The palette conversion is
-unchecked, because the reference's own CRAM writes fall inside loops its tracer
-elides — so `refframe.py` cannot reach them and this needs a different angle.
-The likeliest one is the *slave*: it has its own extract and nothing has asked
-whether the palette is uploaded there. Failing that it wants a known-good
-emulator for one screenshot. The frame-select polarity no CPU trace can settle
-at all; it needs the same screenshot.
+**2. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
+writes and report space so the driver never stalls, and the samples go nowhere.
+Everything around it is now in place, and the reference says how much is
+waiting — its slave spends real instructions in the driver at `0xC000012C`
+onward, where ours idles. What is missing is a YM2612 and PSG core, a PWM sink,
+and somewhere to put the samples.
 
-**3. Then M6, which is most of what is left.** Sound is untouched: the FIFOs
-accept writes and report space so the driver never stalls, and the samples go
-nowhere. The slave's PWM interrupt is already on the machine's own clock, 365.96
-to a frame, so the timing that an audio path needs is in place — what is missing
-is a YM2612 and PSG core, a PWM sink, and somewhere to put the samples.
-
-**4. And the real end of it: retire Musashi.** `--recomp` now runs the whole
-game on translated code with 291 structural hand-overs, and the interpreter is
-kept for exactly two things — the adapter's assembled stubs below `0x100`, and
-the routines the engine builds in work RAM at `0xFF0000`. Neither can be
-statically discovered, so the honest end state is not "no interpreter" but "an
-interpreter that only ever runs code that did not exist at build time". Making
-`--recomp` the default is the decision that says the recompiler is the product
-and Musashi is the oracle, and the gate for it landed above.
+**3. The slave diff wants its bound lifted.** It is held to 2,000 reference
+blocks because our stream is 93% delay-loop entries where the reference collapses
+each run, and the aligner cannot walk two streams of such different densities.
+Collapsing ours the same way costs the master a quarter of its agreement, so the
+fix is not the tracer: it is either the interrupt phase above, or an aligner that
+understands a collapsed run as a *range* of positions rather than one.
 
 ### Carried debts
 
@@ -1515,10 +1527,12 @@ and Musashi is the oracle, and the gate for it landed above.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
-**M6 — sound, then the 68000 recompiler**
+**M6 — sound** 🔴 *untouched, and most of what is left*
 
-YM2612/PSG/PWM, then replace the 68000 interpreter with recompiled code and
-optimise.
+YM2612, PSG and PWM. The second half of this milestone — replacing the 68000
+interpreter with recompiled code — is done and is the default; what remains of
+it is optimisation, and the interpreter stays for the code the engine writes at
+run time.
 
 ## Verification strategy
 

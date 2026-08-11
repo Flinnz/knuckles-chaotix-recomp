@@ -82,10 +82,22 @@ static const unsigned sh2_cpi1000[2] = { 1631, 1007 };
 
 /* --- which 68000 runs ------------------------------------------------------
  *
- * Musashi by default, the recompiled C under `--recomp`. Both drive the same
+ * The recompiled C by default, Musashi under `--interp`. Both drive the same
  * address space — src/gen68k.c — so the only thing that changes is who executes
  * the instructions, and every 32X rendezvous, DMA and interrupt the 68000
  * triggers through a register write happens identically either way.
+ *
+ * The default flipped once the translated build had a gate of its own rather
+ * than "same picture, same command count": `diff68k.py --blocks` holds it to
+ * the reference at block granularity and it walks the whole extract, 9,025 of
+ * 9,848 block entries agreeing. This is what says the recompiler is the product
+ * and the interpreter is the oracle.
+ *
+ * The interpreter does not go away, and the honest description of what is left
+ * for it is not "a fallback" but *the code that did not exist at build time*:
+ * the adapter's stubs below 0x100, which src/gen68k.c assembles, and the
+ * routines the engine builds in work RAM at 0xFF0000 and jumps to. No static
+ * front end can find either. 291 hand-overs in 300 frames, all of them those.
  *
  * The interpreter is paid in cycles and the recompiled code in instructions, so
  * a slice is converted by what an instruction costs. `--recomp-cpi` sets it,
@@ -101,7 +113,7 @@ static const unsigned sh2_cpi1000[2] = { 1631, 1007 };
  * the trampoline. That was invisible while the SH-2 answered inside the 68000's
  * own register write, and became a hang the moment the two CPUs interleaved.
  */
-static int use_recomp;
+static int use_recomp = 1;
 static unsigned recomp_cpi = 11;
 static M68K rcpu;
 static uint32_t rc_pc;
@@ -139,8 +151,9 @@ static void rc_report(void) {
 }
 
 static void cpu_reset(void) {
-    /* Musashi is initialised either way: under --recomp it is the fallback for
-     * addresses with no recompiled block. */
+    /* Musashi is initialised either way: it is what runs the addresses that
+     * have no recompiled block, which is code that did not exist at build
+     * time. */
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
@@ -492,7 +505,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)
             hold = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--recomp"))
-            use_recomp = 1;
+            use_recomp = 1;                 /* the default; kept so it still runs */
+        else if (!strcmp(argv[i], "--interp"))
+            use_recomp = 0;
         else if (!strcmp(argv[i], "--recomp-cpi") && i + 1 < argc)
             recomp_cpi = (unsigned)strtoul(argv[++i], NULL, 0);
 

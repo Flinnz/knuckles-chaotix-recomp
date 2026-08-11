@@ -61,9 +61,12 @@ python3 tools/test_recomp.py                  # run recompiled SH-2, check answe
 python3 tools/recompile68k.py --build         # 68000 -> C, then compile it
 python3 tools/test_recomp68k.py               # recompiled 68000 vs Musashi
 
+make run                                      # play it; recompiled 68000
+./build/mars --interp --frames 300            # the same, on the interpreter
 ./build/mars --dump-32x build/mars32x.bin     # our frame buffers, palette, regs
 python3 tools/refframe.py --ppm f.ppm         # rebuild the real machine's from
 python3 tools/refframe.py --compare build/mars32x.bin   # the trace, and compare
+python3 tools/refrate.py                      # what an instruction costs, per CPU
 ```
 
 ## How correctness is established
@@ -106,26 +109,29 @@ lock step with a reference emulator through its whole boot, and there is a
 picture from each half of the machine.
 
 - SH-2 front end **complete**: 247 functions, 1,971 blocks, 15 dispatch tables
-- 68000 front end: 561 functions, 7,943 blocks, whole-cartridge round-trip,
+- 68000 front end: 4,491 functions, 7,944 blocks, whole-cartridge round-trip,
   and every instruction the gate traces execute is inside it
 - SH-2 **recompiler** running: all functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output
-- 68000 **recompiler** running the game under `--recomp`: all 561 functions
-  translate to C, clean under `-Wall`, 38/38 semantics cases agree with Musashi
-  on values *and* condition codes, and the picture it draws is the interpreter's
-  to the byte. Musashi stays as the fallback for the routines the engine
-  assembles into work RAM at run time
-- **Runtime** runs both SH-2s and the 68000: Musashi interprets the 68000, the
-  recompiled code runs the master and slave SH-2s, output goes to an SDL window
-  and the keyboard drives a six-button pad
-- **Against the reference**: 20,072 of the 68000's 20,178 boot instructions
-  agree exactly, and 52,381 of 54,081 across the whole extract, with no
-  divergence control flow does not recover from. Both SH-2s walk their extracts
-  the same way
-- Next: interleave the two CPUs — the SH-2 currently runs inside the 68000's
-  register writes, so every rendezvous answers on the first poll, which is 380
-  of the 452 differences left — and cut down how often `--recomp` hands back to
-  the interpreter
+- 68000 **recompiler** is now **the default**: translated code runs the game,
+  clean under `-Wall`, 38/38 semantics cases agree with Musashi on values *and*
+  condition codes. The interpreter is still built and still needed, for exactly
+  the code that does not exist at build time — the adapter's stubs below 0x100
+  and the routines the engine assembles into work RAM — which is 291 hand-overs
+  in 300 frames. `--interp` puts Musashi back in charge
+- **Runtime** runs all three CPUs off one clock, interleaved sixteen times a
+  scanline, at rates measured from the reference rather than guessed: 11.0
+  cycles an instruction on the 68000, 1.63 on the master SH-2, 1.01 on the
+  slave. Output goes to an SDL window and the keyboard drives a six-button pad
+- **Against the reference**: 20,078 of the 68000's 20,178 boot instructions
+  agree exactly and 53,451 of 54,081 across the whole extract — 98.8% — with no
+  divergence control flow does not recover from. The translated 68000 agrees on
+  9,025 of 9,848 block entries; both SH-2s walk their extracts the same way
+- The 32X half draws **the SEGA logo**, correctly: blue on black with its
+  outline, its "TM" and the nebula panels either side
+- Next: the vertical interrupt's *phase* — where in the engine's frame it lands
+  — which is what nearly all the remaining differences are; then sound, which is
+  untouched
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.
