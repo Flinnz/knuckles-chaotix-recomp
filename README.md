@@ -64,7 +64,7 @@ python3 tools/test_recomp68k.py               # recompiled 68000 vs Musashi
 
 ## How correctness is established
 
-Two independent checks, both of which must pass:
+Three independent checks, all of which must pass:
 
 **The decoder** is validated exhaustively. A blob containing all 65,536
 instruction words is disassembled with `sh-elf-objdump` and compared word for
@@ -102,7 +102,7 @@ lock step with a reference emulator through its whole boot, and there is a
 picture from each half of the machine.
 
 - SH-2 front end **complete**: 247 functions, 1,971 blocks, 15 dispatch tables
-- 68000 front end: 561 functions, 6,490 blocks, whole-cartridge round-trip,
+- 68000 front end: 561 functions, 7,943 blocks, whole-cartridge round-trip,
   and every instruction the gate traces execute is inside it
 - SH-2 **recompiler** running: all functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output

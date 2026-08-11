@@ -72,7 +72,7 @@ unresolved. Code found so far is 1.3% of the ROM, which is expected at this
 stage: most of the cartridge is compressed art, and the engine is reached
 through data-driven tables that the next pass needs to follow.
 
-*Later:* 561 functions, 6,490 blocks, 24,578 instructions, 2.8% of the ROM —
+*Later:* 561 functions, 7,943 blocks, 24,578 instructions, 2.8% of the ROM —
 see "The 68000 front end had never been asked what it was missing" below. Both
 images still reassemble byte for byte.
 
