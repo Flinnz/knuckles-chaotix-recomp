@@ -1918,14 +1918,88 @@ over-corrects slightly against the 264 cycles the frame measured, which is the
 honest way round: 307 is what the VDP documents, and 264 is a difference between
 two rates that each carry their own error bars.
 
+### The 32X's own sound comes out, and it is silence
+
+`--wav FILE` writes what the 32X played, `tools/diffpwm.py` holds it against
+what the reference's 32X played, and over the whole 2.06 seconds of PWM output
+the logs contain — 45,227 samples a channel — the two agree exactly. What those
+samples are is the finding.
+
+**The slave's driver is a four-channel PCM mixer and it was already running.**
+The PWM interrupt enters at `0xC0000004`; every second one — a flip-flop in the
+word at `0xC00001EC` — saves the register file, zeroes four accumulators and
+calls `0xC000012C` four times. A channel reads a command word, takes a start
+pointer, a length, a loop pointer and a rate out of a 16-byte table entry and
+its two volumes out of the command's own high byte, then walks the sample data a
+byte at a time against a fractional position: `xor #0x80` to sign it, `muls` by
+the volume, four `shar`s, accumulate, and average with the previous sample —
+which is where the second output of each pair comes from. The output stage then
+converts to the unit's offset binary and pushes two stereo pairs, left to
+`0x20004034` and right to `0x20004036`.
+
+Three things about the unit come out of that code rather than out of a manual.
+
+*The FIFOs are three words deep.* The driver's init writes exactly three words
+to each, and having filled them never finds one full again: the branch at
+`0xC00000DA` skips the wait at `0xC00000DC` in all 22,612 mixes the reference
+logs. That only holds if the unit takes one sample out per PWM cycle against the
+driver's two in every second cycle, which is what fixes the depth.
+
+*A sample is a pulse width, so the cycle's own midpoint is silence.* The output
+stage is `xor #0x400 / and #0x7FF / sub #0x200`, so the words run 0x000-0x3FF
+about a centre of 0x200, where cycle 0x417 puts the midpoint at 523. The 2%
+offset that leaves is what the coupling capacitor on the real output removes,
+and what `dcblock` in `src/sound.c` removes here.
+
+*The sample clock is not the interrupt clock.* It is one PWM cycle where the
+interrupt is TM of them — the same thing only because this game programs TM 1,
+which is why one accumulator in the frame loop had been enough. `src/sound.c`
+owns both now, and all three CPUs retire the same instructions they did before.
+
+**And there is nothing to hear.** Every one of the reference's 45,227 left
+samples is 0x200 exactly. The 32X plays silence through the whole of the
+opening, and so do we — which is what the gate is really checking today: that we
+play nothing where the machine played nothing, since playing *something* is the
+failure an ungated sound path produces.
+
+**The sound in the opening is the Mega Drive's.** The Z80 runs 1,101,326
+instructions over the same window, 646 distinct addresses all below `0x0F42`,
+and writes the YM2612 through both of its port pairs — 95 register writes at
+`$4000`/`$4001` and 77 at `$4002`/`$4003` — and the PSG 40 times at `$7F11`. It
+takes 2,643 interrupts and writes the bank register at `$6000` 2,498 times, so
+what it plays comes out of the cartridge. The 68000 drives the PSG directly too,
+silencing all four channels at `0xC00010` during its own init. None of it is
+modelled: `src/gen68k.c` still discards every write to the Z80's 8 KB and to
+both chips.
+
+*Gate met, for the half that exists.* `tools/diffpwm.py` derives the reference's
+stream from the slave log itself — any instruction storing a word to one of the
+three sample ports, with the register state the log prints before it executes
+giving both the address and the value — so nothing in it knows the driver's
+addresses, and it would still work if the game played a sample from somewhere
+else. Ours comes from `--trace-pwm`, tagged with the CPU that wrote it, because
+the 68000 pushes one zero through the mono port at `0x88072C` that no per-CPU
+slave log can carry. `make check` runs it on the 300-frame trace it already
+takes.
+
+**The audio device is the frame clock now.** The loop had no limiter at all — it
+rendered a frame and started the next — so the game ran at whatever speed the
+host managed. With a device open it waits while more than a fifteenth of a
+second is still queued: 600 frames is 10.013 seconds of game and takes 10.111
+seconds of wall clock, with no underrun and no overrun. `--audio` opens a device
+without a window, `--mute` refuses one with, and a headless run has neither,
+which is what keeps `make check` at full speed.
+
 ### Next
 
-**1. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
-writes and report space so the driver never stalls, and the samples go nowhere.
-Everything around it is now in place — the slave's PWM interrupt is on the
-machine's own clock at 365.96 to a frame, and its driver is running real code at
-`0xC000012C` on every one of them. What is missing is a YM2612 and PSG core, a
-PWM sink, and somewhere to put the samples.
+**1. The Mega Drive's sound, which is now the whole of what is missing.** The
+32X's own path is done and gated, and nothing it plays is audible because
+nothing it plays is anything but 0x200. What makes noise in this game is the Z80
+driving a YM2612 and a PSG, and none of the three exists here — the Z80's 8 KB
+is discarded on write, so not even its driver arrives. It is also the piece with
+an oracle: the reference logs every Z80 instruction with full register state,
+the same ground truth `diff68k` and `diffsh2` are built on, so a `diffz80` can
+gate the core from its first line and the upload along with it.
 
 **2. The slave diff's bound.** Still 2,000 reference blocks, but for a different
 reason than before: the aligner walks collapsed runs now, and what limits the
@@ -2032,8 +2106,15 @@ does not spend the same day finding the same thing.
   of them lands within a twelfth of it, and the vertical interrupt is raised at
   the top of line 224 rather than at a pixel in it. It is most of what is left
   of the slave's diff; the 68000's clock is no longer part of it.
-* **No audio.** The sample FIFOs accept writes and report space so the driver
-  never stalls, and the samples go nowhere.
+* ~~**No audio.**~~ *Half settled.* The 32X's PWM path is modelled end to end
+  and gated against the reference's own samples, sample for sample. What it
+  plays there is silence; every audible sound in the opening belongs to the Z80,
+  the YM2612 and the PSG, none of which exist yet.
+* **One PWM sample is lost at boot.** The 68000's 32X init pushes a zero through
+  the mono port at `0x88072C`, which is one word in each three-deep FIFO before
+  the slave's driver fills them with three more, so the driver's last write is
+  dropped. Whether hardware clears the FIFOs when the cycle register is zeroed
+  is not something the logs can say, and it is one sample of silence either way.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
   during boot; `vdp_dma` returns early on both — and now returns early *before*
   charging the 68000 for them too, so a fill is free where a transfer is not.
@@ -2056,12 +2137,16 @@ does not spend the same day finding the same thing.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
-**M6 — sound** 🔴 *untouched, and most of what is left*
+**M6 — sound** 🔵 *the 32X's half is done and gated; the Mega Drive's is not started*
 
-YM2612, PSG and PWM. The second half of this milestone — replacing the 68000
-interpreter with recompiled code — is done and is the default; what remains of
-it is optimisation, and the interpreter stays for the code the engine writes at
-run time.
+PWM is modelled — a three-word FIFO per channel, a sample clock distinct from
+the timer interrupt, a WAV sink and an SDL device the run paces itself against —
+and `tools/diffpwm.py` holds what it plays to what the reference played, sample
+for sample. What is left is the Z80, the YM2612 and the PSG, which is where all
+of this game's audible sound is. The other half of this milestone — replacing
+the 68000 interpreter with recompiled code — was done earlier and is the
+default; what remains of it is optimisation, and the interpreter stays for the
+code the engine writes at run time.
 
 ## Verification strategy
 

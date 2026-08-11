@@ -44,9 +44,9 @@ typedef struct {
     uint32_t dma_words;      /* words the DMAC has moved, for reporting */
 
     /* PWM. The slave's sound driver is interrupt-driven and nothing else wakes
-     * it, so these two registers are what its clock is made of — see
-     * mars_pwm_per_frame(). No audio comes out yet; the sample FIFOs accept
-     * writes and report space so the driver never stalls on them. */
+     * it, so these two registers are what its clock is made of — and what its
+     * sample rate is made of too. The unit itself, its FIFOs and everything
+     * downstream of them live in src/sound.c. */
     uint16_t pwm_ctl, pwm_cycle;
     uint32_t pwm_ints;       /* delivered, for reporting */
 
@@ -168,11 +168,15 @@ void mars_deliver_int(int slave, unsigned level);
 #define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
 #define MARS_INT_PWM 6           /* the PWM timer, which only the slave takes */
 
-/* The PWM timer's period in SH-2 cycles, from the registers the slave itself
- * programmed — the SH-2 clock over this is the sample rate. Zero when the timer
- * interrupt is off. The frame loop counts SH-2 cycles against it, which is the
- * only clock the slave has. */
+/* One PWM cycle in SH-2 cycles, and the timer interrupt's period, which is TM
+ * of those — both from the registers the slave itself programmed. src/sound.c
+ * counts SH-2 cycles against the first; the second is the only clock the slave
+ * has. Zero when the unit, or the interrupt, is off. */
+unsigned mars_pwm_sample_period(void);
 unsigned mars_pwm_period(void);
+
+/* The sample rate the cycle register works out to, in Hz. */
+unsigned mars_pwm_rate(void);
 
 /* The same thing as a count per frame, for the end-of-run report only: it is
  * 365.96 here, so it is not a quantity to schedule from. */

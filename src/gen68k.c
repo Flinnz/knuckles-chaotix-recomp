@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "mars.h"
+#include "sound.h"
 #include "m68k.h"
 
 Gen gen;
@@ -392,7 +393,14 @@ static int mars_reg_read(uint32_t a, uint16_t *out) {
             *out = mars.comm[i];
             return 1;
         }
-        if (IN(a & ~1u, 0xA15130u, 0xA15140u)) { *out = 0; return 1; } /* PWM */
+        /* The PWM block, which the 68000 sees at the same offsets in its own
+         * copy of the register file. It never touches it in this game — the
+         * slave's driver owns the unit — but routing it through the one
+         * implementation is what keeps that a fact rather than an assumption. */
+        if (IN(a & ~1u, 0xA15130u, 0xA15140u)) {
+            uint32_t v; mars_reg_read_sh2(0x4030u + ((a & ~1u) - 0xA15130u), &v);
+            *out = (uint16_t)v; return 1;
+        }
         /* The 32X VDP and palette, as the 68000 sees them. */
         if (IN(a & ~1u, 0xA15180u, 0xA15190u)) {
             uint32_t v; mars_reg_read_sh2(0x4100u + ((a & ~1u) - 0xA15180u), &v);
@@ -454,7 +462,19 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
             }
             return 1;
         }
-        if (IN(a & ~1u, 0xA15130u, 0xA15140u)) return 1;
+        /* The engine's own 32X init clears the unit here — control and cycle
+         * to zero at 0x880724 and 0x880728, and a zero through the mono port at
+         * 0x88072C, which is one word into each FIFO long before the slave's
+         * driver exists to fill them. The sample ports go straight to the unit
+         * rather than through the SH-2 view, only so that the write is tagged
+         * with the CPU that made it: the reference's logs are per-CPU, so a
+         * word the 68000 put in the FIFO can appear in no slave trace. */
+        if (IN(a & ~1u, 0xA15134u, 0xA1513Au)) {
+            sound_pwm_write((unsigned)(((a & ~1u) - 0xA15134u) / 2), v, '6');
+            return 1;
+        }
+        if (IN(a & ~1u, 0xA15130u, 0xA15140u))
+            return mars_reg_write_sh2(0x4030u + ((a & ~1u) - 0xA15130u), v, 2);
         if (IN(a & ~1u, 0xA15180u, 0xA15190u))
             return mars_reg_write_sh2(0x4100u + ((a & ~1u) - 0xA15180u), v, 2);
         if (IN(a & ~1u, 0xA15200u, 0xA15400u))

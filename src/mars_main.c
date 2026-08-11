@@ -14,6 +14,7 @@
 #include <string.h>
 #include <SDL.h>
 #include "mars.h"
+#include "sound.h"
 #include "m68k.h"
 #include "m68000.h"
 
@@ -267,7 +268,6 @@ static unsigned step_cycles(void) {
  * is in cycles rather than instructions because the PWM timer's period is in
  * cycles, and that timer is the whole of the slave's clock. */
 static unsigned sh2_cyc_acc;
-static unsigned pwm_acc;         /* SH-2 cycles since the last PWM interrupt */
 static unsigned sh2_step_cycles(void) {
     sh2_cyc_acc += CYCLES_PER_FRAME * 3;
     unsigned n = sh2_cyc_acc / STEPS_PER_FRAME;
@@ -562,7 +562,8 @@ int main(int argc, char **argv) {
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
-    const char *dump_32x = NULL;
+    const char *dump_32x = NULL, *wav = NULL, *tracepwm = NULL;
+    int mute = 0, audio = 0;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     unsigned hold = 0;
     for (int i = 1; i < argc; i++)
@@ -582,6 +583,16 @@ int main(int argc, char **argv) {
             dump_vdp = argv[++i];
         else if (!strcmp(argv[i], "--dump-32x") && i + 1 < argc)
             dump_32x = argv[++i];
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc)
+            wav = argv[++i];
+        else if (!strcmp(argv[i], "--trace-pwm") && i + 1 < argc)
+            tracepwm = argv[++i];
+        else if (!strcmp(argv[i], "--mute"))
+            mute = 1;
+        else if (!strcmp(argv[i], "--audio"))
+            audio = 1;      /* a device even without a window, so a headless
+                             * run can be listened to — and so the device path
+                             * can be exercised by one that ends on its own */
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc)
             gen.layers = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)
@@ -618,6 +629,10 @@ int main(int argc, char **argv) {
 
     /* Opened before either SH-2 runs: the boot is the part with an oracle. */
     if (tracesh2 && !sh2_trace_open(tracesh2, tracesh2_lines)) return 1;
+    /* The same for the audio path — the slave's driver fills its FIFOs before
+     * the first frame is over. A headless run gets the WAV and the trace and no
+     * device, which is also what keeps `make check` at full speed. */
+    if (!sound_open(wav, tracepwm, (audio || !headless_frames) && !mute)) return 1;
 
     /* Neither SH-2 starts here. They are held in the adapter's boot ROM — which
      * the runtime stands in for — and handed to the cartridge when that work is
@@ -714,22 +729,16 @@ int main(int argc, char **argv) {
                 mars.fen_left -= mars.fen_left < sh2c ? mars.fen_left : sh2c;
                 sh2_slice(0, sh2c);
 
-                /* The slave's whole clock. Its interrupts used to be counted
-                 * per frame and spread over the scanlines, which quantised each
-                 * one to a line boundary and dropped the fractional interrupt —
-                 * 365 of the 365.96 the registers ask for. Counting SH-2 cycles
-                 * against the period leaves neither error, and no extra slice
-                 * is handed out for taking one: the interrupt only redirects
-                 * the CPU, and the fuel below is what runs the handler. */
-                unsigned period = mars_pwm_period();
-                if (period) {
-                    pwm_acc += sh2c;
-                    while (pwm_acc >= period) {
-                        pwm_acc -= period;
-                        mars_deliver_int(1, MARS_INT_PWM);
-                        mars.pwm_ints++;
-                    }
-                }
+                /* The slave's whole clock, and the audio unit's. Its interrupts
+                 * used to be counted per frame and spread over the scanlines,
+                 * which quantised each one to a line boundary and dropped the
+                 * fractional interrupt — 365 of the 365.96 the registers ask
+                 * for. Counting SH-2 cycles against the period leaves neither
+                 * error, and no extra slice is handed out for taking one: the
+                 * interrupt only redirects the CPU, and the fuel below is what
+                 * runs the handler. src/sound.c owns the accumulator now,
+                 * because the same clock takes the samples out of the FIFOs. */
+                sound_pwm_tick(sh2c);
                 sh2_slice(1, sh2c);
             }
         }
@@ -749,11 +758,18 @@ int main(int argc, char **argv) {
             SDL_RenderCopy(ren, tex, NULL, NULL);
             SDL_RenderPresent(ren);
         }
+        /* The audio device is the only clock in the loop that runs at the
+         * machine's speed rather than the host's, so it is the one to pace
+         * against — and outside the windowed branch, because `--audio` opens
+         * one without a window. Without a device this returns at once, which
+         * is what leaves a headless run running as fast as it can. */
+        sound_pace();
         if (limit && frames >= limit) running = 0;
     }
 
     trace68k_close();
     sh2_trace_close();
+    sound_close();
     if (mars.trace) mars_trace_dump("after the frame loop");
 
     /* Everything the Mega Drive picture is made of, so a renderer bug can be
@@ -801,8 +817,7 @@ int main(int argc, char **argv) {
     printf("  comm: %04X %04X %04X %04X   DMA words to SH-2: %u\n",
            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3],
            mars.dma_words);
-    printf("  PWM: ctl %04X cycle %04X -> %u int/frame, %u delivered\n",
-           mars.pwm_ctl, mars.pwm_cycle, mars_pwm_per_frame(), mars.pwm_ints);
+    sound_report();
     printf("  VDP: dma %u, reg1=%02X addr=%04X\n",
            gen.dma_done, gen.vdpreg[1], gen.vdp_addr);
     /* Whether the palette has been uploaded at all, asked of the whole of it:

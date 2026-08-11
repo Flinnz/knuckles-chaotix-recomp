@@ -116,6 +116,38 @@ are mirrors of each other. `0x60000000` (cache address array) and `0xC0000000`
 The overlay has its own header of `bra` stubs, one per entry point, mirroring
 the SDRAM image's layout at `0x060001A0`. Its tail is `0xAAAA`/`0xFFFF` fill.
 
+## The sound path
+
+Two halves, and they belong to different processors.
+
+**The 32X's own** is PWM, and the whole of it is that cache-array overlay. The
+slave programs the unit from `0xC0000008` — cycle `0x417`, control `0x0105`, so
+TM is 1 — and then does nothing but take the resulting timer interrupt, which is
+its only clock. The handler enters at `0xC0000004`; every second one mixes four
+channels of 8-bit PCM at `0xC000012C` and pushes two stereo pairs into the
+sample FIFOs at `0x20004034` and `0x20004036`. A channel's state is a 16-byte
+table entry — start, length, loop, rate — and its volumes come out of the high
+byte of the command word the master writes.
+
+| register | |
+|---|---|
+| `0x20004030` | control: TM in bits 11-8, RMD in 3-2, LMD in 1-0 |
+| `0x20004032` | cycle; one PWM cycle is `cycle - 1` SH-2 cycles |
+| `0x20004034` / `36` / `38` | left / right / mono FIFO, three words deep |
+
+A word written to a FIFO is a pulse width, so the cycle's midpoint is silence;
+this driver centres on `0x200` against a midpoint of 523. A read of the same
+address gives bit 15 full, bit 14 empty. The 68000 sees the same block at
+`0xA15130`, and uses it only to clear the unit during its 32X init.
+
+**The Mega Drive's** is a Z80 driver in the 8 KB at `0xA00000`, uploaded by the
+68000 and running under 4 KB of code. It writes the YM2612 through both port
+pairs — `$4000`/`$4001` for channels 1-3, `$4002`/`$4003` for 4-6 — and the PSG
+at `$7F11`, and it banks the 68000 window through `$6000` to reach its data in
+the cartridge. The 68000 also writes the PSG directly at `0xC00011`. Every
+audible sound in the opening is here: over the whole reference extract the 32X's
+PWM output is a constant `0x200`.
+
 ## Dispatch idioms
 
 Three forms account for essentially all table-driven control flow, and

@@ -63,6 +63,8 @@ python3 tools/test_recomp68k.py               # recompiled 68000 vs Musashi
 
 make run                                      # play it; recompiled 68000
 ./build/mars --interp --frames 300            # the same, on the interpreter
+./build/mars --frames 600 --wav build/a.wav   # capture what the 32X played
+python3 tools/diffpwm.py                      # and hold it to what it played
 ./build/mars --dump-32x build/mars32x.bin     # our frame buffers, palette, regs
 python3 tools/refframe.py --ppm f.ppm         # rebuild the real machine's from
 python3 tools/refframe.py --compare build/mars32x.bin   # the trace, and compare
@@ -129,9 +131,13 @@ picture from each half of the machine.
   9,025 of 9,848 block entries; both SH-2s walk their extracts the same way
 - The 32X half draws **the SEGA logo**, correctly: blue on black with its
   outline, its "TM" and the nebula panels either side
-- Next: the vertical interrupt's *phase* — where in the engine's frame it lands
-  — which is what nearly all the remaining differences are; then sound, which is
-  untouched
+- **Sound**: the 32X's PWM unit is modelled and its output is held to the
+  reference's, all 45,227 samples a channel — which are all silence, because
+  every audible sound in the opening is the Mega Drive's. An SDL audio device
+  now paces the run at the machine's own speed
+- Next: the Z80, the YM2612 and the PSG, which is where that sound is; and the
+  vertical interrupt's *phase* — where in the engine's frame it lands — which is
+  what nearly all the remaining trace differences are
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.

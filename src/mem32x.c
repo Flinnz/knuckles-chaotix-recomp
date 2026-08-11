@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "mars.h"
+#include "sound.h"
 
 Mars mars;
 SH2 mars_cpu[2];
@@ -236,6 +237,13 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
         case 0x1C: case 0x1E: return 1;       /* the other interrupt clears */
         case 0x30: mars.pwm_ctl = (uint16_t)v; return 1;
         case 0x32: mars.pwm_cycle = (uint16_t)v; return 1;
+        /* The sample FIFOs — see src/sound.c, which owns the unit itself. Only
+         * the slave ever writes them here; the 68000's own path tags its
+         * writes for itself, in src/gen68k.c. */
+        case 0x34: case 0x36: case 0x38:
+            sound_pwm_write(((a & 0xFE) - 0x34) / 2, (uint16_t)v,
+                            mars_running == &mars_cpu[1] ? 'S' : 'M');
+            return 1;
         case 0x20:                            /* comm 0: the 68000 rendezvous */
             /* Plain storage now. The SH-2 zeroing this is how it tells the
              * 68000 it is ready, and the 68000 waits for exactly that — at
@@ -290,10 +298,15 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         case 0x10: *out = mars.dreq_len; return 1;
         case 0x30: *out = mars.pwm_ctl; return 1;
         case 0x32: *out = mars.pwm_cycle; return 1;
-        /* The sample FIFOs. Bits 15 and 14 are the full and empty flags; both
-         * clear says "room for more", which is what keeps the driver from
-         * waiting on an audio sink that does not exist yet. */
-        case 0x34: case 0x36: case 0x38: *out = 0; return 1;
+        /* The sample FIFOs. Bits 15 and 14 are the full and empty flags, and
+         * the driver reads the left one between its two writes to decide
+         * whether it has room for the second — see src/sound.c. This used to
+         * answer a flat zero, "always room", which was right by accident:
+         * the unit takes a sample out per cycle where the driver puts two in
+         * every second one, so the answer is never anything else. */
+        case 0x34: *out = sound_pwm_status(PWM_L); return 1;
+        case 0x36: *out = sound_pwm_status(PWM_R); return 1;
+        case 0x38: *out = sound_pwm_status(PWM_MONO); return 1;
         case 0x12:                            /* the FIFO read port */
             /* The DMAC drains the FIFO directly, so nothing here reads it in
              * practice; answering honestly costs nothing and means a CPU that
@@ -711,8 +724,8 @@ void mars_deliver_int(int slave, unsigned level) {
  * again by TM, the interrupt-every-N-cycles field.
  *
  * This game writes cycle 0x417 and TM 1. Read as `cycle - 1` that is 1,046 SH-2
- * cycles, 22,000.3 Hz — the round number a sound driver would be aiming at —
- * and 366.65 interrupts to a 60 Hz frame.
+ * cycles, 21,999.4 Hz — the round 22 kHz a sound driver would be aiming at, to
+ * three parts in a hundred thousand — and 366.65 interrupts to a 60 Hz frame.
  */
 #define SH2_CLOCK 23011360u              /* NTSC 32X */
 
@@ -735,15 +748,30 @@ void mars_deliver_int(int slave, unsigned level) {
  * instruction long-word fill ending in `dbf`, and a two-instruction poll of a
  * 32X register — put it at 1,045.7, 1,045.1 and 1,046.6 SH-2 cycles against the
  * 1,048 this returned. The sample rate is the other confirmation: 1,046 divides
- * the SH-2 clock to 22,000.3 Hz where 1,048 gives 21,957, and a driver aims at
- * the round one. */
+ * the SH-2 clock to 21,999.4 Hz where 1,048 gives 21,956, and a driver aims at
+ * the round one.
+ *
+ * It is two periods, not one. The unit takes a sample out of each FIFO every
+ * PWM cycle and raises the interrupt every TM of them, so the sample clock
+ * below is the one src/sound.c counts against and the interrupt is TM times it.
+ * They coincide here only because this game writes TM 1. */
+unsigned mars_pwm_sample_period(void) {
+    unsigned cycle = mars.pwm_cycle & 0xFFF;
+    return cycle < 2 ? 0 : cycle - 1;
+}
+
+/* The timer interrupt's period, which is TM of those. TM zero switches the
+ * interrupt off without stopping the sample clock. */
 unsigned mars_pwm_period(void) {
     unsigned tm = (mars.pwm_ctl >> 8) & 0xF;
-    unsigned cycle = mars.pwm_cycle & 0xFFF;
-    /* Below two there is no period to have, and the frame loop divides by this
-     * — see the `while (pwm_acc >= period)` it drives. */
-    if (!tm || cycle < 2) return 0;      /* the timer interrupt is off */
-    return (cycle - 1) * tm;
+    unsigned p = mars_pwm_sample_period();
+    return tm ? p * tm : 0;
+}
+
+/* The sample rate the two registers come out at: 22,000 Hz here. */
+unsigned mars_pwm_rate(void) {
+    unsigned p = mars_pwm_sample_period();
+    return p ? SH2_CLOCK / p : 0;
 }
 
 /* Only the end-of-run report wants this shape. */
