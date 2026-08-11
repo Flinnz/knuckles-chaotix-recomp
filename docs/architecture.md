@@ -148,6 +148,30 @@ the cartridge. The 68000 also writes the PSG directly at `0xC00011`. Every
 audible sound in the opening is here: over the whole reference extract the 32X's
 PWM output is a constant `0x200`.
 
+The Z80's map, and the two registers that decide whether it runs at all:
+
+| Z80 sees | |
+|---|---|
+| `0x0000-0x1FFF` | its RAM, mirrored through `0x3FFF` |
+| `0x4000-0x5FFF` | the YM2612, four registers mirrored every four bytes |
+| `0x6000` | the bank register: one bit a write, nine writes to a bank |
+| `0x7F00-0x7FFF` | the Mega Drive VDP, with the PSG at `0x7F11` |
+| `0x8000-0xFFFF` | 32 KB of the 68000's space at `bank << 15` |
+
+| 68000 sees | |
+|---|---|
+| `0xA00000-0xA01FFF` | the same 8 KB, one byte at a time |
+| `0xA11100` | bus request; bit 8 reads back set while the Z80 still has it |
+| `0xA11200` | reset, released on the rising edge |
+
+Its program has no static existence: the 68000 assembles it into RAM at run
+time, and the only place to read it from is a running machine's Z80 RAM. At the
+console reset the reference's Z80 is already executing a leftover stub — `di /
+im 1 / jp 0x005B` — and the driver proper appears when the 68000 has loaded it
+and pulsed reset, restarting at `0x0000` with `xor a / ld bc,0x1FD9`. It runs
+9,528 instructions between two vertical interrupts, which are the only thing
+that wakes it.
+
 ## Dispatch idioms
 
 Three forms account for essentially all table-driven control flow, and

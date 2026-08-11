@@ -15,6 +15,7 @@
 #include <string.h>
 #include "mars.h"
 #include "sound.h"
+#include "genz80.h"
 #include "m68k.h"
 
 Gen gen;
@@ -491,6 +492,8 @@ unsigned int m68k_read_memory_8(unsigned int a) {
     uint32_t o = rom_at(a);
     if (o != 0xFFFFFFFFu && o < mars.rom_size) return mars.rom[o];
     if (IN(a, 0xFF0000u, 0x1000000u)) return gen.ram[a & 0xFFFFu];
+    uint8_t b;
+    if (genz80_read(a, &b)) return b;
     return (unsigned)(m68k_read_memory_16(a & ~1u) >> ((a & 1) ? 0 : 8)) & 0xFF;
 }
 
@@ -511,6 +514,8 @@ unsigned int m68k_read_memory_16(unsigned int a) {
     /* The 32X identifies itself here; the boot code refuses to run without it. */
     if (a == 0xA130EC) return 0x4D41;      /* "MA" */
     if (a == 0xA130EE) return 0x5253;      /* "RS" */
+    uint16_t z;
+    if (genz80_read16(a, &z)) return z;
     if (IN(a, 0xA10000u, 0xA10020u)) {
         unsigned i = (a & 0x1F) >> 1;
         /* Version register: domestic, NTSC, no expansion, with the 32X bit. */
@@ -538,8 +543,12 @@ void m68k_write_memory_8(unsigned int a, unsigned int v) {
         if (i >= 1 && i <= PAD_PORTS) pad_write(i - 1, (uint16_t)v);
         return;
     }
-    if (IN(a, 0xA00000u, 0xA10000u)) return;            /* Z80 space */
-    if (IN(a, 0xA11000u, 0xA11400u)) return;            /* Z80 bus / reset */
+    if (genz80_write(a, (uint8_t)v)) return;            /* Z80 RAM, bus, chips */
+    /* The PSG, which the 68000 drives directly as well as through the Z80: its
+     * own init writes 0x9F 0xBF 0xDF 0xFF here, one per channel, which is
+     * attenuation 15 on all four — silence. */
+    if ((a & ~2u) == 0xC00011u) { sound_psg_write((uint8_t)v); return; }
+    if (IN(a, 0xA11000u, 0xA11400u)) return;            /* the rest of the bus */
     if (a == 0xA130F1) return;                          /* SRAM control */
     uint16_t cur = (uint16_t)m68k_read_memory_16(a & ~1u);
     uint16_t nv = (a & 1) ? (uint16_t)((cur & 0xFF00) | (v & 0xFF))
@@ -571,8 +580,9 @@ void m68k_write_memory_16(unsigned int a, unsigned int v) {
         if (i >= 1 && i <= PAD_PORTS) pad_write(i - 1, w);
         return;
     }
-    if (IN(a, 0xA00000u, 0xA10000u)) return;
-    if (IN(a, 0xA11000u, 0xA11400u)) return;            /* Z80 bus / reset */
+    if (genz80_write16(a, w)) return;
+    if ((a & ~2u) == 0xC00010u) { sound_psg_write((uint8_t)w); return; }
+    if (IN(a, 0xA11000u, 0xA11400u)) return;            /* the rest of the bus */
     if (mars_reg_write(a, w)) return;
     if (IN(a, 0x840000u, 0x880000u)) {                  /* 32X framebuffer */
         uint32_t o = (a - 0x840000u) & 0x1FFFEu;

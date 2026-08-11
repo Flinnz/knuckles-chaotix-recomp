@@ -65,6 +65,8 @@ make run                                      # play it; recompiled 68000
 ./build/mars --interp --frames 300            # the same, on the interpreter
 ./build/mars --frames 600 --wav build/a.wav   # capture what the 32X played
 python3 tools/diffpwm.py                      # and hold it to what it played
+python3 tools/diffz80.py                      # the sound driver, instruction by
+                                              # instruction, against the real Z80
 ./build/mars --dump-32x build/mars32x.bin     # our frame buffers, palette, regs
 python3 tools/refframe.py --ppm f.ppm         # rebuild the real machine's from
 python3 tools/refframe.py --compare build/mars32x.bin   # the trace, and compare
@@ -135,9 +137,13 @@ picture from each half of the machine.
   reference's, all 45,227 samples a channel — which are all silence, because
   every audible sound in the opening is the Mega Drive's. An SDL audio device
   now paces the run at the machine's own speed
-- Next: the Z80, the YM2612 and the PSG, which is where that sound is; and the
-  vertical interrupt's *phase* — where in the engine's frame it lands — which is
-  what nearly all the remaining trace differences are
+- **The Z80** runs the sound driver the 68000 uploads into it, and agrees with
+  the reference on 32,719 of its 33,984 logged instructions with no divergence
+  control flow does not recover from. Its writes reach a YM2612 and a PSG that
+  latch them and do not yet make a sound
+- Next: those two chips, which is where the audible sound is; and the vertical
+  interrupt's *phase* — where in the engine's frame it lands — which is what
+  nearly all the remaining trace differences are
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.

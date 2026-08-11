@@ -13,12 +13,12 @@ CFLAGS  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
 # m68kcpu.c includes m68kfpu.c unconditionally, which needs softfloat even for
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
 SRC = build/sh2_recomp.c build/m68k_recomp.c src/m68000.c \
-      src/mem32x.c src/gen68k.c src/genvdp.c src/sound.c src/trace68k.c \
-      src/mars_main.c \
+      src/mem32x.c src/gen68k.c src/genvdp.c src/z80.c src/genz80.c \
+      src/sound.c src/trace68k.c src/mars_main.c \
       $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c $(MUSASHI)/softfloat/softfloat.c
 
-build/mars: $(SRC) src/mars.h src/sh2.h src/sound.h src/m68000.h src/m68kconf.h \
-            Makefile $(GEN)/m68kops.c
+build/mars: $(SRC) src/mars.h src/sh2.h src/sound.h src/z80.h src/genz80.h \
+            src/m68000.h src/m68kconf.h Makefile $(GEN)/m68kops.c
 	clang $(CFLAGS) -o $@ $(SRC) $(SDLLD)
 
 build/sh2_recomp.c:
@@ -126,6 +126,12 @@ run: build/mars
 # constant 0x200 — silence — so what this catches today is our playing something
 # where the machine played nothing, which is exactly the failure a sound path
 # without a gate produces.
+#
+# `diffz80.py` is the fourth CPU's, and it holds two things at once that no
+# other gate here does: the core, and the *upload*. The Z80's program is not in
+# the cartridge in any form a static tool could find — the 68000 assembles it
+# into RAM at run time — so a byte wrong in the copy is a wrong instruction, and
+# the trace says so on the line it happens.
 check: build/mars
 	python3 tools/emit_asm.py --verify
 	python3 tools/emit_asm.py --verify --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x"
@@ -137,7 +143,9 @@ check: build/mars
 	python3 tools/test_recomp68k.py
 	./build/mars --interp --frames 300 --trace68k build/trace68k.txt \
 	    --trace68k-lines 6000000 --trace-sh2 build/tracesh2.txt \
-	    --trace-sh2-lines 2000000 --trace-pwm build/tracepwm.txt >/dev/null
+	    --trace-sh2-lines 2000000 --trace-pwm build/tracepwm.txt \
+	    --trace-z80 build/tracez80.txt --trace-z80-lines 2000000 \
+	    --dump-z80 build/z80ram.bin >/dev/null
 	python3 tools/diff68k.py --ref-lines 20213 --window 400000 --rows 0 --detail 0
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \
@@ -145,6 +153,7 @@ check: build/mars
 	python3 tools/diffsh2.py --cpu slave  --window 3000000 --ref-blocks 2000 \
 	    --rows 0 --detail 0
 	python3 tools/diffpwm.py
+	python3 tools/diffz80.py --rows 0 --detail 0
 	./build/mars --recomp --frames 300 --trace68k build/trace68k_rc.txt \
 	    --trace68k-lines 6000000 >/dev/null
 	python3 tools/diff68k.py --blocks --ours build/trace68k_rc.txt \

@@ -22,6 +22,13 @@ uint16_t sound_pwm_status(unsigned which);
  * timer interrupt, which is the only clock that CPU has. */
 void sound_pwm_tick(unsigned sh2_cycles);
 
+/* The Mega Drive's two chips. Nothing synthesises yet — these latch the
+ * register file, count, and are where the cores will go. `port` is the two
+ * address lines of the YM2612's block: 0 and 1 are the address and data ports
+ * of channels 1-3, 2 and 3 the same for 4-6. */
+void sound_ym_write(unsigned port, uint8_t v);
+void sound_psg_write(uint8_t v);
+
 /* Open the sink. `wav` names a file to write the machine's own sample stream
  * to, at its own rate, and is what a headless run has instead of a device;
  * `device` asks for an SDL audio device as well. Either may be absent. */

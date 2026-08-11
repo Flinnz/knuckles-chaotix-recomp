@@ -1990,16 +1990,85 @@ seconds of wall clock, with no underrun and no overrun. `--audio` opens a device
 without a window, `--mute` refuses one with, and a headless run has neither,
 which is what keeps `make check` at full speed.
 
+### The fourth CPU
+
+The Z80 runs, and `tools/diffz80.py` holds it to the reference the way the other
+three are held: **32,719 of the reference's 33,984 logged instructions agree
+exactly, with no fatal divergence anywhere in the extract.** Its 8 KB, the
+68000's window into it, the bus request and reset that arbitrate between them,
+and its own 32 KB window back into the cartridge are all in `src/genz80.c`;
+`src/z80.c` is the CPU.
+
+**The gate holds the upload as well as the core.** The Z80's program is in the
+cartridge in no form a static tool could find — the 68000 assembles it into RAM
+at run time — so there is nothing to disassemble ahead of time and a byte wrong
+in the copy is a wrong instruction. The reference settles what should be there
+by executing it: the first thing its Z80 runs after the console reset is a stub
+left over from before it, `di / im 1 / jp 0x005B`, and the real driver appears
+after the 68000 has loaded it and pulsed reset, restarting at 0x0000 with
+`xor a / ld bc,0x1FD9` — the SMPS clear-and-go. Ours has no leftover, so the
+stub and its 65,536-iteration delay are 22 reference instructions we cannot run;
+from the driver's own first instruction the two streams are the same sequence.
+
+**The core is written the way the instruction set is laid out**, as the grid of
+`x = op >> 6`, `y = (op >> 3) & 7`, `z = op & 7` that it actually is, so a
+missing instruction is a missing line rather than a gap in a list of 256 cases.
+Two things in it are load-bearing rather than pedantry. The undocumented flag
+bits X and Y carry bits 3 and 5 of whatever the last operation produced, and the
+reference prints AF — without them nearly every logged line would differ and the
+comparison would be worth nothing. And DD and FD do not simply mean IX and IY:
+they replace HL, and they replace `(hl)` with `(ix+d)`, but never both in one
+instruction — where the instruction already names memory, H and L stay
+themselves.
+
+Two things were wrong, and the trace said so both times.
+
+*The refresh counter was counting operand bytes.* R advances once per opcode
+fetch, not once per byte, and a prefix is a fetch of its own. It is not
+bookkeeping here: the driver reads it at 0x0876 as its source of randomness and
+stores the result, so a counter that counts the wrong thing goes straight into
+what the sound does.
+
+*Every prefix was charged twice.* `cyc_main` holds four cycles for the DD, FD,
+ED and CB bytes and the code that dispatched them added four more, and then each
+prefixed form added its full documented cost on top of the base it had already
+paid — so `bit 7,(ix+d)`, the driver's second most frequent instruction, cost 31
+cycles against the real 20. The measurement that found it is the one the clock
+should be held to anyway: **the reference retires 9,528 Z80 instructions between
+two vertical interrupts, steady to within five over the whole extract.** We ran
+9,477. Corrected, 9,549 — 0.22% over, which is what remains.
+
+What is left divides into three, and none of it is a wrong answer:
+
+| rows | where | what |
+|---|---|---|
+| 102 | `0x0878` | `ld a,r`, one per frame — a randomness source whose absolute value carries history from before the reference's reset |
+| 165 | `0x0038`, `0x009F`-`0x00A2` | trip counts in the idle loop and between interrupts, which is the 0.22% |
+| 60 | `0x0F42` | one bit of a per-frame counter at 0x1BF7, decremented once a frame from a start we reach at a different phase |
+
+Its traffic is now visible too: over 300 frames the driver makes 44 register
+writes to the YM2612's first half and 36 to its second, and 8 to the PSG, which
+`src/sound.c` latches and counts against the reference's own 95, 77 and 40. The
+68000's four PSG writes — attenuation 15 on all four channels, its own init
+silencing them — arrive there too. Modelling the Z80 also took the 68000's
+unmapped accesses from 276 a run to 1, and every other number in the run is
+unchanged to the instruction.
+
 ### Next
 
-**1. The Mega Drive's sound, which is now the whole of what is missing.** The
-32X's own path is done and gated, and nothing it plays is audible because
-nothing it plays is anything but 0x200. What makes noise in this game is the Z80
-driving a YM2612 and a PSG, and none of the three exists here — the Z80's 8 KB
-is discarded on write, so not even its driver arrives. It is also the piece with
-an oracle: the reference logs every Z80 instruction with full register state,
-the same ground truth `diff68k` and `diffsh2` are built on, so a `diffz80` can
-gate the core from its first line and the upload along with it.
+**1. The YM2612 and the PSG, which are now the whole of what is missing.** Both
+paths reach them — the Z80 writes the YM through both port pairs and the PSG at
+$7F11, the 68000 writes the PSG directly — and `src/sound.c` latches the
+register file and counts. Nothing turns any of it into samples. The PSG is the
+small one and is worth doing first: four channels, a shift-register noise
+generator, and about a hundred lines. The YM2612 is the milestone's remaining
+bulk.
+
+There is no trace oracle for either — the reference logs instructions, not
+sound — so the check has to come from the register writes instead: the Z80's
+stream of (register, value) pairs is exactly reproducible against the
+reference's, and what a core does with them is then a question about the core
+alone rather than about the machine.
 
 **2. The slave diff's bound.** Still 2,000 reference blocks, but for a different
 reason than before: the aligner walks collapsed runs now, and what limits the
@@ -2106,10 +2175,16 @@ does not spend the same day finding the same thing.
   of them lands within a twelfth of it, and the vertical interrupt is raised at
   the top of line 224 rather than at a pixel in it. It is most of what is left
   of the slave's diff; the 68000's clock is no longer part of it.
-* ~~**No audio.**~~ *Half settled.* The 32X's PWM path is modelled end to end
-  and gated against the reference's own samples, sample for sample. What it
-  plays there is silence; every audible sound in the opening belongs to the Z80,
-  the YM2612 and the PSG, none of which exist yet.
+* ~~**No audio.**~~ *Two thirds settled.* The 32X's PWM path is modelled end to
+  end and gated against the reference's own samples, and the Z80 runs its
+  driver and is gated against the reference's own instructions. What the PWM
+  plays is silence; the audible sound in the opening is the YM2612 and the PSG,
+  which receive their register writes and do nothing with them.
+* **The Z80's clock is 0.22% fast.** The reference retires 9,528 instructions
+  between two vertical interrupts and we retire 9,549. Every cycle count in
+  `cyc_main` and every prefixed form has been checked against the manual once;
+  finding the last 130 cycles a frame wants the per-address frame comparison
+  `tools/refframe.py` does for the 68000, not another reading.
 * **One PWM sample is lost at boot.** The 68000's 32X init pushes a zero through
   the mono port at `0x88072C`, which is one word in each three-deep FIFO before
   the slave's driver fills them with three more, so the driver's last write is
@@ -2137,16 +2212,17 @@ does not spend the same day finding the same thing.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
-**M6 — sound** 🔵 *the 32X's half is done and gated; the Mega Drive's is not started*
+**M6 — sound** 🔵 *three of the four pieces are in; the two chips are not*
 
 PWM is modelled — a three-word FIFO per channel, a sample clock distinct from
 the timer interrupt, a WAV sink and an SDL device the run paces itself against —
 and `tools/diffpwm.py` holds what it plays to what the reference played, sample
-for sample. What is left is the Z80, the YM2612 and the PSG, which is where all
-of this game's audible sound is. The other half of this milestone — replacing
-the 68000 interpreter with recompiled code — was done earlier and is the
-default; what remains of it is optimisation, and the interpreter stays for the
-code the engine writes at run time.
+for sample. The Z80 runs its driver, gated the same way at 32,719 of 33,984
+instructions. What is left is the YM2612 and the PSG, which is where all of this
+game's audible sound is. The other half of this milestone — replacing the 68000
+interpreter with recompiled code — was done earlier and is the default; what
+remains of it is optimisation, and the interpreter stays for the code the engine
+writes at run time.
 
 ## Verification strategy
 

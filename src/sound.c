@@ -196,6 +196,34 @@ static void play(uint16_t lw, uint16_t rw) {
     rs_prev[0] = (int16_t)l; rs_prev[1] = (int16_t)r;
 }
 
+/* ------------------------------------------------- the Mega Drive's chips --
+ *
+ * Not synthesised — this is where a YM2612 and a PSG core will go. What it does
+ * today is latch the register file and count, which is enough to say whether
+ * the driver is doing anything and to compare the traffic against the
+ * reference's: over its extract the Z80 makes 95 register writes to the YM's
+ * first half, 77 to its second and 40 to the PSG, and the 68000 silences all
+ * four PSG channels itself during its init.
+ */
+static uint8_t ym_reg[2][256];       /* the two halves, latched */
+static uint8_t ym_addr[2];
+static uint32_t ym_writes[2], psg_writes, psg_from68k;
+static uint8_t psg_latch;
+
+void sound_ym_write(unsigned port, uint8_t v) {
+    unsigned half = (port >> 1) & 1;
+    if (port & 1) { ym_reg[half][ym_addr[half]] = v; ym_writes[half]++; }
+    else ym_addr[half] = v;
+}
+
+void sound_psg_write(uint8_t v) {
+    psg_writes++;
+    /* A byte with bit 7 set names a channel and a kind; one without carries the
+     * high bits of whatever the last such byte named. Kept so the register
+     * file is here when there is something to do with it. */
+    if (v & 0x80) psg_latch = v;
+}
+
 /* ---------------------------------------------------------- the PWM clock ---
  *
  * The unit takes one sample out of each FIFO per PWM cycle and raises the
@@ -323,6 +351,10 @@ void sound_report(void) {
     printf("       L %04X-%04X changing %u time(s), R %04X-%04X changing %u\n",
            pwm_lo[0] == 0xFFFF ? 0 : pwm_lo[0], pwm_hi[0], pwm_changes[0],
            pwm_lo[1] == 0xFFFF ? 0 : pwm_lo[1], pwm_hi[1], pwm_changes[1]);
+    printf("  YM2612: %u + %u register write(s), last address %02X/%02X; "
+           "PSG %u write(s)\n",
+           ym_writes[0], ym_writes[1], ym_addr[0], ym_addr[1], psg_writes);
+    (void)psg_from68k; (void)psg_latch; (void)ym_reg;
     if (wav_frames)
         printf("       wrote %u frames of PWM-rate audio\n", wav_frames);
     /* Read after sound_close() has stopped the callback thread, which is the

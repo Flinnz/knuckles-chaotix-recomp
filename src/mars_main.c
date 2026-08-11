@@ -15,6 +15,7 @@
 #include <SDL.h>
 #include "mars.h"
 #include "sound.h"
+#include "genz80.h"
 #include "m68k.h"
 #include "m68000.h"
 
@@ -267,6 +268,27 @@ static unsigned step_cycles(void) {
 /* The same for the SH-2 side, which runs at exactly three times the 68000. It
  * is in cycles rather than instructions because the PWM timer's period is in
  * cycles, and that timer is the whole of the slave's clock. */
+/* The Z80's share. It is clocked at the Genesis master clock over 15 where the
+ * 68000 gets a seventh of it, so seven Z80 cycles to every fifteen of the
+ * 68000's — 59,736 to a frame. Its own accumulator and its own credit, for the
+ * same reason every other CPU here has them: a sub-slice is fourteen Z80 cycles
+ * and one instruction is four to twenty-three, so without a debt carried across
+ * hand-overs the overshoot would set the rate. */
+static unsigned z80_cyc_acc;
+static int z80_credit;
+static unsigned z80_step_cycles(void) {
+    z80_cyc_acc += CYCLES_PER_FRAME * 7;
+    unsigned n = z80_cyc_acc / (STEPS_PER_FRAME * 15);
+    z80_cyc_acc -= n * STEPS_PER_FRAME * 15;
+    return n;
+}
+
+static void z80_slice(void) {
+    z80_credit += (int)z80_step_cycles();
+    if (z80_credit <= 0) return;
+    z80_credit -= (int)genz80_slice(z80_credit);
+}
+
 static unsigned sh2_cyc_acc;
 static unsigned sh2_step_cycles(void) {
     sh2_cyc_acc += CYCLES_PER_FRAME * 3;
@@ -563,6 +585,8 @@ int main(int argc, char **argv) {
     int headless_frames = 0;
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
     const char *dump_32x = NULL, *wav = NULL, *tracepwm = NULL;
+    const char *tracez80 = NULL, *dump_z80 = NULL;
+    unsigned long tracez80_lines = 400000;
     int mute = 0, audio = 0;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     unsigned hold = 0;
@@ -587,6 +611,12 @@ int main(int argc, char **argv) {
             wav = argv[++i];
         else if (!strcmp(argv[i], "--trace-pwm") && i + 1 < argc)
             tracepwm = argv[++i];
+        else if (!strcmp(argv[i], "--trace-z80") && i + 1 < argc)
+            tracez80 = argv[++i];
+        else if (!strcmp(argv[i], "--dump-z80") && i + 1 < argc)
+            dump_z80 = argv[++i];
+        else if (!strcmp(argv[i], "--trace-z80-lines") && i + 1 < argc)
+            tracez80_lines = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--mute"))
             mute = 1;
         else if (!strcmp(argv[i], "--audio"))
@@ -633,6 +663,11 @@ int main(int argc, char **argv) {
      * the first frame is over. A headless run gets the WAV and the trace and no
      * device, which is also what keeps `make check` at full speed. */
     if (!sound_open(wav, tracepwm, (audio || !headless_frames) && !mute)) return 1;
+    /* And the Z80, which the 68000 holds in reset until it has uploaded a
+     * driver — so the trace has to be open before the 68000's first
+     * instruction, not before the Z80's. */
+    genz80_init();
+    if (tracez80 && !z80_trace_open(tracez80, tracez80_lines)) return 1;
 
     /* Neither SH-2 starts here. They are held in the adapter's boot ROM — which
      * the runtime stands in for — and handed to the cartridge when that work is
@@ -710,6 +745,9 @@ int main(int argc, char **argv) {
              * it, which is where the reference's own markers put it —
              * "Vblank SR=3 @ 224,n". It stays raised until acknowledged. */
             if (line == VBLANK_LINE) gen.vint_pending = gen.vint_irq = 1;
+            /* The Z80 gets the same vertical interrupt, held for the one line
+             * the VDP asserts it for. Its driver runs on nothing else. */
+            z80.irq = (line == VBLANK_LINE);
 
             /* The three CPUs take turns through the line. A rendezvous costs
              * the waiting one a hand-over or two rather than being answered
@@ -722,6 +760,11 @@ int main(int argc, char **argv) {
                 gen.hpos = s * 256u / SUBSLICES_PER_LINE;
                 cpu_poll_irq();
                 cpu_run(step_cycles());
+                /* The Z80 is the fourth CPU and takes its turn here, right
+                 * after the 68000 whose bus it shares — it is held off
+                 * entirely while the 68000 has requested that bus, which is
+                 * how the driver gets uploaded without a conflict to model. */
+                z80_slice();
 
                 unsigned sh2c = sh2_step_cycles();
                 /* The 32X VDP's autofill runs on the same clock as everything
@@ -769,6 +812,7 @@ int main(int argc, char **argv) {
 
     trace68k_close();
     sh2_trace_close();
+    z80_trace_close();
     sound_close();
     if (mars.trace) mars_trace_dump("after the frame loop");
 
@@ -805,6 +849,18 @@ int main(int argc, char **argv) {
             fputc(mars.bitmap_mode >> 8, d); fputc(mars.bitmap_mode & 0xFF, d);
             fclose(d);
             printf("  wrote %s (fb0, fb1, cram, fbctl, bitmap mode)\n", dump_32x);
+        }
+    }
+
+    /* The Z80's 8 KB, which is the only copy of its program there is: the
+     * 68000 assembles it at run time, so no static tool has ever seen it and
+     * tools/diffz80.py annotates its addresses out of this. */
+    if (dump_z80) {
+        FILE *d = fopen(dump_z80, "wb");
+        if (d) {
+            fwrite(z80_ram, 1, sizeof z80_ram, d);
+            fclose(d);
+            printf("  wrote %s (Z80 RAM)\n", dump_z80);
         }
     }
 
@@ -897,6 +953,14 @@ int main(int argc, char **argv) {
            sh2_insns[1], sh2_insns[1] / (frames ? frames : 1));
     printf("  68000 instructions: %lu (%lu/frame, reference 11,611 steady)\n",
            cpu_insns, cpu_insns / (frames ? frames : 1));
+    /* The Z80, which is either running the driver or is not — and a run where
+     * the 68000 never uploaded one looks exactly like a run where it uploaded
+     * a broken one unless both halves are said out loud. */
+    printf("  Z80: %s, %lu instruction(s) (%lu/frame), PC=0x%04X; "
+           "%u byte(s) uploaded, %u reset(s), %u bank write(s)\n",
+           genz80_runnable() ? "running" : "held", z80.insns,
+           z80.insns / (frames ? frames : 1), z80.pc,
+           z80_bytes_written, z80_resets, z80_bank_writes);
     if (rate68k_report) {
         /* Per frame rather than averaged, because the average is the steady
          * state: the boot is a tenth of a 300-frame run and it is the only
