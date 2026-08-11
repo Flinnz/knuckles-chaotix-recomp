@@ -330,7 +330,16 @@ static void cpu_run(unsigned cycles) {
 static void cpu_poll_irq(void) {
     if (!gen.vint_irq) return;
     if (!use_recomp) { m68k_set_irq(6); return; }
-    if (m68k_interrupt(&rcpu, &rc_pc, 6)) gen.vint_pending = gen.vint_irq = 0;
+    if (!m68k_interrupt(&rcpu, &rc_pc, 6)) return;
+    gen.vint_pending = gen.vint_irq = 0;
+    /* Taking it costs 44 cycles on a 68000 — the stacking and the vector fetch
+     * — which Musashi charges out of its exception table and this did not. It
+     * comes off the credit rather than the fuel because the fuel does not exist
+     * between hand-overs: m68k_run assigns it the budget on the way in, so
+     * anything spent out here is simply overwritten. One vertical interrupt a
+     * frame is four instructions in 11,619, and it was all that still separated
+     * the two builds once the blocks carried their real costs. */
+    cpu_credit -= M68K_IRQ_CYCLES;
 }
 
 static uint32_t cpu_pc(void) {

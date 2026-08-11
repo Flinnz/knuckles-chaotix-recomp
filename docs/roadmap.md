@@ -1678,12 +1678,27 @@ belong to `moves`, `cas` and `cas2`, which are 68010 and 68020 instructions.
 | frame | before | after | `--interp` | reference |
 |---|---|---|---|---|
 | 14-30, the comm poll | 11,622 at 11.00 | **9,834 at 13.00** | 9,834 at 13.00 | 12.97 c/i |
-| 34-40, steady | 11,622 at 11.00 | **11,623 at 11.00** | 11,619 at 11.00 | 11,611 at 11.00 |
+| 34-40, steady | 11,622 at 11.00 | **11,619 at 11.00** | 11,619 at 11.00 | 11,611 at 11.00 |
 
 Over sixty frames the two builds now retire 644,195 instructions against
 644,124 — **0.011% apart**, where the phase they disagreed in was 18%. The
 steady state, which was already right and was the thing to watch, moved by one
 instruction a frame.
+
+That last 0.011% turned out to be one thing and it is now gone too. Taking a
+vertical interrupt costs a 68000 **44 cycles** — the stacking and the vector
+fetch — which Musashi charges out of its exception table and the recompiled
+build charged not at all. One interrupt a frame at 11 cycles an instruction is
+four instructions in 11,619, which is exactly what the steady state was over by.
+It comes off `cpu_credit` rather than the fuel, because the fuel does not exist
+between hand-overs: `m68k_run` assigns it the budget on the way in, so anything
+spent out there is overwritten — which is what the first attempt at this did,
+to no effect at all. Charged properly, **41 of 60 frames are now identical
+between the two builds and the steady state matches exactly at 11,619** —
+644,055 instructions against 644,124. What is left is a handful of early-boot
+frames where the two take genuinely different paths, and one of them, frame 3,
+is 86 of the 69. That is a difference in what was executed, not a cost the model
+is missing.
 
 One hazard came with it and is worth writing down, because it was invisible
 until the fuel changed units. A block's cost is never allowed to be zero. The
@@ -1725,8 +1740,8 @@ does not spend the same day finding the same thing.
 * **A wait-state penalty for crossing the adapter.** There is none to charge.
   Six loops on the PWM clock, three reading work RAM and three reading a 32X
   register, all within 0.4% of what the 68000 manual charges — the section above
-  has the table. Charging anything at all would move the steady state off 11,611,
-  which is right today.
+  has the table. Charging anything at all would push the steady state off, where
+  we run 11,619 instructions a frame against the reference's 11,611.
 * **Timing anything in the boot phase by the master's instruction count.** It is
   the clock that invented the penalty. The master runs at 1.631 cycles an
   instruction in the steady state and 1.30 through the comm poll, and using the
@@ -1736,6 +1751,14 @@ does not spend the same day finding the same thing.
 * **The VDP's own vblank marker as a frame clock.** It is in the log, it is
   independent of whether the CPU takes the interrupt, and it is not a clock: 72
   of them arrive in bursts with no instructions in between.
+* **The 68000's taken vertical interrupt as a boot clock.** Exactly 127,840
+  cycles apart and unimprovable in the steady state, which is the phase that
+  never needed it. The engine boots with interrupts masked and 937,053
+  instructions go by without one.
+* **Charging the recompiled 68000's interrupt against `m68k_fuel`.** It changes
+  nothing, silently: `m68k_run` assigns the fuel its budget on the way in, so a
+  cycle spent between hand-overs is overwritten before it is read. The account
+  that survives a hand-over is `cpu_credit`.
 * **Finer hand-overs.** 32 and 64 sub-slices to the line are both worse than 16.
 * **Reordering the CPUs inside a hand-over.** It brackets the answer and hits
   neither side.
@@ -1775,10 +1798,13 @@ does not spend the same day finding the same thing.
   the three diffs. Measured today as a by-product of `tools/refpoll.py` needing
   a clock; not yet chased to its cause, which is either the SH-2 clock constant
   or the period arithmetic in `mars_pwm_period`.
-* **Interrupt phase.** The CPUs interleave now, but the vertical interrupt is
-  raised at a fixed point in the line and the PWM interrupts on line boundaries,
-  where the reference has both on their own clocks. It is what is left of the
-  68000 diff and most of the slave's.
+* **Interrupt phase.** The CPUs interleave and both timers are on their own
+  clocks now — the PWM counts SH-2 cycles against its period rather than landing
+  on line boundaries. What is left is quantisation: a hand-over is a sixteenth
+  of a line, about ninety SH-2 cycles, so a PWM interrupt whose period is 1,048
+  of them lands within a twelfth of it, and the vertical interrupt is raised at
+  the top of line 224 rather than at a pixel in it. It is most of what is left
+  of the slave's diff; the 68000's clock is no longer part of it.
 * **No audio.** The sample FIFOs accept writes and report space so the driver
   never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills

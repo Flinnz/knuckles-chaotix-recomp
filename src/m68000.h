@@ -230,4 +230,9 @@ int m68k_dispatchable(uint32_t addr);
 void m68k_reset_recomp(M68K *c, uint32_t *pc);
 int m68k_interrupt(M68K *c, uint32_t *pc, unsigned level);
 
+/* What taking one costs, from Musashi's own exception table: every autovectored
+ * level is 44 on a 68000. Charged by the caller, which is the only place that
+ * holds a cycle account between hand-overs. */
+#define M68K_IRQ_CYCLES 44
+
 #endif

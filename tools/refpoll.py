@@ -3,14 +3,23 @@
 
   python3 tools/refpoll.py                the hot spin loops of the first 14 frames
   python3 tools/refpoll.py --frames 40    further into the steady state
+  python3 tools/refpoll.py --rate         68000 instructions a frame, by phase
   python3 tools/refpoll.py --pc 0x8818AA  one loop, run by run
 
-The 68000's *instruction* counts are already right — both masters decompress the
-same twelve assets in the same order and the eleven gaps between them agree to
-within one instruction — and its *clock* is not: it reaches the master's first
-command 2.5 frames early. Something it does costs time we do not charge for, and
-the way to find out what is to price the loops it sits in and see which come out
-dearer than Musashi charges for them.
+This was written to find what a 68000 read of a 32X register costs over a read of
+RAM, on the belief that the answer was six or seven cycles and that not charging
+it was why the engine reached the master's first command 2.5 frames early. The
+answer is **nothing**: across six loops it found on its own, three reading work
+RAM and three reading a 32X register, every one comes out within 0.4% of what
+the manual charges, and the RAM loops are the control that says the clock is
+sound. The six or seven cycles were an artefact of the clock the first
+measurement used, which is the thing this had to get right and is most of what
+is written below.
+
+What it is still good for is what it did next: pricing any loop the 68000 sits
+in, against a clock that holds through the boot, which is how the real residue
+turned out to be a flat conversion constant on our side rather than a wait state
+on the machine's.
 
 A price is elapsed cycles over instructions retired, so it needs a clock, and the
 whole difficulty is that the phase where the answer is wrong is the phase with
