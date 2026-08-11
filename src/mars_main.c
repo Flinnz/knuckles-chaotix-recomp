@@ -57,22 +57,27 @@
  * the cycles an instruction actually costs — and that is a measurement, not a
  * constant of the architecture. `tools/refrate.py` counts the reference's own
  * lines between two of the 68000's vertical interrupt markers, which is a frame
- * boundary all three CPUs share, collapsed runs included. Over eighteen steady
- * frames: 11,598 instructions on the 68000, **235,076 on the master and 380,695
- * on the slave**, against 127,840 68000 cycles to the frame and three times
+ * boundary all three CPUs share, collapsed runs included. Over twenty-two steady
+ * frames: 11,601 instructions on the 68000, **235,044 on the master and 380,724
+ * on the slave**, against 128,006 68000 cycles to the frame and three times
  * that on the SH-2 side.
  *
- * So 1.631 cycles an instruction on the master and 1.007 on the slave. The two
+ * So 1.634 cycles an instruction on the master and 1.009 on the slave. The two
  * differ because their work does: the slave sits in a delay loop in the cache
  * array with nothing to stall on, where the master is decompressing cartridge
  * art. One flat 2 was half the slave's real rate — its whole clock is the PWM
- * interrupt every 1,048 SH-2 cycles, and the reference runs 1,040 instructions
- * between two of them where we ran 524.
+ * interrupt every 1,046 SH-2 cycles, and the reference runs 1,040 instructions
+ * between two of them where we ran 524. At 1.009 that is 1,037.
+ *
+ * These were 1.631 and 1.007, and the 0.2% is not a better measurement but a
+ * better *frame*: they were divided by 127,840 cycles where the frame is
+ * 128,006. Nothing about the reference's own counts moved.
  *
  * Per thousand cycles, so the division carries its remainder rather than
- * truncating 4,192 times a frame.
+ * truncating 4,192 times a frame. That granularity is 0.06% and the measurement
+ * is not steadier than that, so there is nothing to be had from another digit.
  */
-static const unsigned sh2_cpi1000[2] = { 1631, 1007 };
+static const unsigned sh2_cpi1000[2] = { 1634, 1009 };
 
 /* How often the CPUs change hands inside a scanline.
  *
@@ -271,22 +276,49 @@ static unsigned sh2_step_cycles(void) {
 }
 
 /* What each SH-2 actually got through, so the run can be held against the
- * measurement the rates come from: `tools/refrate.py` counts 235,076
- * instructions a frame on the master and 380,695 on the slave. A CPU that is
+ * measurement the rates come from: `tools/refrate.py` counts 235,044
+ * instructions a frame on the master and 380,724 on the slave. A CPU that is
  * idling rather than working shows up here as a shortfall the trace comparison
  * would take a whole extract to say. */
 static unsigned long sh2_insns[2];
+
+/* Instructions banked from one hand-over to the next — the debt `cpu_credit`
+ * carries for the 68000, and it was missing here for exactly as long.
+ *
+ * `sh2_run` spends whole blocks: it checks the fuel at a block label and then
+ * runs the block, so it returns more than it was asked for and the difference
+ * was thrown away 4,192 times a frame. The overshoot, not the request, then
+ * sets the rate — the master ran **239,661 instructions a frame against the
+ * 235,449 its own fuel allows**, 1.8% of a clock it was never given, and the
+ * slave 383,800 against 381,349.
+ *
+ * It hid behind the boot for a long while. Averaged over a 60-frame run the
+ * SH-2s look 2.6% and 3.6% *short*, because they are held in the adapter's BIOS
+ * for the first stretch and idle through more of it; only the marginal rate
+ * between frame 60 and frame 120 shows the steady state running fast. */
+static int sh2_credit[2];
 
 /* One SH-2's share of a hand-over, in instructions. The two are converted at
  * their own measured rates — see sh2_cpi1000 — and each carries its own
  * remainder, because a sub-slice is some ninety cycles and truncating that
  * division 4,192 times a frame is a percent of the clock. */
 static unsigned sh2_insn_acc[2];
-static int sh2_step_fuel(int i, unsigned cycles) {
+static void sh2_slice(int i, unsigned cycles) {
     sh2_insn_acc[i] += cycles * 1000;
     unsigned n = sh2_insn_acc[i] / sh2_cpi1000[i];
     sh2_insn_acc[i] -= n * sh2_cpi1000[i];
-    return (int)n;
+    /* A CPU the adapter is still holding is not running slowly, it is not
+     * running at all — `handoff` leaves its PC at zero until
+     * `mars_bios_handover`. Banking its share would have it burst through every
+     * instruction of the wait the moment it is handed the cartridge, and the
+     * giveaway was the rate coming out identical over 60 frames and 120: the
+     * debt was quietly repaying the boot. */
+    if (!mars_cpu[i].pc) { sh2_credit[i] = 0; return; }
+    sh2_credit[i] += (int)n;
+    if (sh2_credit[i] <= 0) return;      /* still paying off the last block */
+    unsigned ran = sh2_run(&mars_cpu[i], sh2_credit[i]);
+    sh2_credit[i] -= (int)ran;
+    sh2_insns[i] += ran;
 }
 
 static void cpu_run(unsigned cycles) {
@@ -672,7 +704,7 @@ int main(int argc, char **argv) {
                 /* The 32X VDP's autofill runs on the same clock as everything
                  * else, and the master polls FEN until it finishes. */
                 mars.fen_left -= mars.fen_left < sh2c ? mars.fen_left : sh2c;
-                sh2_insns[0] += sh2_run(&mars_cpu[0], sh2_step_fuel(0, sh2c));
+                sh2_slice(0, sh2c);
 
                 /* The slave's whole clock. Its interrupts used to be counted
                  * per frame and spread over the scanlines, which quantised each
@@ -690,7 +722,7 @@ int main(int argc, char **argv) {
                         mars.pwm_ints++;
                     }
                 }
-                sh2_insns[1] += sh2_run(&mars_cpu[1], sh2_step_fuel(1, sh2c));
+                sh2_slice(1, sh2c);
             }
         }
 
@@ -832,8 +864,12 @@ int main(int argc, char **argv) {
            gen.unknown_r, gen.unknown_w, mars.unknown);
     printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",
            mars_cpu[0].pc, mars_cpu[1].pc);
-    printf("  SH-2 instructions: master %lu (%lu/frame, reference 235,076), "
-           "slave %lu (%lu/frame, reference 380,695)\n",
+    /* The reference figures are steady-frame rates, so a run that includes the
+     * boot reads under them — the SH-2s are held in the adapter's BIOS for the
+     * first stretch and genuinely retire nothing there. Compare the *marginal*
+     * rate between two run lengths against these, not the average. */
+    printf("  SH-2 instructions: master %lu (%lu/frame, reference 235,044), "
+           "slave %lu (%lu/frame, reference 380,724)\n",
            sh2_insns[0], sh2_insns[0] / (frames ? frames : 1),
            sh2_insns[1], sh2_insns[1] / (frames ? frames : 1));
     printf("  68000 instructions: %lu (%lu/frame, reference 11,611 steady)\n",

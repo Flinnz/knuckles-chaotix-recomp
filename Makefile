@@ -58,19 +58,21 @@ run: build/mars
 # the signal is, and covering the rest needs a six-million-line trace to compare
 # against.
 #
-# The slave's bound is ten times what it was, and the aligner is why. Its stream
-# is 93% delay loop, the reference collapses each run into one line and we print
-# every step of ours, so the next reference line sits thousands of our records
-# away — and `holds` was rejecting any alignment whose next line was not within
-# 64. It could not cross a collapsed run at all, which is what held this to two
-# thousand blocks. Adding the run's own length to that reach lets it walk: 2,000
-# blocks went from 900 agreed to 1,269, and 20,000 blocks — the boot, the first
-# PWM interrupts and a long stretch of the sound driver's real work — now reach
-# the whole extract with 17,885 of them agreeing.
+# The slave's bound is what our own trace reaches, and the aligner is no longer
+# what decides it. Its stream is 93% delay loop, the reference collapses each run
+# into one line and we print every step of ours, so the next reference line sits
+# thousands of our records away — and `holds` was rejecting any alignment whose
+# next line was not within 64. It could not cross a collapsed run at all. Adding
+# the run's own length to that reach is what lets it walk.
 #
-# 40,000 is where it stops, and on our side rather than the aligner's: the walk
-# runs out of our 2,000,000 lines two thirds of the way in. Raising both is the
-# next lift and costs trace size.
+# That briefly looked like a ten-fold lift, to 20,000 blocks, and it was not: the
+# slave was banking its share of every hand-over while the adapter still held it
+# and bursting through the backlog at hand-over, which carried the walk far past
+# where our trace honestly reaches. With that gone the reach is what the trace
+# pays for, and roughly linear in it — 2,000,000 lines cross about 2,500 blocks,
+# 8,000,000 cross about 7,000. 2,000 is what the budget here covers with margin,
+# and it is still the boot, the first PWM interrupts and the sound driver's first
+# work. Lifting it is a trace-size decision now, not an aligner one.
 #
 # The windows are far wider than they were, for one reason: the CPUs now wait
 # for each other. A poll that used to be answered inside the 68000's own
@@ -131,7 +133,7 @@ check: build/mars
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \
 	    --rows 0 --detail 0
-	python3 tools/diffsh2.py --cpu slave  --window 3000000 --ref-blocks 20000 \
+	python3 tools/diffsh2.py --cpu slave  --window 3000000 --ref-blocks 2000 \
 	    --rows 0 --detail 0
 	./build/mars --recomp --frames 300 --trace68k build/trace68k_rc.txt \
 	    --trace68k-lines 6000000 >/dev/null

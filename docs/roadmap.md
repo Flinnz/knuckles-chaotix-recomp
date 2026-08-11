@@ -1795,13 +1795,73 @@ Every diff improved, including the ones that had nothing to do with the slave:
 | slave, 2,000 blocks | 1,037 / 546 | 900 / 567 | **1,269 / 658** |
 | recompiled 68000 | 8,736 / 400 | 8,736 / 400 | **8,741 / 397** |
 
-And the bound goes with it. The slave walks the whole extract at **20,000
-reference blocks**, ten times what it was, with **17,885 agreeing** — and the
-agreement *rate* climbs with depth, 63% at 2,000, 74% at 4,000, 84% at 8,000,
-89% at 20,000, because the early boot is the noisy part and the sound driver's
-steady work is not. 40,000 is where it stops, and on our side: the walk runs out
-of our 2,000,000 traced lines two thirds of the way through. Raising both is the
-next lift and costs trace size.
+And the bound went with it — to 20,000 reference blocks, walking the whole
+extract with 17,885 agreeing, the agreement rate climbing with depth from 63% at
+2,000 to 89% at 20,000.
+
+*That last part did not survive the next section, and the fault was not the
+aligner's.* The slave was banking its share of every hand-over while the adapter
+still held it, and bursting through the backlog the moment it was handed the
+cartridge — which carried the walk far past where our trace honestly reaches.
+With the burst gone the reach is what the trace pays for and roughly linear in
+it: 2,000,000 lines cross about 2,500 blocks and 8,000,000 about 7,000, so
+20,000 would want some 21 million and a twelve-gigabyte file. The bound is back
+at 2,000, which the budget covers with margin, and **lifting it is a trace-size
+decision now rather than an aligner one** — which is still the thing that
+changed. The aligner's own contribution stands: at that same 2,000 it takes the
+walk from 900 blocks agreed to 1,269.
+
+### The SH-2s were outrunning their own fuel, and the average was hiding it
+
+The end-of-run report said the master ran **229,037** instructions a frame
+against the reference's 235,076 and the slave 366,967 against 380,695 — 2.6% and
+3.6% short, which reads like two CPUs idling where the reference works. It is
+the wrong number. Take the *marginal* rate instead, the difference between a
+60-frame run and a 120-frame one, and the sign flips: **239,661 and 383,800**,
+1.95% and 0.82% *over*. An average over a run that starts with the SH-2s held in
+the adapter's BIOS is not a rate.
+
+Running fast has one cause and it is the defect `cpu_credit` was written to fix
+for the 68000, never carried across. `sh2_run` checks its fuel at a block label
+and then runs the block whole, so it returns more than it was asked for — and
+the frame loop threw that difference away, 4,192 times a frame. The overshoot,
+not the request, set the rate: 239,661 instructions a frame against the
+**235,449 its own fuel allows**. A per-CPU credit, spent the way `cpu_run`
+spends the 68000's, is the whole fix.
+
+It was briefly too eager, and the giveaway was a number that looked *better* than
+it had any right to: the rate came out identical over 60 frames and 120, to the
+instruction. A CPU still held in the BIOS retires nothing, so its share was being
+banked and then burst through the moment the cartridge was handed over — the
+debt was quietly repaying the boot. A held CPU banks nothing now.
+
+**That burst was also paying for the slave diff's 20,000-block bound**, and this
+is the honest correction to the section above. It carried the walk far past where
+our trace reaches on its own; with it gone the reach is what the trace pays for
+and roughly linear in it — 2,000,000 lines cross about 2,500 reference blocks,
+8,000,000 about 7,000. The bound is 2,000 again. The aligner fix is not what was
+wrong: at 2,000 it still takes the walk from 900 blocks agreed to 1,269, and what
+it changed is that the ceiling is now trace size rather than the walk stalling.
+
+Then the constants themselves. `sh2_cpi1000` was 1.631 and 1.007, and both were
+divided by the 127,840-cycle frame; against the real 128,006 the same reference
+counts give **1.634 and 1.009**. Nothing about what the reference did moved, only
+what we divided it by.
+
+| | before | after | reference |
+|---|---|---|---|
+| master, steady | 239,661 (+1.95%) | **235,017 (−0.011%)** | 235,044 |
+| slave, steady | 383,800 (+0.82%) | **380,593 (−0.034%)** | 380,724 |
+
+**It did not move the 68000**, which is worth saying because the last section
+guessed it would. Our 68000 still retires 11,634 instructions a frame against
+the reference's 11,601 — our mix averaging 11.003 cycles an instruction against
+11.034 — and correcting both SH-2s changed it by nothing at all. So it is not
+downstream of them. Under `--interp` our cost model *is* Musashi's, and the six
+loops `refpoll` prices land exactly on Musashi's charges, so the reference is
+not costing instructions differently; what is left is that we execute a slightly
+different mix. That is a question for the trace diff, whose 411 divergences on
+the whole extract are mostly trip counts, and not for another clock.
 
 ### Next
 
@@ -1812,11 +1872,12 @@ machine's own clock at 365.96 to a frame, and its driver is running real code at
 `0xC000012C` on every one of them. What is missing is a YM2612 and PSG core, a
 PWM sink, and somewhere to put the samples.
 
-**2. The slave diff's bound, again.** It is 20,000 reference blocks now rather
-than 2,000, and what stops it going further is no longer the aligner but our own
-trace: at 40,000 the walk runs out of its 2,000,000 lines two thirds of the way
-in. Raising `--trace-sh2-lines` and the bound together is the next lift, and it
-costs trace size rather than cleverness.
+**2. The slave diff's bound.** Still 2,000 reference blocks, but for a different
+reason than before: the aligner walks collapsed runs now, and what limits the
+bound is how far our own trace reaches. It is roughly linear in trace size —
+2,000,000 lines cross about 2,500 blocks, 8,000,000 about 7,000 — so raising
+`--trace-sh2-lines` and the bound together is the lift, and it costs disk rather
+than cleverness. 20,000 would want some 21 million lines.
 
 ### Not worth doing, and measured rather than assumed
 
@@ -1849,6 +1910,16 @@ does not spend the same day finding the same thing.
   `dbcc` goes for 10 when it loops or 14 when it expires — never 12 unless the
   condition was true. A `bcc`'s entry *is* its taken cost, which is what makes
   the trap look safe. It put a `dbf` loop 3.4% off two polls that agreed.
+* **Reading a CPU's rate off the end-of-run average.** The SH-2s are held in the
+  adapter's BIOS through the early boot and retire nothing there, so a 60-frame
+  average reads 2.6% *under* a steady rate that is really 1.95% *over*. Take the
+  marginal rate between two run lengths. The same average is what made a credit
+  that banked the hold look like an improvement.
+* **Reading the slave diff's reach as an aligner result.** It is a trace-size
+  result. A bound that walks further because the slave burst through a banked
+  backlog is not coverage of anything, and it is what made the aligner fix look
+  like a ten-fold lift when the honest figure was 2,500 blocks for 2,000,000
+  traced lines.
 * **Finer hand-overs.** 32 and 64 sub-slices to the line are both worse than 16.
 * **Reordering the CPUs inside a hand-over.** It brackets the answer and hits
   neither side.
@@ -1888,17 +1959,17 @@ does not spend the same day finding the same thing.
   rest is the frame below.
 * ~~**The frame is 60 Hz where NTSC is 59.9227.**~~ *Settled.* 128,006 now, the
   true 896,040/7, confirmed against the reference's own clock at 127,985.
-* **The 68000's steady state is 11,634 a frame against the reference's 11,611.**
-  Correcting the frame unmasked it: our mix averages 11.00 cycles an instruction
-  where the reference's averages 11.02, so a frame 0.13% short was hiding a 0.2%
-  difference in *what is executed*. The likely cause is downstream — our master
-  runs 229,037 instructions a frame against the reference's 235,076, so our
-  68000 waits longer in its cheap 11-cycle poll and less of its frame is real
-  work. Chase the SH-2 rates rather than the 68000.
-* **`sh2_cpi1000` was measured against the short frame.** 1.631 and 1.007 come
-  from `tools/refrate.py` dividing a 127,840-cycle frame; both are 0.13% low
-  now that the frame is right. Small against the 2.6% and 3.6% the two SH-2s are
-  already adrift, but it is the same class of error and wants re-measuring.
+* **The 68000's steady state is 11,634 a frame against the reference's 11,601.**
+  Correcting the frame unmasked it: our mix averages 11.003 cycles an instruction
+  where the reference's averages 11.034, so a frame 0.13% short was hiding a
+  0.28% difference in *what is executed*. It was guessed to be downstream of the
+  SH-2 rates and it is not — putting both of those within 0.03% moved it by
+  nothing. Under `--interp` the cost model is Musashi's and the loops `refpoll`
+  prices land on Musashi's charges exactly, so this is a different mix rather
+  than a different price. The trace diff's 411 divergences, mostly trip counts,
+  are where to look.
+* ~~**`sh2_cpi1000` was measured against the short frame.**~~ *Settled.* 1.634
+  and 1.009 now, from the same reference counts over the right frame.
 * **Interrupt phase.** The CPUs interleave and both timers are on their own
   clocks now — the PWM counts SH-2 cycles against its period rather than landing
   on line boundaries. What is left is quantisation: a hand-over is a sixteenth
