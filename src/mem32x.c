@@ -587,11 +587,25 @@ void mars_deliver_int(int slave, unsigned level) {
  */
 #define SH2_CLOCK 23011360u              /* NTSC 32X */
 
-unsigned mars_pwm_per_frame(void) {
+/* The period itself, in SH-2 cycles, rather than a count per frame.
+ *
+ * A count per frame has to be an integer, and this one is 365.96 — so it was
+ * 365, losing an interrupt every four frames, and the frame's worth of them was
+ * then spread over the 262 scanlines, which put each one at a line boundary up
+ * to seven hundred instructions from where the timer would have fired it. The
+ * period divides no more than once and the frame loop counts SH-2 cycles
+ * against it, so neither error is left. */
+unsigned mars_pwm_period(void) {
     unsigned tm = (mars.pwm_ctl >> 8) & 0xF;
     unsigned cycle = mars.pwm_cycle & 0xFFF;
     if (!tm || !cycle) return 0;         /* the timer interrupt is off */
-    return SH2_CLOCK / ((cycle + 1) * tm) / 60;
+    return (cycle + 1) * tm;
+}
+
+/* Only the end-of-run report wants this shape. */
+unsigned mars_pwm_per_frame(void) {
+    unsigned p = mars_pwm_period();
+    return p ? SH2_CLOCK / p / 60 : 0;
 }
 
 /* The adapter's boot ROM hands the cartridge its two SH-2s.

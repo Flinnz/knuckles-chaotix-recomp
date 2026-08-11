@@ -147,8 +147,14 @@ void mars_deliver_int(int slave, unsigned level);
 #define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
 #define MARS_INT_PWM 6           /* the PWM timer, which only the slave takes */
 
-/* How many PWM interrupts fall in one 60 Hz frame, from the registers the
- * slave itself programmed. Zero when the timer is off. */
+/* The PWM timer's period in SH-2 cycles, from the registers the slave itself
+ * programmed — the SH-2 clock over this is the sample rate. Zero when the timer
+ * interrupt is off. The frame loop counts SH-2 cycles against it, which is the
+ * only clock the slave has. */
+unsigned mars_pwm_period(void);
+
+/* The same thing as a count per frame, for the end-of-run report only: it is
+ * 365.96 here, so it is not a quantity to schedule from. */
 unsigned mars_pwm_per_frame(void);
 
 /* Draw the Mega Drive picture: planes, sprites and palette. */

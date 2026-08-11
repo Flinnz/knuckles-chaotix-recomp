@@ -1057,18 +1057,40 @@ instruction of an exception handler, so an `rte` sitting where control cannot
 fall through is a handler by construction. 24,578 -> 24,579 instructions, both
 images still byte-exact, and `coverage` clean again.
 
-Still open, and now the clear remainder: 162 register differences and 83 places
-control flow parts, led by `0x8836F6` and `0x883244`. And the slave's PWM
-interrupts are still delivered on line boundaries where the reference has them
-on the timer's own cycle count, which is what its interrupt entries at
-`0x060001F8` disagree about.
+### The slave gets its clock properly
+
+The other half, and the one that moved the most. The PWM timer is the slave's
+only clock, and it was being scheduled as *a count per frame spread over the
+scanlines* — which is wrong twice. A count per frame has to be an integer and
+this one is 365.96, so it was 365, losing an interrupt every four frames. And
+spreading a frame's worth over 262 lines quantised each one to a line boundary,
+up to seven hundred SH-2 instructions from where the timer would have fired it.
+Taking one also handed the slave an extra slice on top of its clock share,
+about 9% of free fuel, which is not what an interrupt does — it redirects the
+CPU, and the ordinary slice runs the handler.
+
+`mars_pwm_period()` returns the period itself, `(cycle + 1) * TM` in SH-2
+cycles, and the frame loop counts SH-2 cycles against it. Both SH-2 cycles and
+68000 cycles are now handed out across the frame's hand-overs with the
+remainder distributed rather than truncated, so all three CPUs run off one
+clock and nothing is lost to integer division.
+
+**The slave goes from 17 blocks in lock step to 269**, the first movement on it
+since there was anything to measure, and it takes the 68000 with it: 532
+divergences to 500, because the two share a machine. Its idle loop lands at
+3,045 instructions against the reference's 2,826 — 7.7% over, where the errors
+before this were the loop being abandoned after 3.
+
+Still open: 162 register differences and 83 places control flow parts on the
+68000, led by `0x8836F6` and `0x883244`; and on the slave the interrupt entries
+at `0x060001F8` that still disagree in register state.
 
 ### Next
 
-**1. The slave's PWM phase**, the half of the interrupt question not yet
-answered. 365 interrupts a frame delivered at line boundaries, where the timer
-divides the SH-2 clock by `(cycle + 1) * TM`. The same debt-carrying trick the
-68000 just got applies directly.
+**1. What is left of the phase**, now that the clocks are right: 162 register
+differences and 83 places control flow parts on the 68000, led by `0x8836F6`
+and `0x883244`, and the slave's interrupt entries at `0x060001F8`. These are no
+longer trip counts, so they want reading one at a time rather than a mechanism.
 
 **2. A trace that survives idling.** Both SH-2 gates now need a 3-million-line
 budget and produce a 1.8 GB file, because 98% of it is a CPU correctly doing

@@ -49,9 +49,10 @@
  * the slave's idle loop is pure waiting and its length is therefore a
  * measurement. It burns 2,826 instructions there where a one-per-cycle budget
  * ran 5,256 — 1.86 cycles an instruction, which is what a loop of register
- * reads and a taken branch costs on this core. */
+ * reads and a taken branch costs on this core. The delay loop the slave idles
+ * in agrees from the manual: `dt` is one cycle and the `bf` back is three when
+ * taken, so four cycles for two instructions. */
 #define SH2_CYCLES_PER_INSN 2
-#define SH2_FUEL_PER_LINE (CYCLES_PER_LINE * 3 / SH2_CYCLES_PER_INSN)
 
 /* How often the CPUs change hands inside a scanline.
  *
@@ -175,6 +176,18 @@ static unsigned step_cycles(void) {
     cyc_acc += CYCLES_PER_FRAME;
     unsigned n = cyc_acc / STEPS_PER_FRAME;
     cyc_acc %= STEPS_PER_FRAME;
+    return n;
+}
+
+/* The same for the SH-2 side, which runs at exactly three times the 68000. It
+ * is in cycles rather than instructions because the PWM timer's period is in
+ * cycles, and that timer is the whole of the slave's clock. */
+static unsigned sh2_cyc_acc;
+static unsigned pwm_acc;         /* SH-2 cycles since the last PWM interrupt */
+static unsigned sh2_step_cycles(void) {
+    sh2_cyc_acc += CYCLES_PER_FRAME * 3;
+    unsigned n = sh2_cyc_acc / STEPS_PER_FRAME;
+    sh2_cyc_acc %= STEPS_PER_FRAME;
     return n;
 }
 
@@ -501,7 +514,6 @@ int main(int argc, char **argv) {
          * had got. */
         gen68k_frame_start();
         gen.pad_buttons = headless_frames ? hold : (read_pad() | hold);
-        unsigned pwm = mars_pwm_per_frame(), acc = 0;
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
             /* Raised as the beam reaches the line, before the 68000 runs any of
@@ -517,18 +529,28 @@ int main(int argc, char **argv) {
             for (unsigned s = 0; s < SUBSLICES_PER_LINE; s++) {
                 cpu_poll_irq();
                 cpu_run(step_cycles());
-                sh2_run(&mars_cpu[0], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
-                sh2_run(&mars_cpu[1], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
-            }
 
-            /* The slave's PWM interrupts fall 365 to a frame, so one or two per
-             * line. Each is raised with a slice behind it rather than all of
-             * them at once: the handler masks itself to level 6, so a second
-             * raised before the first had any time to run is simply declined. */
-            for (acc += pwm; acc >= LINES_PER_FRAME; acc -= LINES_PER_FRAME) {
-                mars_deliver_int(1, MARS_INT_PWM);
-                mars.pwm_ints++;
-                sh2_run(&mars_cpu[1], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
+                unsigned sh2c = sh2_step_cycles();
+                int fuel = (int)(sh2c / SH2_CYCLES_PER_INSN);
+                sh2_run(&mars_cpu[0], fuel);
+
+                /* The slave's whole clock. Its interrupts used to be counted
+                 * per frame and spread over the scanlines, which quantised each
+                 * one to a line boundary and dropped the fractional interrupt —
+                 * 365 of the 365.96 the registers ask for. Counting SH-2 cycles
+                 * against the period leaves neither error, and no extra slice
+                 * is handed out for taking one: the interrupt only redirects
+                 * the CPU, and the fuel below is what runs the handler. */
+                unsigned period = mars_pwm_period();
+                if (period) {
+                    pwm_acc += sh2c;
+                    while (pwm_acc >= period) {
+                        pwm_acc -= period;
+                        mars_deliver_int(1, MARS_INT_PWM);
+                        mars.pwm_ints++;
+                    }
+                }
+                sh2_run(&mars_cpu[1], fuel);
             }
         }
 
