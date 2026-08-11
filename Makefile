@@ -58,12 +58,19 @@ run: build/mars
 # the signal is, and covering the rest needs a six-million-line trace to compare
 # against.
 #
-# The slave is bounded too now, and for a different reason: its stream is 93%
-# delay loop, the reference collapses those runs and we do not, and the aligner
-# walking two streams of such different densities spends the whole trace
-# searching. Six million lines of ours reached 0.6 of a reference frame. Two
-# thousand reference blocks is the boot, the first PWM interrupts and the sound
-# driver's first work — where the signal is — and it walks that cleanly.
+# The slave's bound is ten times what it was, and the aligner is why. Its stream
+# is 93% delay loop, the reference collapses each run into one line and we print
+# every step of ours, so the next reference line sits thousands of our records
+# away — and `holds` was rejecting any alignment whose next line was not within
+# 64. It could not cross a collapsed run at all, which is what held this to two
+# thousand blocks. Adding the run's own length to that reach lets it walk: 2,000
+# blocks went from 900 agreed to 1,269, and 20,000 blocks — the boot, the first
+# PWM interrupts and a long stretch of the sound driver's real work — now reach
+# the whole extract with 17,885 of them agreeing.
+#
+# 40,000 is where it stops, and on our side rather than the aligner's: the walk
+# runs out of our 2,000,000 lines two thirds of the way in. Raising both is the
+# next lift and costs trace size.
 #
 # The windows are far wider than they were, for one reason: the CPUs now wait
 # for each other. A poll that used to be answered inside the 68000's own
@@ -124,7 +131,7 @@ check: build/mars
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \
 	    --rows 0 --detail 0
-	python3 tools/diffsh2.py --cpu slave  --window 3000000 --ref-blocks 2000 \
+	python3 tools/diffsh2.py --cpu slave  --window 3000000 --ref-blocks 20000 \
 	    --rows 0 --detail 0
 	./build/mars --recomp --frames 300 --trace68k build/trace68k_rc.txt \
 	    --trace68k-lines 6000000 >/dev/null

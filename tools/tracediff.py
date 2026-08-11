@@ -138,6 +138,13 @@ class Div:
                 % (self.skipped, unit))
 
 
+# How far past the previous match a hold-check will look for the next reference
+# line, before the collapsed run in front of it is added on. Small on purpose:
+# what it is rejecting is a coincidental match, and a real next line is adjacent
+# once the run is accounted for.
+HOLD_REACH = 64
+
+
 def diff(ref, ours, window, hold, skip):
     """Align the reference against our stream and record every difference.
 
@@ -171,12 +178,27 @@ def diff(ref, ours, window, hold, skip):
         Checked forward-only and loosely: the next reference lines must turn up
         in order, each within a short reach, which is enough to reject a
         coincidental hit without demanding the trip counts also agree.
+
+        The reach is where a collapsed run has to be treated as a *range*. A
+        reference line carrying `[Omitted: N]` is not one position, it is the
+        far end of N steps the reference took without printing them, and we
+        print every one of ours — so on the slave, whose stream is 93% delay
+        loop, the next reference line sits thousands of our records away and a
+        fixed reach of 64 rejects every correct alignment there is. Widening it
+        by the run's own length is what lets the walk cross one.
+
+        It stays a *bound* and never becomes a prediction, which is the
+        distinction that matters: `find` still takes the earliest match at or
+        after the current position, so a loop we spun fewer times than the
+        reference is matched early and nothing is skipped. Predicting the
+        landing point instead — jumping N steps and looking there — is what
+        cannot work, and the note above says why.
         """
         p = at
         for d in range(1, hold):
             if k + d >= len(ref):
                 return True
-            nxt = find(k + d, p + 1, exact, 64)
+            nxt = find(k + d, p + 1, exact, HOLD_REACH + ref[k + d].gap)
             if nxt is None:
                 return False
             p = nxt

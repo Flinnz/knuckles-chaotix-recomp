@@ -710,25 +710,40 @@ void mars_deliver_int(int slave, unsigned level) {
  * look right: the SH-2 clock divided by the programmed cycle length, divided
  * again by TM, the interrupt-every-N-cycles field.
  *
- * This game writes cycle 0x417 and TM 1, which is 21,957 Hz and 366 interrupts
- * to a 60 Hz frame. The reference logs 4,877 of them against 13 of the 68000's,
- * or 375 apiece — the same number, measured the other way round.
+ * This game writes cycle 0x417 and TM 1. Read as `cycle - 1` that is 1,046 SH-2
+ * cycles, 22,000.3 Hz — the round number a sound driver would be aiming at —
+ * and 366.65 interrupts to a 60 Hz frame.
  */
 #define SH2_CLOCK 23011360u              /* NTSC 32X */
 
 /* The period itself, in SH-2 cycles, rather than a count per frame.
  *
- * A count per frame has to be an integer, and this one is 365.96 — so it was
- * 365, losing an interrupt every four frames, and the frame's worth of them was
+ * A count per frame has to be an integer, and this one is 366.65 — so it was
+ * 365, losing an interrupt every three frames, and the frame's worth of them was
  * then spread over the 262 scanlines, which put each one at a line boundary up
  * to seven hundred instructions from where the timer would have fired it. The
  * period divides no more than once and the frame loop counts SH-2 cycles
- * against it, so neither error is left. */
+ * against it, so neither error is left.
+ *
+ * `cycle - 1`, and it was `cycle + 1`, which is two cycles in 1,047 — 0.19% on
+ * the only clock the slave has. Measured rather than read off a manual, and
+ * without needing a clock to measure it with: a loop that closes on itself
+ * costs exactly what its instructions cost, so its laps are a clock, and
+ * counting PWM interrupts against them says what one is worth.
+ * `tools/refpoll.py --period` does that over the reference, and three loops of
+ * quite different shapes — a two-instruction poll of work RAM, a five
+ * instruction long-word fill ending in `dbf`, and a two-instruction poll of a
+ * 32X register — put it at 1,045.7, 1,045.1 and 1,046.6 SH-2 cycles against the
+ * 1,048 this returned. The sample rate is the other confirmation: 1,046 divides
+ * the SH-2 clock to 22,000.3 Hz where 1,048 gives 21,957, and a driver aims at
+ * the round one. */
 unsigned mars_pwm_period(void) {
     unsigned tm = (mars.pwm_ctl >> 8) & 0xF;
     unsigned cycle = mars.pwm_cycle & 0xFFF;
-    if (!tm || !cycle) return 0;         /* the timer interrupt is off */
-    return (cycle + 1) * tm;
+    /* Below two there is no period to have, and the frame loop divides by this
+     * — see the `while (pwm_acc >= period)` it drives. */
+    if (!tm || cycle < 2) return 0;      /* the timer interrupt is off */
+    return (cycle - 1) * tm;
 }
 
 /* Only the end-of-run report wants this shape. */

@@ -60,13 +60,26 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import diff68k                                          # noqa: E402
+from recompile68k import CYCLES_PATH, read_cycles        # noqa: E402
 
 DEFAULT_ROM = "roms/Knuckles' Chaotix (JU) (32X) [!].32x"
 OMITTED = re.compile(rb"\[Omitted:\s*(\d+)\]")
 
-# Mirrors CYCLES_PER_FRAME in src/mars_main.c: 7.67 MHz over 60 frames, and the
-# SH-2s clocked at exactly three times the 68000.
-CYCLES_PER_FRAME = 127840
+# Musashi's 68000 costs, the same table the recompiled build charges from. What
+# it buys here is a loop's price without a clock: a lap of a closed loop costs
+# what its instructions cost, so counting laps against PWM ticks measures the
+# *tick* instead of assuming it.
+CYCLES = read_cycles(CYCLES_PATH)
+
+# Mirrors CYCLES_PER_FRAME in src/mars_main.c: the Genesis master clock over
+# seven, across a frame of 262 lines of 3,420 master clocks — 59.9227 Hz, not
+# 60. The SH-2s are clocked at exactly three times the 68000.
+#
+# It was 127,840 here too, and every loop this tool prices came out uniformly
+# 0.2% under what the manual charges — 10.98 for a pair costing 11, 12.97 for a
+# pair costing 13. A systematic offset on every loop at once is a clock, not six
+# coincidences. Corrected they read 11.00 and 13.00.
+CYCLES_PER_FRAME = 128006
 SH2_MULTIPLIER = 3
 
 # Which taken-vblank frames calibrate the PWM tick. The first two are the tail
@@ -102,8 +115,10 @@ class Loop:
         self.first_frame = None
         self.last_frame = None
         self.text = {}          # pc -> the reference's own disassembly
+        self.op = {}            # pc -> its opcode word, for the cycle table
 
-    def add(self, hi, insns, master, pwm, frame, text):
+    def add(self, hi, insns, master, pwm, frame, text, op):
+        self.op.update(op)
         self.hi = max(self.hi, hi)
         self.insns += insns
         self.master += master
@@ -116,6 +131,39 @@ class Loop:
 
     def body(self, width=3):
         return " ; ".join(self.text[a] for a in sorted(self.text)[:width])
+
+    def cycle(self):
+        """The instructions that actually go round, and what one lap costs.
+
+        Only for a loop that closes on itself: the last thing in it branches to
+        the first thing in it. Then every PC between the two runs once a lap and
+        the branch is taken every lap but the last, so a `bcc`'s table entry —
+        which is its taken cost — is exactly right with nothing to adjust.
+        Anything after the branch is the exit and is not in the lap.
+
+        A `dbcc` is the exception and has to be paid its CYC_DBCC_F_NOEXP: its
+        entry is 12, which is neither of the prices it actually goes for, and
+        looping costs 10. Left alone it puts a five-instruction fill loop 3.4%
+        above the polls, which is what caught it.
+
+        Returns (instructions in a lap, cycles in a lap), or None when the loop
+        does not close — which is most of them, including any whose head the
+        reference collapsed away into an `[Omitted]` run.
+        """
+        pcs = sorted(self.text)
+        if not pcs:
+            return None
+        for i, pc in enumerate(pcs):
+            m = re.search(r"\$([0-9a-f]{4,6})\s*$", self.text[pc])
+            if m and int(m.group(1), 16) == pcs[0]:
+                lap = pcs[:i + 1]
+                if any(a not in self.op for a in lap):
+                    return None
+                cost = sum(CYCLES[self.op[a]] for a in lap)
+                if self.text[pc].split()[1].startswith("db"):
+                    cost -= 2
+                return len(lap), cost
+        return None
 
     def crosses(self):
         """Does any instruction in it reach across the adapter?
@@ -146,22 +194,24 @@ def scan(rom_path, want_frames, only_pc=None):
     r_insns = 0
     r_master0 = r_pwm0 = 0
     r_text = {}
+    r_op = {}
     r_seen = set()
     r_repeat = False
 
     def close():
-        nonlocal r_lo, r_hi, r_insns, r_text, r_seen, r_repeat
+        nonlocal r_lo, r_hi, r_insns, r_text, r_op, r_seen, r_repeat
         if r_lo is not None and r_repeat and r_insns >= MIN_INSNS:
             if only_pc is None or r_lo == only_pc:
                 lp = loops.setdefault(r_lo, Loop(r_lo))
                 lp.add(r_hi, r_insns, master_n - r_master0, pwm_n - r_pwm0,
-                       frame, r_text)
+                       frame, r_text, r_op)
                 if only_pc is not None:
                     runs_of.append((frame, r_insns, master_n - r_master0,
                                     pwm_n - r_pwm0))
         r_lo = r_hi = None
         r_insns = 0
         r_text = {}
+        r_op = {}
         r_seen = set()
         r_repeat = False
 
@@ -232,6 +282,10 @@ def scan(rom_path, want_frames, only_pc=None):
                     rest = tok[3].split(b" d0:", 1)[0] if len(tok) > 3 else b""
                     r_text[pc] = "%06X %s" % (
                         pc, " ".join(rest.decode(errors="replace").split()))
+                    try:
+                        r_op[pc] = int(tok[2], 16)
+                    except ValueError:
+                        pass
 
     close()
     return loops, runs_of, frames, rate, cpu_n, master_n, pwm_n
@@ -249,6 +303,8 @@ def main():
                     help="instructions of each loop body to print")
     ap.add_argument("--rate", action="store_true",
                     help="68000 instructions a frame, on the PWM clock")
+    ap.add_argument("--period", action="store_true",
+                    help="what a PWM tick is worth, from the closed loops")
     a = ap.parse_args()
 
     loops, runs, frames, rate, cpu_n, master_n, pwm_n = scan(
@@ -280,6 +336,34 @@ def main():
 
     def by_master(master, insns):
         return master * master_cpi / SH2_MULTIPLIER / insns if insns else 0.0
+
+    if a.period:
+        # The PWM tick, measured instead of assumed — and this is the one
+        # measurement here that needs no clock at all going in. A closed loop
+        # costs what its instructions cost, so its laps *are* a clock, and
+        # counting PWM ticks against them says what a tick is worth. The SH-2
+        # runs at three times the 68000, so three times that is the timer's
+        # period, which is the number `mars_pwm_period()` computes from the
+        # registers the slave programmed.
+        print("\n  what a PWM tick is worth, from loops that close on"
+              " themselves:")
+        print("  %-15s %8s %10s %7s %10s %9s"
+              % ("loop", "lap", "insns", "pwm", "cyc/tick", "period"))
+        rows = []
+        for lp in sorted(loops.values(), key=lambda l: -l.insns):
+            cyc = lp.cycle()
+            if not cyc or not lp.pwm or lp.insns < 4000:
+                continue
+            n, cost = cyc
+            per_tick = lp.insns * cost / n / lp.pwm
+            rows.append(per_tick)
+            print("  %06X-%06X %3d/%-4d %10d %7d %10.2f %9.1f"
+                  % (lp.lo, lp.hi, n, cost, lp.insns, lp.pwm, per_tick,
+                     per_tick * SH2_MULTIPLIER))
+        if rows:
+            mean = sum(rows) / len(rows)
+            print("  %d loop(s): %.2f 68000 cycles a tick, **%.1f SH-2 cycles**"
+                  % (len(rows), mean, mean * SH2_MULTIPLIER))
 
     if a.rate:
         # What the boot phase actually runs at. The claim this replaces —

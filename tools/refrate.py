@@ -33,9 +33,11 @@ DEFAULT_ROM = "roms/Knuckles' Chaotix (JU) (32X) [!].32x"
 OMITTED = re.compile(rb"\[Omitted:\s*(\d+)\]")
 TAGS = (b"CPU", b"SHM", b"SHS", b"Z80")
 
-# The 68000 is 7.67 MHz over 60 frames and the SH-2s are clocked at exactly
-# three times it. Mirrors CYCLES_PER_FRAME in src/mars_main.c.
-CYCLES_PER_FRAME = 127840
+# The Genesis master clock over seven, across a frame of 262 lines of 3,420
+# master clocks — 59.9227 Hz, not 60 — and the SH-2s clocked at exactly three
+# times it. Mirrors CYCLES_PER_FRAME in src/mars_main.c, which carries the
+# derivation and what it was measured against.
+CYCLES_PER_FRAME = 128006
 SH2_MULTIPLIER = 3
 
 

@@ -20,7 +20,7 @@ from disasm68k import analyse                    # noqa: E402
 from recomp.m68kc import Codegen, fname          # noqa: E402
 
 DEFAULT_ROM = "roms/Knuckles' Chaotix (JU) (32X) [!].32x"
-CYCLES = "build/m68k_cycles.bin"
+CYCLES_PATH = "build/m68k_cycles.bin"
 
 
 def read_cycles(path):
@@ -43,7 +43,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--rom", default=DEFAULT_ROM)
     p.add_argument("--out", default="build/m68k_recomp.c")
-    p.add_argument("--cycles", default=CYCLES)
+    p.add_argument("--cycles", default=CYCLES_PATH)
     p.add_argument("--build", action="store_true")
     args = p.parse_args()
 

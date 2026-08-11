@@ -1716,6 +1716,93 @@ The five diff gates: the four interpreted ones are untouched at 20,077 and
 more rows, which is what a correct clock changing where the CPUs meet looks
 like at this granularity.
 
+### The slave's clock: two cycles in 1,047, and a frame that is not 60 Hz
+
+The PWM timer is the only clock the slave has, and calibrating `refpoll.py`
+against it turned up a 0.32% disagreement that nobody was looking for: the
+reference ticks **367.14** times a frame, dead steady over sixty of them, and we
+tick 365.96. Two causes, and the interesting part is that neither needed a clock
+to find, because **a loop that closes on itself is one**. Its lap costs exactly
+what its instructions cost — the branch is taken every lap, which is the entry
+Musashi's table already holds — so counting laps against PWM interrupts says
+what an interrupt is worth without anything being assumed. `--period` does that:
+
+| loop | a lap | instructions | ticks | SH-2 cycles a tick |
+|---|---|---|---|---|
+| `8834C0` poll of work RAM | 2 for 22 | 415,630 | 13,116 | **1045.7** |
+| `880B1C` long-word fill, `dbf` | 5 for 58 | 20,481 | 682 | **1045.1** |
+| `881948` poll of a 32X register | 2 for 26 | 11,137 | 415 | **1046.6** |
+
+Three quite different shapes agreeing on **1,046**, against the 1,048 we
+computed. The period is `(cycle - 1) * tm` and we had `(cycle + 1) * tm` — two
+cycles in 1,047, 0.19%. What settles it beyond the measurement is the register
+itself: the game writes **0x417, which is 1,047, and 23,011,360 / 22,000 + 1 is
+1,047 exactly** — the documented formula, for a driver aiming at a round 22 kHz.
+Read our way it would have been aiming at 21,957.
+
+One thing caught in passing, because it moved the `dbf` loop 3.4% off the other
+two: a `dbcc`'s table entry is 12, which is *neither* of the prices it goes for.
+Looping costs 10 and expiring 14. A `bcc`'s entry is its taken cost and needs no
+adjustment; a `dbcc`'s needs one on every edge.
+
+**The other 0.13% is the frame.** Turn the measured tick around — 348.60 68000
+cycles apiece, 367.14 to a frame — and the reference's frame is **127,985
+cycles**. NTSC says 128,005.7: the master clock is 53,693,175 Hz, a line is 3,420
+of them and a frame 262 lines, so the 68000 gets 896,040/7. The two agree to
+0.016%. Ours is `7.67 MHz / 60` = 127,840, and the error is almost all of it in
+the **60** — NTSC runs at 59.9227 Hz.
+
+Corrected, the PWM tick lands on 367.13 against the reference's 367.14 — and the
+six loops of the section above, which came out **uniformly 0.2% under** what the
+manual charges them, now read exactly: 11.00 for the poll of work RAM against
+11.00 charged, 13.00 for the poll of a 32X register against 13.00, 11.61 against
+11.60 for the fill. A systematic offset on six unrelated loops at once was a
+clock and not six coincidences, and it was this one. It also moves the master to
+**1.633** cycles an instruction from 1.631, which `sh2_cpi1000` still carries.
+
+### The slave diff was reading its own aligner, not the slave
+
+Both corrections made the slave diff *worse* — 1,037 blocks agreed, then 985 with
+the period, then 900 with the frame — while the 68000's whole extract went the
+other way, 449 divergences down to 413. One instrument disagreeing with three
+measurements and a documented formula is a reason to distrust the instrument,
+and this one had a known fault: it is the diff held to 2,000 reference blocks
+because "the aligner cannot walk two streams of such different densities".
+
+It could not, and the reason is one number. `holds()` accepts an alignment by
+checking the next few reference lines turn up in order, each within **64** of the
+last — and on the slave, whose stream is 93% delay loop, the reference collapses
+each run into one line where we print every step of ours, so the next line sits
+*thousands* of our records away. Every correct alignment across a collapsed run
+was being rejected. Adding the run's own length to that reach is the whole fix:
+
+```python
+nxt = find(k + d, p + 1, exact, HOLD_REACH + ref[k + d].gap)
+```
+
+It stays a bound and never becomes a prediction, which is the distinction the
+tool's own note insists on — `find` still takes the earliest match at or after
+the current position, so a loop we spun fewer times is matched early. What
+cannot work, and is still not done, is jumping N steps and looking there.
+
+Every diff improved, including the ones that had nothing to do with the slave:
+
+| | before today | after the clocks | after the aligner |
+|---|---|---|---|
+| 68000 boot | 20,077 / 20 | 20,076 / 23 | **20,083 / 21** |
+| 68000 whole extract | 52,386 / 449 | 52,390 / 413 | **52,397 / 411** |
+| master | 194 / 19 | 193 / 20 | **197 / 18** |
+| slave, 2,000 blocks | 1,037 / 546 | 900 / 567 | **1,269 / 658** |
+| recompiled 68000 | 8,736 / 400 | 8,736 / 400 | **8,741 / 397** |
+
+And the bound goes with it. The slave walks the whole extract at **20,000
+reference blocks**, ten times what it was, with **17,885 agreeing** — and the
+agreement *rate* climbs with depth, 63% at 2,000, 74% at 4,000, 84% at 8,000,
+89% at 20,000, because the early boot is the noisy part and the sound driver's
+steady work is not. 40,000 is where it stops, and on our side: the walk runs out
+of our 2,000,000 traced lines two thirds of the way through. Raising both is the
+next lift and costs trace size.
+
 ### Next
 
 **1. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
@@ -1725,12 +1812,11 @@ machine's own clock at 365.96 to a frame, and its driver is running real code at
 `0xC000012C` on every one of them. What is missing is a YM2612 and PSG core, a
 PWM sink, and somewhere to put the samples.
 
-**2. The slave diff wants its bound lifted.** It is held to 2,000 reference
-blocks because our stream is 93% delay-loop entries where the reference collapses
-each run, and the aligner cannot walk two streams of such different densities.
-Collapsing ours the same way costs the master a quarter of its agreement, so the
-fix is not the tracer: it is an aligner that understands a collapsed run as a
-*range* of positions rather than one.
+**2. The slave diff's bound, again.** It is 20,000 reference blocks now rather
+than 2,000, and what stops it going further is no longer the aligner but our own
+trace: at 40,000 the walk runs out of its 2,000,000 lines two thirds of the way
+in. Raising `--trace-sh2-lines` and the bound together is the next lift, and it
+costs trace size rather than cleverness.
 
 ### Not worth doing, and measured rather than assumed
 
@@ -1759,6 +1845,10 @@ does not spend the same day finding the same thing.
   nothing, silently: `m68k_run` assigns the fuel its budget on the way in, so a
   cycle spent between hand-overs is overwritten before it is read. The account
   that survives a hand-over is `cpu_credit`.
+* **Reading a `dbcc`'s cycle-table entry as what it costs.** It is 12, and a
+  `dbcc` goes for 10 when it loops or 14 when it expires — never 12 unless the
+  condition was true. A `bcc`'s entry *is* its taken cost, which is what makes
+  the trap look safe. It put a `dbf` loop 3.4% off two polls that agreed.
 * **Finer hand-overs.** 32 and 64 sub-slices to the line are both worse than 16.
 * **Reordering the CPUs inside a hand-over.** It brackets the answer and hits
   neither side.
@@ -1791,13 +1881,24 @@ does not spend the same day finding the same thing.
   Musashi's table at build time, and the fuel is cycles. The two builds now
   retire the same instructions to 0.011% over sixty frames where the boot phase
   was 18% apart.
-* **The slave's PWM tick is 0.34% slow.** Ours is 365.96 interrupts to a frame,
-  from the period the slave itself programs; the reference runs **367.2**, dead
-  steady across sixty frames — 1,044.4 SH-2 cycles a tick against our 1,048.
-  That timer is the whole of the slave's clock, and the slave is the worst of
-  the three diffs. Measured today as a by-product of `tools/refpoll.py` needing
-  a clock; not yet chased to its cause, which is either the SH-2 clock constant
-  or the period arithmetic in `mars_pwm_period`.
+* ~~**The slave's PWM tick is 0.34% slow.**~~ *Chased, and it was two things.*
+  The period is `(cycle - 1) * tm`, not `(cycle + 1)` — 1,046 SH-2 cycles rather
+  than 1,048, measured off three closed loops and confirmed by the register the
+  game writes being exactly what the documented formula gives for 22 kHz. The
+  rest is the frame below.
+* ~~**The frame is 60 Hz where NTSC is 59.9227.**~~ *Settled.* 128,006 now, the
+  true 896,040/7, confirmed against the reference's own clock at 127,985.
+* **The 68000's steady state is 11,634 a frame against the reference's 11,611.**
+  Correcting the frame unmasked it: our mix averages 11.00 cycles an instruction
+  where the reference's averages 11.02, so a frame 0.13% short was hiding a 0.2%
+  difference in *what is executed*. The likely cause is downstream — our master
+  runs 229,037 instructions a frame against the reference's 235,076, so our
+  68000 waits longer in its cheap 11-cycle poll and less of its frame is real
+  work. Chase the SH-2 rates rather than the 68000.
+* **`sh2_cpi1000` was measured against the short frame.** 1.631 and 1.007 come
+  from `tools/refrate.py` dividing a 127,840-cycle frame; both are 0.13% low
+  now that the frame is right. Small against the 2.6% and 3.6% the two SH-2s are
+  already adrift, but it is the same class of error and wants re-measuring.
 * **Interrupt phase.** The CPUs interleave and both timers are on their own
   clocks now — the PWM counts SH-2 cycles against its period rather than landing
   on line boundaries. What is left is quantisation: a hand-over is a sixteenth

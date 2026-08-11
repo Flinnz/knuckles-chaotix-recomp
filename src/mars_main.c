@@ -28,7 +28,17 @@
 #define W 320
 #define H 224
 #define SCALE 2
-#define CYCLES_PER_FRAME 127840      /* 7.67 MHz / 60 */
+/* NTSC, and both halves of it measured rather than rounded.
+ *
+ * It was `7.67 MHz / 60` = 127,840, and neither number is right: the Genesis
+ * master clock is 53,693,175 Hz and the 68000 gets a seventh of it, and a frame
+ * is 262 lines of 3,420 master clocks, which is 59.9227 Hz and not 60. So the
+ * frame is 896,040/7 = 128,005.7 cycles. 0.13%, almost all of it in the 60.
+ *
+ * The reference agrees to 0.016%: `tools/refpoll.py --period` prices its PWM
+ * tick at 348.60 68000 cycles off three closed loops, it ticks 367.14 times
+ * between two vertical interrupts, and 348.60 x 367.14 is 127,985. */
+#define CYCLES_PER_FRAME 128006
 #define LINES_PER_FRAME 262          /* NTSC */
 #define CYCLES_PER_LINE (CYCLES_PER_FRAME / LINES_PER_FRAME)
 #define VBLANK_LINE 224              /* where the reference's markers put it */
