@@ -58,6 +58,8 @@ python3 tools/validate_m68k.py                # 68000 decoder vs m68k-elf-objdum
 
 python3 tools/recompile.py --build            # SH-2 -> C, then compile it
 python3 tools/test_recomp.py                  # run recompiled SH-2, check answers
+python3 tools/recompile68k.py --build         # 68000 -> C, then compile it
+python3 tools/test_recomp68k.py               # recompiled 68000 vs Musashi
 ```
 
 ## How correctness is established
@@ -104,6 +106,9 @@ picture from each half of the machine.
   and every instruction the gate traces execute is inside it
 - SH-2 **recompiler** running: all functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output
+- 68000 **recompiler** translating: all 561 functions to C, clean under `-Wall`,
+  with 38/38 semantics cases agreeing with Musashi on values *and* condition
+  codes. Not yet swapped in for the interpreter
 - **Runtime** runs both SH-2s and the 68000: Musashi interprets the 68000, the
   recompiled code runs the master and slave SH-2s, output goes to an SDL window
   and the keyboard drives a six-button pad
@@ -113,7 +118,7 @@ picture from each half of the machine.
   the same way
 - Next: interleave the two CPUs — the SH-2 currently runs inside the 68000's
   register writes, so every rendezvous answers on the first poll, which is 380
-  of the 452 differences left
+  of the 452 differences left — and run the game on the recompiled 68000
 
 See [docs/architecture.md](docs/architecture.md) for findings and
 [docs/roadmap.md](docs/roadmap.md) for the plan.

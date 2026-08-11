@@ -794,6 +794,52 @@ is 23.5 million instructions and 4,071 distinct addresses against the extract's
 Recovering the second needs a slot rule weak enough to be worth doubting, which
 is a bad trade against a round-trip that is currently exact.
 
+### M6a — the 68000 → C recompiler
+
+The front-end work above was for this. All 561 discovered functions translate,
+the result compiles clean for arm64 under `-Wall`, and 38 semantics cases agree
+with an independent implementation on both the value and the condition codes.
+
+**The decoder hands out structure now, not only text.** It was built to be
+diffed against objdump, so an effective address came out as `%a0@(8,%d1:w)` and
+nothing else. `Insn.eas` carries the same parse in machine terms — mode,
+register, displacement, index, resolved address, immediate — produced by the one
+function that already does the parsing, so the two cannot drift. Half the
+two-operand encodings name one side in the opcode word rather than through an
+EA, and those are recorded too, in the right position. The text is untouched:
+45,496 opcodes still agree with objdump exactly and both cartridges still
+reassemble byte for byte.
+
+**Nothing nests, for a different reason than on the SH-2.** There the flat
+trampoline was forced by handlers that branch away instead of returning. Here it
+is forced by the 68000 keeping its return address in memory: `pea`/`rts`, and a
+`jsr` through a table entry, are ordinary things this engine does and none of
+them fit a C call. Every transfer returns its destination and `m68k_run` loops.
+
+That needs a call's return address to be a block of its own, which discovery was
+not making — the first recompiled test ran exactly one case and stopped, because
+the address `rts` handed back had no row in the table. The SH-2 side found the
+same thing when it stopped nesting calls. 6,450 -> 7,943 blocks, listing
+unchanged.
+
+**Musashi is the oracle, one instruction at a time.** The values a case produces
+are easy to write down; V and C are the part a reading of the manual gets wrong.
+So `tests/m68k/arith.s` runs twice over identical memory — once interpreted,
+once recompiled — and each case records its result *and* the condition codes.
+The 38 cover the four add/sub overflow rules, logic leaving X alone, all eight
+shifts and rotates including a zero count and one taken modulo 64, `addx`
+keeping Z only if it was already set, bit ops modulo 32 in a register and 8 in
+memory, `divs` truncation, `movem` both directions with word loads
+sign-extending, and an address register taking a full-width add with no flags.
+
+Seven instructions of the cartridge are outside the model and **none is ever
+executed**: three `sbcd`, two `movep`, and two words at `0x0000C0` — which is
+the adapter's BIOS helper, where the cartridge image holds a vector pointer
+rather than the code that runs there, and `src/gen68k.c` assembles the real
+thing. Neither the 2,000-frame trace nor the reference reaches any of them.
+
+The runtime still interprets; swapping this in is next.
+
 ### Next
 
 **1. Interleave the two CPUs.** 380 of the 452 remaining divergences are the one
@@ -814,14 +860,11 @@ give it directly, being instruction traces rather than memory dumps; it needs a
 real emulator run, or replaying the reference's frame buffer writes out of the
 pre-reset segments to reconstruct what the real machine had on screen.
 
-**4. The 68000 recompiler**, which is what the front-end work above is for. The
-coverage check is the precondition it was missing: a recompiler is only as
-complete as discovery, and until this week nothing could say whether discovery
-had the code the machine runs. It can now, and the answer on both traces is yes.
-What it cannot say is anything about code no run has reached — 2.8% of the
-cartridge is found and the rest is compressed art and code behind data-driven
-tables — so the honest order is to recompile what is discovered, run it against
-the same oracle, and let the missing-target counter name the next gap.
+**4. Swap the recompiled 68000 in for Musashi.** The translator exists and its
+semantics are checked (below); what has not been done is running the game on it.
+That needs the interrupt path — `m68k_run` has no equivalent of
+`m68k_set_irq` — and it needs an answer for an address with no recompiled block,
+which is currently "stop and report".
 
 ### Carried debts
 
