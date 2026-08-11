@@ -722,7 +722,14 @@ class Codegen:
         lines += ["    default: return entry;", "    }"]
 
         for b in blocks:
-            lines.append(f"{lname(b.start)}:")
+            # The same yield the SH-2 blocks carry, and needed for the same
+            # reason: a poll loop inside one function is a `goto` here and never
+            # reaches the trampoline, so `m68k_run`'s budget can never stop it.
+            # It only ever terminated because the SH-2 answered inside the
+            # 68000's own register write; once the two CPUs really interleave,
+            # 0x881868 waits for the master's 0xFFFF and spins for good.
+            lines.append(f"{lname(b.start)}: M68K_BLOCK(c, 0x{b.start:08X}u, "
+                         f"{len(b.insns)});")
             for ins in b.insns:
                 if ins.kind == INVALID:
                     self.notes.append((ins.addr, "invalid opcode"))

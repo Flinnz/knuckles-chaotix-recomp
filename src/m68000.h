@@ -33,6 +33,7 @@ typedef struct {
     uint8_t  n, z, v, c, x;  /* condition codes */
     uint8_t  s, t;           /* supervisor, trace */
     uint8_t  imask;          /* interrupt priority mask */
+    uint32_t pc;             /* where a slice that ran out of fuel resumes */
 } M68K;
 
 unsigned int m68k_read_memory_8(unsigned int a);
@@ -137,6 +138,26 @@ static inline void m68k_f_subx(M68K *c, uint32_t s, uint32_t d, uint32_t r, int 
 typedef struct { uint32_t addr; uint32_t (*fn)(M68K *, uint32_t); } M68KEntry;
 extern const M68KEntry m68k_functions[];
 extern const unsigned m68k_function_count;
+
+/* --- slicing --------------------------------------------------------------
+ *
+ * The same mechanism as the SH-2's, and needed for the same reason: an
+ * intra-function loop is a `goto` in the generated C and never reaches the
+ * trampoline, so the budget below cannot bound it. The engine's rendezvous with
+ * the master at 0x881868 is exactly that shape — it waits for the SH-2 to post
+ * 0xFFFF — and it only ever terminated while the SH-2 answered inside the
+ * 68000's own register write.
+ *
+ * A block that finds the fuel spent hands its own address back, so the run
+ * resumes there. M68K_YIELD is 1 because a 68000 instruction address is always
+ * even, and 0 is a legitimate address here, unlike on the SH-2 side.
+ */
+#define M68K_YIELD 1u
+extern int32_t m68k_fuel;
+#define M68K_BLOCK(c, a, n) do {                                \
+    if (m68k_fuel <= 0) { (c)->pc = (a); return M68K_YIELD; }   \
+    m68k_fuel -= (n);                                           \
+} while (0)
 
 /* Run from `addr` for at most `budget` transfers and return where it stopped.
  * `*known` comes back 0 when it stopped because there is no recompiled block

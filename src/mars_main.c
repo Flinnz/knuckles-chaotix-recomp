@@ -34,6 +34,36 @@
 #define VBLANK_LINE 224              /* where the reference's markers put it */
 #define VBLANK_ACK_CYCLES 2000
 
+/* The 32X's SH-2s are clocked at 23.01 MHz against the 68000's 7.67 MHz —
+ * exactly three times, which is where the ratio comes from rather than a number
+ * chosen to look right.
+ *
+ * The fuel is spent in instructions, so the clock ratio has to be divided by
+ * the cycles an instruction actually costs. One per cycle is the SH-2's best
+ * case and too generous in practice: the reference settles it directly, because
+ * the slave's idle loop is pure waiting and its length is therefore a
+ * measurement. It burns 2,826 instructions there where a one-per-cycle budget
+ * ran 5,256 — 1.86 cycles an instruction, which is what a loop of register
+ * reads and a taken branch costs on this core. */
+#define SH2_CYCLES_PER_INSN 2
+#define SH2_FUEL_PER_LINE (CYCLES_PER_LINE * 3 / SH2_CYCLES_PER_INSN)
+
+/* How often the CPUs change hands inside a scanline.
+ *
+ * A whole scanline is far too coarse to be the unit, and the boot says why: the
+ * 68000 zeroes comm 0 at 0x880A00, waits for the master's 0xFFFF, and posts its
+ * first command at 0x88189C — about sixteen instructions, all inside one
+ * scanline's 487 cycles. The master polls that register every six instructions
+ * and on hardware samples it some fifty times in that window; run a scanline at
+ * a time and it never sees the window at all, so it waits for a zero that has
+ * already been and gone.
+ *
+ * 16 puts a hand-over every ~30 cycles, which is a few 68000 instructions —
+ * fine enough for every rendezvous this game makes, and the run is still
+ * dominated by the work rather than the switching.
+ */
+#define SUBSLICES_PER_LINE 16
+
 /* --- which 68000 runs ------------------------------------------------------
  *
  * Musashi by default, the recompiled C under `--recomp`. Both drive the same
@@ -41,14 +71,18 @@
  * the instructions, and every 32X rendezvous, DMA and interrupt the 68000
  * triggers through a register write happens identically either way.
  *
- * The interpreter is paid in cycles and the recompiled code is not, so a slice
- * is a count of control transfers instead. `--recomp-slice` sets it; the
- * default is the ratio the boot lands on, and it only has to be close, because
- * what the frame loop actually needs is that the vertical interrupt arrives at
- * line 224 and that the SH-2 rendezvous fall inside the same frame they do now.
+ * The interpreter is paid in cycles and the recompiled code in instructions, so
+ * a slice is converted by what an instruction costs. `--recomp-cpi` sets it; 8
+ * is about the average for this engine's mix on a 68000, where the cheapest
+ * register-to-register forms are 4 cycles and a memory operand is 8 to 12.
+ *
+ * It used to be a count of control *transfers*, which could not bound anything:
+ * a poll loop inside one recompiled function is a `goto` and never returns to
+ * the trampoline. That was invisible while the SH-2 answered inside the 68000's
+ * own register write, and became a hang the moment the two CPUs interleaved.
  */
 static int use_recomp;
-static unsigned recomp_slice = 24;
+static unsigned recomp_cpi = 8;
 static M68K rcpu;
 static uint32_t rc_pc;
 static uint32_t rc_missing;      /* transfers to an address with no block */
@@ -111,7 +145,7 @@ static void from_musashi(void) {
  */
 static void cpu_run(unsigned cycles) {
     if (!use_recomp) { m68k_execute((int)cycles); return; }
-    unsigned slice = cycles * recomp_slice / CYCLES_PER_LINE;
+    unsigned slice = cycles / recomp_cpi;
     int known = 1;
     rc_pc = m68k_run(&rcpu, rc_pc, slice ? slice : 1, &known);
     if (known) return;
@@ -321,8 +355,8 @@ int main(int argc, char **argv) {
             hold = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--recomp"))
             use_recomp = 1;
-        else if (!strcmp(argv[i], "--recomp-slice") && i + 1 < argc)
-            recomp_slice = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--recomp-cpi") && i + 1 < argc)
+            recomp_cpi = (unsigned)strtoul(argv[++i], NULL, 0);
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -343,25 +377,21 @@ int main(int argc, char **argv) {
     SH2 *sh2 = &mars_cpu[0], *slave = &mars_cpu[1];
     handoff(sh2, 0);
     handoff(slave, 1);
-    sh2->pc = start;
+    if (start != MASTER_RESET)
+        printf("  ! header master start 0x%08X, entering at 0x%08X\n",
+               start, MASTER_RESET);
 
     /* Opened before either SH-2 runs: the boot is the part with an oracle. */
     if (tracesh2 && !sh2_trace_open(tracesh2, tracesh2_lines)) return 1;
 
-    /* Master init. It ends by waiting for a command, which the watchdog turns
-     * into an unwind rather than a hang. */
-    printf("SH-2 slave init  (sp=0x%08X) ...\n", slave->r[15]);
-    mars_reset_budget(); mars_trace_reset();
-    if (setjmp(mars_bail) == 0) sh2_call(slave, SLAVE_RESET);
-    if (mars.trace) mars_trace_dump("after slave init");
-    printf("SH-2 master init ...\n");
-    mars_reset_budget(); mars_trace_reset();
-    if (setjmp(mars_bail) == 0) sh2_call(sh2, MASTER_RESET);
-    if (mars.trace) mars_trace_dump("after master init");
-    printf("  bitmap mode 0x%04X, fb control 0x%04X\n",
-           mars.bitmap_mode, mars.fbctl);
-    printf("  comm: %04X %04X %04X %04X  (want M_OK / S_OK)\n",
-           mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3]);
+    /* Neither SH-2 starts here. They are held in the adapter's boot ROM — which
+     * the runtime stands in for — and handed to the cartridge when that work is
+     * done, then run from the frame loop like the 68000. They used to be run to
+     * completion before the 68000 existed at all, and the reference shows what
+     * that cost: the engine's own 32X init toggles the frame-select bit while
+     * the master is still working, where ours had already finished. */
+    mars_trace_reset();
+    printf("SH-2s held in BIOS (slave sp=0x%08X)\n", slave->r[15]);
 
     printf("  cartridge checksum 0x%04X, header says 0x%04X%s\n",
            mars_rom_checksum(), be16(&mars.rom[H_CHECKSUM]),
@@ -421,7 +451,26 @@ int main(int argc, char **argv) {
         unsigned pwm = mars_pwm_per_frame(), acc = 0;
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
-            cpu_run(CYCLES_PER_LINE);
+            /* The three CPUs take turns through the line. A rendezvous costs
+             * the waiting one a hand-over or two rather than being answered
+             * inside its own register write, which is the whole point: the
+             * reference's master is busy through 22 of its 102 vblanks, and the
+             * engine skips work in those. */
+            for (unsigned s = 0; s < SUBSLICES_PER_LINE; s++) {
+                cpu_run(CYCLES_PER_LINE / SUBSLICES_PER_LINE);
+                sh2_run(&mars_cpu[0], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
+                sh2_run(&mars_cpu[1], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
+            }
+
+            /* The slave's PWM interrupts fall 365 to a frame, so one or two per
+             * line. Each is raised with a slice behind it rather than all of
+             * them at once: the handler masks itself to level 6, so a second
+             * raised before the first had any time to run is simply declined. */
+            for (acc += pwm; acc >= LINES_PER_FRAME; acc -= LINES_PER_FRAME) {
+                mars_deliver_int(1, MARS_INT_PWM);
+                mars.pwm_ints++;
+                sh2_run(&mars_cpu[1], SH2_FUEL_PER_LINE / SUBSLICES_PER_LINE);
+            }
             if (line == VBLANK_LINE) {
                 /* The status flag goes up here and comes down on the
                  * acknowledge cycle, in gen68k_int_ack(). While the 68000 is
@@ -432,10 +481,6 @@ int main(int argc, char **argv) {
                 cpu_irq(6);
                 cpu_run(VBLANK_ACK_CYCLES);
                 cpu_irq(0);
-            }
-            for (acc += pwm; acc >= LINES_PER_FRAME; acc -= LINES_PER_FRAME) {
-                mars_deliver_int(1, MARS_INT_PWM);
-                mars.pwm_ints++;
             }
         }
 
@@ -549,17 +594,16 @@ int main(int argc, char **argv) {
     printf("           regs:");
     for (unsigned i = 0; i < 24; i++) printf(" %02X", gen.vdpreg[i]);
     printf("\n");
-    printf("  unmapped: 68k r=%u w=%u, sh2=%u; dispatch depth bails %u\n",
-           gen.unknown_r, gen.unknown_w, mars.unknown, mars.deep);
+    printf("  unmapped: 68k r=%u w=%u, sh2=%u\n",
+           gen.unknown_r, gen.unknown_w, mars.unknown);
+    printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",
+           mars_cpu[0].pc, mars_cpu[1].pc);
     if (use_recomp) {
         printf("  recompiled 68000: %u handover(s) to the interpreter",
                rc_missing);
         if (rc_missing) printf(", first 0x%06X", rc_missing_at);
         printf("\n");
     }
-    printf("  SH-2 unwound: %u idle, %u out of budget, %u too deep\n",
-           mars.bail[MARS_BAIL_IDLE], mars.bail[MARS_BAIL_BUDGET],
-           mars.bail[MARS_BAIL_DEPTH]);
 
     if (headless_frames) {
         render(px);

@@ -41,7 +41,14 @@ static int lookup(uint32_t addr) {
     return -1;
 }
 
+int32_t m68k_fuel;
+
+/* `budget` is instructions now, not transfers, and it is spent inside the
+ * blocks rather than counted here — see M68K_BLOCK in m68000.h. Counting
+ * transfers could not bound a poll loop at all, because an intra-function loop
+ * is a `goto` in the generated C and never comes back here. */
 uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known) {
+    m68k_fuel = budget ? (int32_t)budget : INT32_MAX;
     for (;;) {
         uint32_t off = canon68k(addr);
         int i = lookup(off);
@@ -50,9 +57,9 @@ uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known) {
             return addr;
         }
         addr = m68k_functions[i].fn(c, off);
-        if (budget && --budget == 0) {
+        if (addr == M68K_YIELD) {
             if (known) *known = 1;
-            return addr;
+            return c->pc;
         }
     }
 }

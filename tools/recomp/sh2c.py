@@ -347,13 +347,27 @@ class Codegen:
             return out
 
         if ins.kind == RET:
-            out += ds_stmts
             if ins.mnem == "rte":
-                # rte resumes from the stacked PC, not PR; no interrupt is
-                # delivered to recompiled code yet, so this ends the run.
-                out.append("    return 0;")
-            else:
-                out.append("    return c->pr;")
+                # An SH-2 exception pushes SR then PC, and `rte` pops them back.
+                # The reference shows both halves: the slave's r15 goes
+                # 0xC0000800 -> 0xC00007F8 on taking the PWM interrupt, and the
+                # rte at 0x06000216 puts it back with SR restored to 0x21.
+                #
+                # The pop happens as part of the instruction, before the delay
+                # slot runs — which matters because the delay slot may touch
+                # r15 — so it is captured first, exactly as for an indirect
+                # jump through a register.
+                out.append("    {")
+                out.append("        uint32_t _pc = sh2_r32(c, c->r[15]);")
+                out.append("        uint32_t _sr = sh2_r32(c, c->r[15] + 4);")
+                out.append("        c->r[15] += 8;")
+                out += ["    " + s for s in ds_stmts]
+                out.append("        sh2_set_sr(c, _sr);")
+                out.append("        return _pc;")
+                out.append("    }")
+                return out
+            out += ds_stmts
+            out.append("    return c->pr;")
             return out
 
         out.append(f"    /* UNHANDLED transfer {ins.mnem} */")
@@ -382,7 +396,8 @@ class Codegen:
             # instruction, so their stream filtered to these addresses is
             # exactly the sequence this emits. Compiled out to a not-taken
             # branch when tracing is off — see SH2_BLOCK in src/sh2.h.
-            lines.append(f"{lname(b.start)}: SH2_BLOCK(c, 0x{b.start:08X}u);")
+            lines.append(f"{lname(b.start)}: SH2_BLOCK(c, 0x{b.start:08X}u, "
+                         f"{len(b.insns)});")
             i = 0
             closed = False       # did an unconditional transfer end this block?
             while i < len(b.insns):

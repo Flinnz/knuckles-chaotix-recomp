@@ -41,6 +41,32 @@ void     sh2_w32(SH2 *c, uint32_t a, uint32_t v);
 void     sh2_call(SH2 *c, uint32_t addr);
 void     sh2_unimplemented(SH2 *c, uint32_t addr, const char *what);
 
+/* --- slicing ------------------------------------------------------------
+ *
+ * The two CPUs have to interleave, which means an SH-2 must be suspendable
+ * part-way through whatever it is doing. The trampoline alone cannot do it: a
+ * poll loop inside one function is a `goto` in the generated C and never comes
+ * back to the trampoline at all, which is why this used to need a watchdog that
+ * unwound the whole run.
+ *
+ * So the suspension point is the basic block, the one boundary every path
+ * crosses. `sh2_fuel` is instructions left in this slice; a block that finds it
+ * spent parks the resume address in `c->pc` and returns SH2_YIELD. It is
+ * checked before it is spent so that a slice always makes progress, however
+ * little fuel it was given.
+ *
+ * SH2_YIELD is 1 because an SH-2 instruction address is always even, so it can
+ * never collide with a real transfer target, and 0 already means "returned".
+ */
+#define SH2_YIELD 1u
+extern int32_t sh2_fuel;
+
+/* Run one slice, resuming from `c->pc`; returns the instructions it got
+ * through. A CPU parked on a poll simply spends the whole slice there, which is
+ * what the hardware does too — the unwinding watchdog this replaces existed
+ * only because there was nothing else to give the other CPU a turn. */
+unsigned sh2_run(SH2 *c, int32_t fuel);
+
 /* Block-entry trace, for `tools/diffsh2.py`.
  *
  * The generated code calls this from every basic block label, which is the one
@@ -53,7 +79,14 @@ void     sh2_unimplemented(SH2 *c, uint32_t addr, const char *what);
  * in mem32x.c is a different thing and stays as it was. */
 extern int sh2_trace;
 void     sh2_block(SH2 *c, uint32_t addr);
-#define SH2_BLOCK(c, a) do { if (sh2_trace) sh2_block((c), (a)); } while (0)
+
+/* `n` is the block's instruction count, which the emitter knows statically, so
+ * the fuel is spent in instructions without counting any at run time. */
+#define SH2_BLOCK(c, a, n) do {                                 \
+    if (sh2_trace) sh2_block((c), (a));                         \
+    if (sh2_fuel <= 0) { (c)->pc = (a); return SH2_YIELD; }     \
+    sh2_fuel -= (n);                                            \
+} while (0)
 
 /* --- status register packing ------------------------------------------- */
 static inline uint32_t sh2_get_sr(const SH2 *c) {

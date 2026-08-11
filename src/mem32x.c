@@ -12,8 +12,6 @@
 
 Mars mars;
 SH2 mars_cpu[2];
-jmp_buf mars_bail;
-static uint32_t idle_reads, budget;
 /* Which SH-2 is executing, so that a register write can tell which one did it.
  * Only the interrupt-clear registers need this; everything else in the 32X
  * register block is shared between the two by design. */
@@ -26,30 +24,17 @@ static inline uint32_t canon(uint32_t a) {
     return a < 0x40000000u ? (a & 0x1FFFFFFFu) : a;
 }
 
-/* Every SH-2 memory access ticks this. Hooking only the VDP status register
- * was not enough: the slave's dispatch loop polls a comm byte and never touches
- * the VDP, so it spun forever in native code with nothing to unwind it. */
-void mars_tick_budget(void) {
-    if (++budget > 20000000u) longjmp(mars_bail, MARS_BAIL_BUDGET);
-}
-
-void mars_reset_budget(void) { budget = 0; idle_reads = 0; }
-
-/* Both SH-2s park on a register poll that only the other CPU can end, and the
- * other CPU cannot run while this one does — so a poll that has come back zero
- * a thousand times running will never come back anything else. Unwinding is how
- * the runtime says "this one is idle now": the master waits for a command in
- * comm 0, the slave for its own command byte at 0x20004005, and both are then
- * driven by whatever the 68000 does next.
+/* There were two watchdogs here: a budget that unwound after 20 million memory
+ * accesses, and an idle-poll bound that unwound after 64 reads of a register
+ * only the other CPU could change. Both existed for one reason — an SH-2 ran to
+ * completion, so a CPU waiting on the other could only be stopped by abandoning
+ * its call outright.
  *
- * The bound only has to be past any debounce the code does, which is two reads.
- * It used to be 200,000, which cost two million block entries of nothing every
- * time either CPU went idle. */
-#define IDLE_POLLS 64
-static void idle_poll(uint32_t v) {
-    if (v == 0 && ++idle_reads > IDLE_POLLS) longjmp(mars_bail, MARS_BAIL_IDLE);
-    if (v) idle_reads = 0;
-}
+ * Slicing removes the premise rather than tuning the bound. A CPU parked on a
+ * poll now spends its slice polling and yields at a block boundary with its
+ * position intact, which is what the hardware does; the other CPU then runs and
+ * the poll ends on its own. See SH2_BLOCK in src/sh2.h.
+ */
 
 /* Set by the dispatch loop below. An unmapped access is nearly always a pointer
  * that should have been filled in, and the function it happened in is what says
@@ -137,8 +122,8 @@ static void dma_drain(void) {
         uint32_t dar = oc32(DMAC_DAR0);
         uint16_t w = mars.fifo[0];
         /* Written through `resolve` rather than sh2_w16: this runs inside a
-         * 68000 register write, where the budget watchdog's longjmp would
-         * unwind straight out of the interpreter. */
+         * 68000 register write, with no SH-2 executing, and sh2_w16 wants the
+         * CPU whose address space it is. */
         uint8_t *p = resolve(canon(dar), 2);
         if (!p) { trap("dma", dar); return; }
         p[0] = (uint8_t)(w >> 8); p[1] = (uint8_t)w;
@@ -205,6 +190,12 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
              * been wiped by the zero the dispatch loop writes on entry; the
              * 68000 now drives the SH-2 at the moment it posts, so there is
              * nothing left to paper over. */
+            /* The master zeroing this is the acknowledgement the 68000 waits
+             * for, so it is the one honest count of commands actually run —
+             * `serviced` used to be incremented by the 68000's own post, which
+             * only measured that a command had been asked for. */
+            if (!v && mars.comm[0] && mars_running == &mars_cpu[0])
+                mars.serviced++;
             mars.comm[0] = (uint16_t)v;
             return 1;
         default:
@@ -240,13 +231,7 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         switch (a & 0xFE) {
         case 0x00: *out = mars.adapter; return 1;
         case 0x02: *out = mars.intctl; return 1;
-        case 0x04:
-            *out = mars.bank;
-            /* The slave's own command byte lives in the low half and it polls
-             * it forever; the master reads the same register as a bank select
-             * and must not be unwound for it. */
-            if (mars_running == &mars_cpu[1]) idle_poll(*out & 0xFF);
-            return 1;
+        case 0x04: *out = mars.bank; return 1;
         case 0x06: *out = mars.dreq_ctl; return 1;
         case 0x10: *out = mars.dreq_len; return 1;
         case 0x30: *out = mars.pwm_ctl; return 1;
@@ -267,8 +252,6 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         default:
             if ((a & 0xFE) >= 0x20 && (a & 0xFE) < 0x30) {
                 *out = mars.comm[((a & 0xFE) - 0x20) / 2];
-                /* Waiting on a command the 68000 cannot send while we run. */
-                if ((a & 0xFE) == 0x20) idle_poll(*out);
                 return 1;
             }
             *out = 0; return 1;
@@ -327,7 +310,6 @@ static int is_purge(uint32_t a) {
 }
 
 uint8_t sh2_r8(SH2 *c, uint32_t a) {
-    mars_tick_budget();
     (void)c; a = canon(a);
     uint32_t v;
     if (a < 0x10000u && mars_reg_read_sh2(a, &v)) return (uint8_t)((a & 1) ? v : v >> 8);
@@ -337,7 +319,6 @@ uint8_t sh2_r8(SH2 *c, uint32_t a) {
     return 0;
 }
 uint16_t sh2_r16(SH2 *c, uint32_t a) {
-    mars_tick_budget();
     (void)c; a = canon(a);
     uint32_t v;
     if (a < 0x10000u && mars_reg_read_sh2(a, &v)) return (uint16_t)v;
@@ -347,7 +328,6 @@ uint16_t sh2_r16(SH2 *c, uint32_t a) {
     return 0;
 }
 uint32_t sh2_r32(SH2 *c, uint32_t a) {
-    mars_tick_budget();
     (void)c; a = canon(a);
     if (a < 0x10000u) {
         uint32_t hi, lo;
@@ -360,7 +340,6 @@ uint32_t sh2_r32(SH2 *c, uint32_t a) {
     return 0;
 }
 void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
-    mars_tick_budget();
     (void)c; uint32_t ra = canon(a);
     if (is_purge(ra)) return;
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 1)) return;
@@ -370,7 +349,6 @@ void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
     trap("w8", ra);
 }
 void sh2_w16(SH2 *c, uint32_t a, uint16_t v) {
-    mars_tick_budget();
     (void)c; uint32_t ra = canon(a);
     if (is_purge(ra)) return;
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 2)) return;
@@ -518,70 +496,82 @@ static int lookup(uint32_t addr) {
     return -1;
 }
 
+int32_t sh2_fuel;
+
 void sh2_call(SH2 *c, uint32_t addr) {
     /* Flat: calls, returns and jumps are all just a new address. Nothing
      * recurses, so a handler that branches away instead of returning - which
      * is ordinary SH-2 practice - costs nothing here either. */
     SH2 *outer = mars_running;
     mars_running = c;
-    while (addr) {
+    while (addr && addr != SH2_YIELD) {
         if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
         int i = lookup(addr);
         if (i < 0) {
             if (mars.missing++ < 16)
                 fprintf(stderr, "  [call] no recompiled block at 0x%08X\n", addr);
+            addr = 0;
             break;
         }
         if (mars.trace) {
             trace_enter(addr, 0, 0);
             if (i < TRACE_MAXFN) tcount[i]++;
         }
-        mars_tick_budget();
         trap_fn = addr;
         addr = sh2_functions[i].fn(c, addr);
     }
+    /* A yield has already parked the resume address; anything else ends the
+     * run, and 0 is what says "this CPU has nothing to go back to". */
+    if (addr != SH2_YIELD) c->pc = addr;
     mars_running = outer;
 }
 
-/* Take an external interrupt and run the handler to completion.
+/* One slice. The CPU picks up wherever the last one left it, which for a CPU
+ * parked on a poll is the poll itself — so an idle SH-2 now spends its slice
+ * spinning exactly as the hardware does, instead of being unwound and skipped.
+ */
+unsigned sh2_run(SH2 *c, int32_t fuel) {
+    if (!c->pc) return 0;
+    sh2_fuel = fuel;
+    sh2_call(c, c->pc);
+    return (unsigned)(fuel - sh2_fuel);
+}
+
+/* Take an external interrupt: redirect the CPU at its handler and return.
  *
  * The SH-2 takes external interrupts through auto-vectors 64-71, two levels to
  * a vector, so the command interrupt at level 8 lands on vector 68. Both of
  * this cartridge's tables fill all eight with one dispatcher — 0x060001B0 on
  * the master, 0x060001F8 on the slave — which reads the accepted level back out
- * of SR to pick the real handler. That is why the mask has to be set before
- * entering, and put back afterwards.
+ * of SR to pick the real handler, so the mask has to be set before entry.
  *
- * Nothing is pushed on the SH-2 stack: `rte` returns to the runtime here rather
- * than popping a frame, and the dispatcher balances its own pushes.
+ * SR and PC go on the SH-2's own stack, and `rte` pops them: that is what makes
+ * the interrupt resumable, and it is what the hardware does. The reference
+ * shows both halves — the slave's r15 goes 0xC0000800 -> 0xC00007F8 as it takes
+ * the PWM interrupt with its mask going 2 -> 6, and the rte at 0x06000216 puts
+ * both back. This used to run the handler to completion with nothing pushed,
+ * which worked only because no other CPU could be waiting mid-instruction.
+ *
+ * A masked interrupt is declined, which the old model had no way to express.
  */
 void mars_deliver_int(int slave, unsigned level) {
     SH2 *c = &mars_cpu[slave & 1];
+    if (level <= c->imask) return;
     uint32_t vec = c->vbr + 4u * (64u + ((level + 1u) >> 1));
     const uint8_t *p = resolve(canon(vec), 4);
     if (!p) { trap("vector", vec); return; }
     uint32_t handler = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
                      | ((uint32_t)p[2] << 8) | p[3];
-    if (!handler) return;
+    if (!handler || !c->pc) return;
 
-    uint32_t save = sh2_get_sr(c);
+    SH2 *outer = mars_running;
+    mars_running = c;
+    c->r[15] -= 4; sh2_w32(c, c->r[15], sh2_get_sr(c));
+    c->r[15] -= 4; sh2_w32(c, c->r[15], c->pc);
+    mars_running = outer;
     c->imask = level & 0xF;
-    /* Its own setjmp: this runs inside a 68000 register write, and the
-     * watchdog's unwind must not escape into the interpreter. The frame loop
-     * re-arms the buffer before each dispatch, so borrowing it is safe. */
-    mars_reset_budget();
-    int why = setjmp(mars_bail);
-    if (why == 0) sh2_call(c, handler);
-    else mars.bail[why & 3]++;
-    sh2_set_sr(c, save);
+    c->pc = handler;
 }
-
-/* Run the master's command dispatch loop, entered at its poll rather than at
- * its head: the head writes 0 to comm 0 first, which would wipe the command the
- * 68000 has just put there. From the poll it reads the command, dispatches it,
- * and comes back round to the head — where the 0 it writes is the
- * acknowledgement the 68000 is waiting for. */
-#define MASTER_POLL 0x060008F8u
 
 /* The PWM timer, which is the only clock the slave has.
  *
@@ -604,12 +594,30 @@ unsigned mars_pwm_per_frame(void) {
     return SH2_CLOCK / ((cycle + 1) * tm) / 60;
 }
 
+/* The adapter's boot ROM hands the cartridge its two SH-2s.
+ *
+ * The reference puts this after the 68000 has been running a while: the master
+ * enters 0x060001A0 379,013 log lines past the reset and the slave 0x060001A4
+ * at 379,065, by which point the 68000 has passed both the checksum rendezvous
+ * and the M_OK / S_OK one. Holding them until then is what keeps the master's
+ * dispatch loop from reading the handshake words as if they were a command —
+ * its loop head writes 0 to comm 0 before reading, so once it is running the
+ * register is its own.
+ */
+void mars_bios_handover(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    mars_cpu[0].pc = MARS_MASTER_ENTRY;
+    mars_cpu[1].pc = MARS_SLAVE_ENTRY;
+}
+
+/* A command used to be run here and then, from inside the 68000's register
+ * write, because the master was only reachable that way. It is running on its
+ * own slice now: it is sitting in its dispatch poll, it will read the word the
+ * 68000 has just stored on its next turn, and the 68000 spins meanwhile exactly
+ * as it does on hardware. Nothing to do but count it. */
 void mars_run_command(void) {
-    mars_reset_budget();
-    int why = setjmp(mars_bail);
-    if (why == 0) sh2_call(&mars_cpu[0], MASTER_POLL);
-    else mars.bail[why & 3]++;
-    mars.serviced++;
 }
 
 void sh2_unimplemented(SH2 *c, uint32_t addr, const char *what) {

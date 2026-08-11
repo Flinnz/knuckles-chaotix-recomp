@@ -44,9 +44,17 @@ run: build/mars
 # tools themselves if missing.
 #
 # The master is held to its boot rather than the whole extract. That is where
-# the signal is — 158 of 177 blocks in lock step, against 176 of 23,077 further
-# out, where our trip counts through the poll loops diverge by design — and
-# covering the rest needs a six-million-line trace to compare against.
+# the signal is, and covering the rest needs a six-million-line trace to compare
+# against.
+#
+# The windows and the trace budget are both far larger than they were, and for
+# one reason: the CPUs now wait for each other. A poll that used to be answered
+# inside the 68000's own register write is a real wait, so our 68000 spins
+# 65,270 times at 0x881A06 where it used to spin none, and both SH-2s spend
+# their idle time idling instead of being unwound after 64 reads. The alignment
+# window has to be wider than the longest such wait or a genuine rejoin reads as
+# a fatal divergence, and the trace has to be longer than the idling or the run
+# reads as having stopped short.
 #
 # The 68000 round-trips were left out of this for a while, which was the wrong
 # call the moment its front end started changing: `coverage` widens discovery and
@@ -68,12 +76,13 @@ check: build/mars
 	python3 tools/recompile68k.py --build
 	python3 tools/test_recomp68k.py
 	./build/mars --frames 300 --trace68k build/trace68k.txt \
-	    --trace68k-lines 2000000 --trace-sh2 build/tracesh2.txt >/dev/null
-	python3 tools/diff68k.py --ref-lines 20213 --rows 0 --detail 0
-	python3 tools/diff68k.py --rows 0 --detail 0
-	python3 tools/diffsh2.py --cpu master --window 300000 --ref-blocks 200 \
+	    --trace68k-lines 6000000 --trace-sh2 build/tracesh2.txt \
+	    --trace-sh2-lines 3000000 >/dev/null
+	python3 tools/diff68k.py --ref-lines 20213 --window 400000 --rows 0 --detail 0
+	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
+	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \
 	    --rows 0 --detail 0
-	python3 tools/diffsh2.py --cpu slave  --window 300000 --rows 0 --detail 0
+	python3 tools/diffsh2.py --cpu slave  --window 3000000 --rows 0 --detail 0
 	python3 tools/disasm68k.py coverage
 	@echo "all gates pass"
 

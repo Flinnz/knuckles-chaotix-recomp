@@ -886,33 +886,161 @@ list interpreter at `0x060009A6` 397 — and settles one of them outright.
 instructions. Our own 300-frame run posts exactly one. The asset table being
 barely filled is what this point in the game looks like, not a bug to find.
 
-It also makes the screenshot check reachable without an emulator: 48,699
-frame-buffer writes logged with the register state that produced them is a
-reconstruction of what the real machine had on screen.
+It also makes (3) below reachable without an emulator: 48,699 frame-buffer
+writes logged with the register state that produced them is a reconstruction of
+what the real machine had on screen.
+
+### The two CPUs interleave
+
+The SH-2 is preemptible now. The trampoline alone could not do it — a poll loop
+inside one function is a `goto` in the generated C and never returns to the
+trampoline, which is exactly why this used to need a watchdog that unwound the
+whole run. So the suspension point is the basic block, the one boundary every
+path crosses and which already carries a hook. `sh2_fuel` is instructions left
+in the slice; a block that finds it spent parks the resume address in `c->pc`
+and returns `SH2_YIELD`, which is 1 because an SH-2 instruction address is
+always even. It is checked before it is spent, so a slice always makes progress.
+
+Both watchdogs are gone rather than retuned — the 20-million-access budget and
+the 64-read idle bound. Both existed because a CPU waiting on the other could
+only be stopped by abandoning its call; a CPU parked on a poll now spends its
+slice polling and yields with its position intact, which is what the hardware
+does.
+
+**`rte` was the piece that made it resumable, and the reference settled its
+shape.** An SH-2 exception pushes SR and PC and `rte` pops them: the slave's
+`r15` goes `0xC0000800` -> `0xC00007F8` as it takes the PWM interrupt with its
+mask going 2 -> 6, and the `rte` at `0x06000216` puts both back. `rte` used to
+return 0 and end the run, which worked only because no other CPU could be
+waiting mid-instruction. `mars_deliver_int` now stacks and redirects and returns
+at once; a masked interrupt is declined, which the old model had no way to say.
+
+**A scanline is far too coarse to be the unit, and the boot says why.** The
+68000 zeroes comm 0 at `0x880A00`, waits for the master's `0xFFFF`, and posts
+its first command at `0x88189C` — sixteen instructions, all inside one
+scanline's 487 cycles. The master polls that register every six instructions and
+on hardware samples it some fifty times in that window. Run a scanline at a time
+and it never sees the window at all: it waits for a zero that has already been
+and gone, and the first attempt deadlocked there. Sixteen hand-overs to the line
+fixes it.
+
+**The SH-2s are held in BIOS.** Starting them at reset lets the master's
+dispatch loop read `M_OK` out of comm 0 and dispatch on it — `r2 = 0x4d5f`,
+scaled by 4, straight into nothing. On hardware both are inside the adapter's
+boot ROM for the machine's first 379,000 instructions, and that ROM is what
+posts `M_OK` in the first place. The hand-over is now where the reference puts
+it: the master enters `0x060001A0` 166 log lines after the 68000 reaches the
+checksum rendezvous at `0x8807C2`, and *before* the `M_OK` check at `0x8809A6` —
+a whole rendezvous earlier than the intuitive place to put it.
+
+**The fuel rate is a measurement, not a guess.** The SH-2s are clocked at
+exactly three times the 68000, but fuel is spent in instructions, so the ratio
+has to be divided by what an instruction costs. One per cycle is the SH-2's best
+case and too generous: the slave's idle loop is pure waiting, so its length is
+an observation, and the reference burns 2,826 instructions there where a
+one-per-cycle budget ran 5,256. At two cycles an instruction it runs 2,616.
+
+*Gate met:* `make check` passes — both cartridges still reassemble byte for
+byte on both front ends, all 8 SH-2 and 38 68000 semantics cases still agree,
+and all four trace diffs walk their whole extract with no fatal divergence. The
+picture is unchanged: 43,314 frame-buffer bytes, 128 of 224 line-table entries,
+the same 32X image as before.
+
+What this bought, and what it cost — the second column is the honest half:
+
+| | before | after |
+|---|---|---|
+| 68000 boot | 20,062 agreed, 32 div | 19,672 agreed, **24** div |
+| 68000 whole extract | 52,381 agreed, 452 div | **35,412** agreed, **525** div |
+| master, boot | 158 of 177 blocks, 19 div | 134, 41 div |
+| slave | 17 blocks, 6,722 div | 17 blocks, 11,304 div |
+| distinct 68000 PCs we execute | 841 | **887** |
+
+The boot improved and the game runs more code than it did. Everything else got
+worse, and pretending otherwise would waste the next session:
+
+* **The 452 divergences the previous section attributed to the synchronous
+  SH-2 did not collapse.** They moved — `0x883244` halved, `0x88314C` went, a
+  new group of 100 appeared at `0x8836F6` — and the total rose. That
+  attribution was wrong. What dominates now is the **vblank phase**: the
+  reference takes its vertical interrupt at a point in the engine's wait loop
+  at `0x8834C0` that we reach with a different mask and a different `d1`.
+* The slave's count rose because far more of it is now *being compared*: it
+  used to be unwound after 64 idle reads, so most of its blocks never
+  happened. 17 blocks agreeing out of 75,342 is the real number and always was.
+  Its interrupt entries at `0x060001F8` differ in register state, which is the
+  PWM phase — we deliver on line boundaries where the reference delivers on
+  cycles.
+
+So this is a change of kind, not yet a change of quality: the CPUs interleave
+the way the hardware does, and what is left is *when* each interrupt lands
+rather than whether a rendezvous is answered at all.
+
+Two measurement facts fell out, and both are now in `make check`. The alignment
+window has to exceed the longest wait, because our 68000 spins 65,270 times at
+`0x881A06` where it used to spin none — at the old 40,000 a genuine rejoin read
+as a fatal divergence. And the trace has to outlast the idling: at 400,000 lines
+per CPU, 393,634 of the master's were the single poll block at `0x060008F8`, so
+the run read as having stopped short. Neither was a divergence.
+
+**And the recompiled 68000 needed the same yield, for the same reason.**
+`--recomp` hung outright, and a sampled stack named the spot: inside
+`m_001868`, which is `0x881868` — the engine waiting for the master to post
+`0xFFFF`. Its budget was a count of control *transfers*, which cannot bound a
+poll loop at all, because an intra-function loop is a `goto` in the generated C
+and never returns to the trampoline. That was invisible for exactly as long as
+the SH-2 answered inside the 68000's own register write. It is fuel now, spent
+in the block prologue like the SH-2's, and the slice converts cycles to
+instructions at 8 cycles apiece rather than being untethered from the clock.
+
+The two backends agree more closely than they did: 249 commands against
+Musashi's 247, where it was 304 against 298, and the same frame buffer to the
+byte. Handovers went the other way — 78,898 to **1,147,341**, about 91% of all
+sub-slices — because a hand-over returns wherever Musashi stopped, which is
+usually mid-block where no row exists, so the next slice hands over again. That
+is (4) below, now with a number worth chasing.
 
 ### Next
 
-**1. Interleave the two CPUs.** 380 of the 452 remaining divergences are the one
-fact that the SH-2 answers instantly, and it is no longer a cosmetic difference:
-the reference's master is busy for 22 of its 102 vblanks, and in those the
-engine skips a palette upload and a draw command that we perform. Everything
-after this leans on the oracle, and this is what it has left to say.
+**1. Interrupt phase.** Both remaining groups of divergence are the same
+question asked of two CPUs: *when* does the interrupt land. The 68000's vertical
+interrupt is raised at line 224 and held for a fixed 2,000 cycles, and the
+reference takes it at a point in the wait loop at `0x8834C0` we arrive at with a
+different mask; the slave's PWM interrupts are delivered on line boundaries
+where the reference delivers them on the timer's own cycle count. This is the
+largest single thing left on both diffs and it is one mechanism, not two.
 
-**2. Extend the master's reference extract.** ✅ *done — see below.*
+**2. A trace that survives idling.** Both SH-2 gates now need a 3-million-line
+budget and produce a 1.8 GB file, because 98% of it is a CPU correctly doing
+nothing — 393,634 of the master's first 400,000 lines were one poll block. The
+reference tracer collapses its own runs into `[Omitted: N]` and
+`tools/tracediff.py` already reads that format, so emitting it for consecutive
+entries of the same block with identical registers costs nothing and cannot
+hide a difference. The alignment windows are large for the same reason.
 
-**3. The screenshot check**, still the one real verification gap in the
-rendering path — nothing has confirmed the packed-pixel decode, the palette
-conversion or the frame-select polarity against ground truth. The logs cannot
-give it directly, being instruction traces rather than memory dumps; it needs a
-real emulator run, or replaying the reference's frame buffer writes out of the
-pre-reset segments to reconstruct what the real machine had on screen.
+**3. The screenshot check.** The one real verification gap in the rendering
+path — nothing has confirmed the packed-pixel decode, the palette conversion or
+the frame-select polarity against ground truth. This no longer needs an
+emulator: the extended extract logs 48,699 executions of the frame buffer write
+at `0x060021EA`, each with the register state that produced it, so replaying
+them reconstructs what the real machine had on screen.
 
-**4. Cut the handovers down.** `--recomp` runs the game on recompiled code
-(below) but hands to the interpreter 78,898 times in 300 frames — roughly once
-per scanline slice, where only about one per frame should be structural. Each
-handover then gives Musashi a whole line's cycles rather than just enough to get
-back, so the interpreter is still doing most of the work. Finding out what the
-other ~262 per frame are is the next thing to measure.
+**4. Cut the handovers down.** `--recomp` hands to the interpreter 1,147,341
+times in 300 frames, about 91% of all sub-slices, where only about one per frame
+should be structural — the genuine case is the handful of routines the engine
+assembles into work RAM at `0xFF0000`, which no static front end can find. The
+suspicion is a feedback loop rather than that many real gaps: a hand-over
+returns wherever Musashi stopped, and an arbitrary PC mid-block has no row in
+the table, so the next slice hands over again whether or not the address was
+ever unreachable. Only the first is recorded; a histogram is the first thing to
+build, and re-entering at the *containing* block rather than requiring a leader
+is the likely fix.
+
+The recompiled 68000 also has no trace gate at all — `src/trace68k.c` hooks
+Musashi and reads Musashi's registers, so under `--recomp` it logs only the
+interpreted fragments, and the mode is held to nothing but "same picture, same
+command count". The per-block hook the SH-2 side uses is the same two lines of
+codegen, and the blocks now carry a prologue to put it in.
 
 ### Carried debts
 
@@ -923,9 +1051,10 @@ other ~262 per frame are is the next thing to measure.
   address 0 are the sprite drawer walking slots that are legitimately unfilled.
 * **96 of the 224 lines have no line-table entry**, so the 32X draws the top 128
   and the Mega Drive shows through below. Stable, not a collapse.
-* **The two CPUs are not interleaved.** The SH-2 runs inside the 68000's
-  register writes, so every rendezvous answers at once; it is 380 of the 452
-  divergences left in the 68000 diff.
+* **Interrupt phase.** The CPUs interleave now, but the vertical interrupt is
+  raised at a fixed point in the line and the PWM interrupts on line boundaries,
+  where the reference has both on their own clocks. It is what is left of the
+  68000 diff and most of the slave's.
 * **No audio.** The sample FIFOs accept writes and report space so the driver
   never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills

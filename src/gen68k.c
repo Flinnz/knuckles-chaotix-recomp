@@ -121,6 +121,18 @@ static void bios_comm_read(unsigned i) {
     if (i == 4 && bios.cleared_sum && !bios.sum_done) {
         mars.comm[4] = mars_rom_checksum();
         bios.sum_done = 1;
+        /* Summing the cartridge is the last thing the boot ROM does with the
+         * master, so this is where it lets the cartridge have it. The reference
+         * puts the two 166 log lines apart: the 68000 reaches the checksum
+         * rendezvous at 0x8807C2 at line 378,847 and the master enters
+         * 0x060001A0 at 379,013 — before the M_OK check at 0x8809A6, not after.
+         *
+         * Handing over on the handshake instead is a whole rendezvous too late:
+         * the master then arrives at its wait on comm 0-1 after the 68000 has
+         * zeroed it and posted a command, and waits for a zero that has already
+         * been and gone. Arriving early costs nothing, because that wait is
+         * exactly what the reference spends 2,915 instructions doing. */
+        mars_bios_handover();
     }
     if (i < 4 && bios.cleared_ok && !bios.ok_done) {
         mars.comm[0] = 0x4D5F; mars.comm[1] = 0x4F4B;   /* M_OK */
@@ -375,14 +387,17 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
     /* Bits 0 and 1 raise the command interrupt on the master and slave SH-2.
      * The interrupted SH-2 clears the bit from its own handler and the 68000
      * waits for that as an acknowledgement — at 0x8819C6 it spins on bit 0
-     * before pushing the command list through the DREQ FIFO. The handler is run
-     * here and now, which is what the 68000 sees on hardware too: it holds the
-     * bus waiting, and by the time it looks the SH-2 has answered. */
+     * before pushing the command list through the DREQ FIFO.
+     *
+     * Raising it is all that happens here. The handler used to be run to
+     * completion inside this write, so the 68000 never once saw the request
+     * pending; it now runs on the SH-2's own slices and the 68000 spins for it,
+     * which is what the reference does — and the bit is cleared by the handler
+     * writing 0x4000|0x1A, not by us. */
     case 0xA15102:
         mars.intctl = v;
         if (v & 1) mars_deliver_int(0, MARS_INT_CMD);
         if (v & 2) mars_deliver_int(1, MARS_INT_CMD);
-        mars.intctl &= ~0x0003u;
         return 1;
     case 0xA15104: mars.bank = v; return 1;
     /* Raising 68S is what arms the transfer, so the word count is taken on that
@@ -401,10 +416,11 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
             unsigned i = (unsigned)(((a & ~1u) - 0xA15120u) / 2);
             mars.comm[i] = v;
             bios_comm_write(i, v);
-            /* Posting a command runs the SH-2 there and then. It is parked in
-             * its dispatch poll whenever the 68000 is running, so this is where
-             * the two actually meet — and the 68000 goes straight on to wait
-             * for the acknowledgement, which only exists if the SH-2 has run. */
+            /* The master is sitting in its dispatch poll and will read this on
+             * its next slice; the 68000 then waits for it to zero the register
+             * back, which is the acknowledgement. Posting used to run the whole
+             * command inside this write, so the rendezvous always answered on
+             * the 68000's first poll. */
             if (i == 0 && v) {
                 gen.cmd_posted++;
                 if (v < 16) gen.cmd_hist[v]++;

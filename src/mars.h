@@ -4,7 +4,6 @@
 #define MARS_H
 
 #include <stdint.h>
-#include <setjmp.h>
 #include "sh2.h"
 
 #define MARS_ROM_MAX   (4u * 1024 * 1024)
@@ -49,8 +48,6 @@ typedef struct {
     uint32_t ticks;          /* stands in for elapsed time when polling */
     uint32_t unknown;        /* accesses outside the modelled map */
     uint32_t missing;        /* indirect transfers with no recompiled target */
-    uint32_t deep;           /* dispatch recursion that hit the depth bound */
-    uint32_t bail[4];        /* unwinds, indexed by MARS_BAIL_* reason */
     int      trace;          /* record every function entry */
 
     unsigned serviced;       /* commands the master has been run for */
@@ -111,29 +108,30 @@ void mars_run_command(void);
  * these so there is one implementation of the VDP and its status bits. */
 int mars_reg_read_sh2(uint32_t a, uint32_t *out);
 int mars_reg_write_sh2(uint32_t a, uint32_t v, int size);
-void mars_reset_budget(void);
 void mars_trace_dump(const char *why);
 void mars_trace_reset(void);
-void mars_tick_budget(void);
-
-/* The SH-2 polls hardware in loops that only a real machine would break out of.
- * When nothing is left to feed it, unwind rather than spin forever. */
-extern jmp_buf mars_bail;
-#define MARS_BAIL_IDLE  1
-#define MARS_BAIL_BUDGET 2
-#define MARS_BAIL_DEPTH  3
 
 /* The two SH-2s live here rather than in main() so that the runtime can enter
  * one from anywhere — specifically from a 68000 register write, which is what
  * raising an interrupt is. */
 extern SH2 mars_cpu[2];          /* 0 = master, 1 = slave */
 
-/* Take an external interrupt on one SH-2 and run its handler to completion.
- *
- * Our two CPUs are not interleaved, so there is no instruction boundary to
- * interrupt: the SH-2 is parked in its dispatch loop whenever the 68000 runs,
- * and delivering at the moment of the request is what the 68000 observes anyway
- * — it raises the request and then spins until the handler acknowledges it. */
+/* Where the adapter's boot ROM hands each SH-2 over to the cartridge. */
+#define MARS_MASTER_ENTRY 0x060001A0u
+#define MARS_SLAVE_ENTRY  0x060001A4u
+
+/* Start them there. Until this is called they are held, which is not a
+ * convenience: on hardware both SH-2s are inside the adapter's boot ROM for the
+ * machine's first 379,000 instructions, and that ROM is what computes the
+ * cartridge checksum and posts M_OK / S_OK. The runtime stands in for all of
+ * it, so the hand-over is when that stand-in has finished — see
+ * bios_comm_read() in src/gen68k.c. Starting them at reset instead lets the
+ * master's dispatch loop read M_OK out of comm 0 and dispatch on it. */
+void mars_bios_handover(void);
+
+/* Raise an external interrupt on one SH-2: it stacks SR and PC and comes back
+ * with the CPU pointed at its handler, which runs on that CPU's own slices.
+ * Declined if the CPU's mask is at or above the level. */
 void mars_deliver_int(int slave, unsigned level);
 #define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
 #define MARS_INT_PWM 6           /* the PWM timer, which only the slave takes */
