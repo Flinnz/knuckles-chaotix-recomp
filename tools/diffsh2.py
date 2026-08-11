@@ -164,7 +164,14 @@ def filter_blocks(recs, blocks, covered):
 
 
 # -------------------------------------------------------------- extraction --
-def extract(rom_path, limit):
+def cache_paths(prefix):
+    """Where an extract lands. `make check` gates on the default pair, so a
+    longer extract — which is a different artefact, not a newer one — is asked
+    for by name and leaves those alone."""
+    return {"master": prefix + "shm.txt", "slave": prefix + "shs.txt"}
+
+
+def extract(rom_path, limit, cache=None):
     """Copy both SH-2 streams forward from the console reset.
 
     The reset itself is found through the 68000, whose reset vector is the one
@@ -175,10 +182,11 @@ def extract(rom_path, limit):
     at or above 0x06000000, which is the master's 0x060001A0 and the slave's
     0x060001A4: exactly the two entry points our runtime uses.
     """
+    cache = cache or REF_CACHE
     pc = diff68k.find_reset_pc(rom_path)
     first, at, logs = diff68k.find_reset(pc)
 
-    outs = {t: open(REF_CACHE[k], "w") for k, t in TAG.items()}
+    outs = {t: open(cache[k], "w") for k, t in TAG.items()}
     started = {t: False for t in outs}
     n = {t: 0 for t in outs}
     scanned = 0
@@ -226,7 +234,7 @@ def extract(rom_path, limit):
         for out in outs.values():
             out.close()
     for k, t in sorted(TAG.items()):
-        print("  wrote %s (%d lines)" % (REF_CACHE[k], n[t]))
+        print("  wrote %s (%d lines)" % (cache[k], n[t]))
 
 
 # ------------------------------------------------------------- annotation ---
@@ -297,6 +305,10 @@ def main():
                     help="rebuild both reference extracts from roms/*.log")
     ap.add_argument("--limit", type=int, default=REF_LINES,
                     help="reference instructions to extract, per CPU")
+    ap.add_argument("--extract-to", default="build/ref", metavar="PREFIX",
+                    help="where an extract is written; PREFIX+'shm.txt' and "
+                         "PREFIX+'shs.txt'. The default pair is what the gates "
+                         "read, so a longer extract wants its own prefix.")
     ap.add_argument("--ref-blocks", type=int, default=0,
                     help="compare only the first N reference block entries")
     ap.add_argument("--context", type=int, default=12,
@@ -314,10 +326,11 @@ def main():
                     help="non-fatal divergences to print in full")
     args = ap.parse_args()
 
-    ref_path = args.ref or REF_CACHE[args.cpu]
-    if args.extract or not all(os.path.exists(p) for p in REF_CACHE.values()):
+    cache = cache_paths(args.extract_to)
+    ref_path = args.ref or cache[args.cpu]
+    if args.extract or not all(os.path.exists(p) for p in cache.values()):
         print("extracting reference traces:")
-        extract(args.rom, args.limit)
+        extract(args.rom, args.limit, cache)
 
     tag = TAG[args.cpu]
     dis = Disasm(args.rom)

@@ -872,6 +872,24 @@ beside it, and the two share an address space and a register file so a handover
 costs a register copy. That is what `--recomp` is — recompiled where there is a
 block, interpreted where there is not.
 
+### The reference extract goes 14x further
+
+`tools/diffsh2.py --extract-to` names its output, so a longer extract is a
+different artefact rather than a newer one and the gate pair stays put. Asked
+for 8 million instructions per CPU it exhausts the logs instead: **5,643,099
+master instructions and 5,298,292 slave**, against the 400,000 it had.
+
+That reaches everything the debts were waiting on — the frame buffer write at
+`0x060021EA` 48,699 times, the sprite drawer at `0x06001380` 238, the command
+list interpreter at `0x060009A6` 397 — and settles one of them outright.
+**Command 7 is issued once**, at `0x060010D8`, across 5.6 million master
+instructions. Our own 300-frame run posts exactly one. The asset table being
+barely filled is what this point in the game looks like, not a bug to find.
+
+It also makes the screenshot check reachable without an emulator: 48,699
+frame-buffer writes logged with the register state that produced them is a
+reconstruction of what the real machine had on screen.
+
 ### Next
 
 **1. Interleave the two CPUs.** 380 of the 452 remaining divergences are the one
@@ -880,10 +898,7 @@ the reference's master is busy for 22 of its 102 vblanks, and in those the
 engine skips a palette upload and a draw command that we perform. Everything
 after this leans on the oracle, and this is what it has left to say.
 
-**2. Extend the master's reference extract.** It stops 400,000 instructions in,
-before the game draws its first object, which is why the null asset pointers
-cannot be diagnosed. The raw logs have 6.5 GB and the extractor takes a
-`--limit`; the cost is time and disk, not new machinery.
+**2. Extend the master's reference extract.** ✅ *done — see below.*
 
 **3. The screenshot check**, still the one real verification gap in the
 rendering path — nothing has confirmed the packed-pixel decode, the palette
@@ -901,10 +916,11 @@ other ~262 per frame are is the next thing to measure.
 
 ### Carried debts
 
-* **The asset table is barely filled.** 3 command 7s in 1,200 frames against
-  1,173 draws, and the master's sprite drawer dereferences a null pointer 10.8
-  million times over that run. Our 68000 matches the reference exactly as far as
-  the oracle reaches, so diagnosing it needs (2) above first.
+* ~~**The asset table is barely filled.**~~ *Settled.* The extended extract
+  shows the reference issuing command 7 exactly once across 5,643,099 master
+  instructions, and our 300-frame run posts exactly one. A mostly-empty asset
+  table is what this point in the game looks like. The 10.8 million reads of
+  address 0 are the sprite drawer walking slots that are legitimately unfilled.
 * **96 of the 224 lines have no line-table entry**, so the 32X draws the top 128
   and the Mega Drive shows through below. Stable, not a collapse.
 * **The two CPUs are not interleaved.** The SH-2 runs inside the 68000's
