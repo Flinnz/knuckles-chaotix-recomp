@@ -72,7 +72,7 @@ unresolved. Code found so far is 1.3% of the ROM, which is expected at this
 stage: most of the cartridge is compressed art, and the engine is reached
 through data-driven tables that the next pass needs to follow.
 
-*Later:* 559 functions, 6,450 blocks, 24,377 instructions, 2.8% of the ROM —
+*Later:* 561 functions, 6,490 blocks, 24,578 instructions, 2.8% of the ROM —
 see "The 68000 front end had never been asked what it was missing" below. Both
 images still reassemble byte for byte.
 
@@ -758,14 +758,41 @@ the 68000 what sits behind a `jmp` is very often the table it dispatches
 through — one of the two data regions above is exactly that — and a wrong start
 on a variable-length encoding costs what it does not cost on a fixed-width one.
 
-**368 -> 559 functions, 11,655 -> 24,377 instructions, 1.3% -> 2.8% of the ROM**,
-both images still byte-exact. The only address either trace executes that the
-front end does not have is `0x8802AE`, the adapter's own vector stub, which is
-not the cartridge's to name.
+**368 -> 561 functions, 11,655 -> 24,578 instructions, 1.3% -> 2.8% of the ROM**,
+both images still byte-exact. The only address either gate trace executes that
+the front end does not have is `0x8802AE`, the adapter's own vector stub, which
+is not the cartridge's to name.
 
 `make check` now runs both 68000 round-trips — left out for a while, which was
 the wrong call the moment the front end started changing — and ends on
 `disasm68k.py coverage`, the check that found all of this.
+
+**Then the same question over thirty-three seconds instead of two.** A clean
+answer against the gate trace only says discovery has the code *those* runs
+reached, and the reference extract is 1.7 seconds of a game. A 2,000-frame run
+is 23.5 million instructions and 4,071 distinct addresses against the extract's
+846 — and 311 of them were missing. Two more of the front end's own limits:
+
+* **A handler can be two instructions long.** `looks_like_code` wants four
+  before it will believe a blind sweep, and the installed-handler sweep was
+  inheriting that although its evidence is far better. `0x883710` is `move.b
+  #1,($ffffd1)` then `rte`; `0x883BA8`, which runs 1,408 times over those
+  frames, is three instructions. Both were turned away by their length.
+* **A table's origin can be the instruction dispatching through it.**
+  `0x8811D6` is `jmp %pc@(0x8811d6,%d0:w)` — slot zero is the `jmp`, no index
+  selects it, and refusing the base threw the whole table away. Three cases,
+  one of them entered 12,189 times.
+
+311 -> 245, and what is left is characterised rather than pending:
+
+| where | why |
+|---|---|
+| `0x8F4992` | `jmp (a3)` — a runtime function pointer, needs dataflow |
+| `0x8F4D2A` | a stride-16 table whose slots hold short runs of *code* padded with `nop`, not one transfer — and whose stride comes from `moveq #15 / and / sub`, which rounds the index down rather than scaling it up |
+| 28 other runs | cold, executed once or twice each over 2,000 frames |
+
+Recovering the second needs a slot rule weak enough to be worth doubting, which
+is a bad trade against a round-trip that is currently exact.
 
 ### Next
 

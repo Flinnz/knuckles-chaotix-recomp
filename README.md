@@ -100,8 +100,8 @@ lock step with a reference emulator through its whole boot, and there is a
 picture from each half of the machine.
 
 - SH-2 front end **complete**: 247 functions, 1,971 blocks, 15 dispatch tables
-- 68000 front end: 559 functions, 6,450 blocks, whole-cartridge round-trip,
-  and every instruction either trace executes is inside it
+- 68000 front end: 561 functions, 6,490 blocks, whole-cartridge round-trip,
+  and every instruction the gate traces execute is inside it
 - SH-2 **recompiler** running: all functions translate to C and compile for
   arm64; 8/8 semantics tests pass on natively executed output
 - **Runtime** runs both SH-2s and the 68000: Musashi interprets the 68000, the
