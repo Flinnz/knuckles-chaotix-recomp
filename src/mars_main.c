@@ -103,22 +103,21 @@ static const unsigned sh2_cpi1000[2] = { 1631, 1007 };
  * routines the engine builds in work RAM at 0xFF0000 and jumps to. No static
  * front end can find either. 291 hand-overs in 300 frames, all of them those.
  *
- * The interpreter is paid in cycles and the recompiled code in instructions, so
- * a slice is converted by what an instruction costs. `--recomp-cpi` sets it,
- * and the reference measures it rather than the manual: the 68000 runs 11,236
- * instructions between two vertical interrupts, and a frame is 127,840 cycles,
- * which is 11.4 apiece for this engine's actual mix. It was 8, guessed from the
- * cheapest register-to-register forms being 4 cycles and a memory operand 8 to
- * 12 — and at 8 the recompiled 68000 ran 42% more instructions a frame than the
- * interpreted one did, which is the sort of thing only a trace gate finds.
+ * Both are paid in cycles, so a slice goes across to either without being
+ * converted. That is new: the recompiled code was paid in instructions and
+ * `--recomp-cpi` turned one into the other, at 11 — which is this engine's
+ * steady-state mix to the digit and 18% fast through the boot, where it sits in
+ * a 13-cycle poll of a 32X register. One constant cannot be right in two
+ * phases, and the way to stop needing one is for each block to carry what its
+ * own instructions cost. See M68K_BLOCK in src/m68000.h and tools/m68kcycles.c.
  *
- * It used to be a count of control *transfers*, which could not bound anything:
- * a poll loop inside one recompiled function is a `goto` and never returns to
- * the trampoline. That was invisible while the SH-2 answered inside the 68000's
- * own register write, and became a hang the moment the two CPUs interleaved.
+ * The budget used to be a count of control *transfers*, which could not bound
+ * anything: a poll loop inside one recompiled function is a `goto` and never
+ * returns to the trampoline. That was invisible while the SH-2 answered inside
+ * the 68000's own register write, and became a hang the moment the two CPUs
+ * interleaved.
  */
 static int use_recomp = 1;
-static unsigned recomp_cpi = 11;
 static M68K rcpu;
 static uint32_t rc_pc;
 static uint32_t rc_missing;      /* transfers to an address with no block */
@@ -287,13 +286,15 @@ static void cpu_run(unsigned cycles) {
         cpu_credit -= m68k_execute(cpu_credit);
         return;
     }
-    unsigned slice = (unsigned)cpu_credit / recomp_cpi;
+    /* The credit *is* the fuel now: both are 68000 cycles, so the budget goes
+     * straight across and whatever the blocks did not spend — including the
+     * overshoot of the block that ran past the end, which comes back negative —
+     * is the credit carried to the next hand-over. */
+    uint32_t insns0 = m68k_insns;
     int known = 1;
-    rc_pc = m68k_run(&rcpu, rc_pc, slice ? slice : 1, &known);
-    /* What the fuel did not come back with is what the blocks ran. */
-    int ran = (int)(slice ? slice : 1) - m68k_fuel;
-    cpu_insns += (unsigned long)(ran > 0 ? ran : 0);
-    cpu_credit -= (int)(ran * (int)recomp_cpi);
+    rc_pc = m68k_run(&rcpu, rc_pc, (unsigned)cpu_credit, &known);
+    cpu_credit = m68k_fuel;
+    cpu_insns += m68k_insns - insns0;
     if (known) return;
     if (!rc_missing++) rc_missing_at = rc_pc;
     rc_count(rc_pc);
@@ -530,8 +531,6 @@ int main(int argc, char **argv) {
             use_recomp = 1;                 /* the default; kept so it still runs */
         else if (!strcmp(argv[i], "--interp"))
             use_recomp = 0;
-        else if (!strcmp(argv[i], "--recomp-cpi") && i + 1 < argc)
-            recomp_cpi = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--rate68k"))
             rate68k_report = 1;
 

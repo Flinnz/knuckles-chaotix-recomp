@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from m68k.analyze import Analyzer                # noqa: E402
 from recomp.m68kc import Codegen, fname          # noqa: E402
+from recompile68k import CYCLES, read_cycles     # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "build", "test")
@@ -86,7 +87,10 @@ def main():
     az.run()
     print(f"discovered {len(az.funcs)} function(s), {len(az.code)} instructions")
 
-    cg = Codegen(az)
+    # These cases compare answers rather than timings, so the cycle table is
+    # here only because a block has to carry a cost — but taking the real one
+    # keeps this compiling the same C the runtime does.
+    cg = Codegen(az, read_cycles(CYCLES))
     entries = sorted(az.funcs)
     lines = ['#include "m68000.h"', ""]
     lines += [f"static uint32_t {fname(a)}(M68K *c, uint32_t entry);"

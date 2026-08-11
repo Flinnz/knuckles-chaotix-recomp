@@ -96,10 +96,81 @@ class Operand:
                 f"({UCAST[self.size]}({value}));")
 
 
+SHIFTS = ("asl", "asr", "lsl", "lsr", "rol", "ror", "roxl", "roxr")
+
+
 class Codegen:
-    def __init__(self, az):
+    def __init__(self, az, cycles):
         self.az = az
+        self.cycles = cycles     # Musashi's 68000 table, one byte per opcode
         self.notes = []          # (addr, text) for anything outside the model
+
+    # ------------------------------------------------------------------
+    def cost(self, ins):
+        """What one instruction costs in 68000 cycles.
+
+        The base is Musashi's own table — `tools/m68kcycles.c` dumps it, and
+        m68kmake has already expanded it per addressing mode, so the time an
+        effective address takes is in the entry rather than needing a second
+        table here. Taking it from the interpreter rather than from a reading of
+        the manual is the argument `src/m68k_testmem.c` makes about semantics,
+        applied to timing: the interpreter is the oracle, and `tools/refpoll.py`
+        now says it is right against the reference in both of the engine's
+        phases — 13.00 cycles for the comm poll where the reference measures
+        12.97, 11.00 for the steady mix where it measures 11.00.
+
+        What the table does not carry is what the handlers add while running.
+        On a 68000 that is four things and they are all covered: a branch, whose
+        cost depends on which edge it took, charged in `transfer()` where both
+        edges are emitted; a shift by an immediate and a `movem`, whose count
+        and register mask are in the instruction, added below; and a shift by a
+        register, charged in `shift()` where the count exists.
+
+        Two more are in Musashi and neither can run here. `mulu`/`muls` add two
+        cycles a set bit of the operand and `scc` two when it sets — and across
+        the reference's whole 68000 extract, 54,183 instructions, there is not
+        one of either: 89.3% of what it executes is pure table cost and the rest
+        is the four above. The fixed `USE_CYCLES(2)` and `(3)` in the generated
+        opcodes belong to `moves`, `cas` and `cas2`, which are 68010 and 68020
+        instructions this machine has no way to reach.
+        """
+        c = int(self.cycles[ins.word])
+        m = ins.mnem
+        base = m[:-1] if m and m[-1] in "bwl" else m
+        w = ins.word
+        if base in SHIFTS:
+            # The memory form shifts one bit and the table already covers it;
+            # the register form is counted at run time in `shift()`.
+            if (w & 0xC0) != 0xC0 and not (w & 0x20):
+                c += 2 * (((w >> 9) & 7) or 8)      # CYC_SHIFT is 1: two a bit
+        elif base == "movem" and ins.imm is not None:
+            # CYC_MOVEM_W and _L are shift counts, not multipliers: four cycles
+            # a register for a word transfer and eight for a long one.
+            c += bin(ins.imm & 0xFFFF).count("1") * (8 if m.endswith("l") else 4)
+        return c
+
+    def block_cycles(self, b):
+        """What a block costs, up to and including anything that ends it early.
+
+        An invalid opcode makes the emitter stop and hand the address back, so
+        the instructions after it are never run and must not be charged.
+
+        Never zero, and that floor is load-bearing rather than tidiness. The
+        table has no entry for an opcode that is not an instruction, so a block
+        that is nothing but an invalid word costs nothing — and such a block
+        returns *its own address*, which the trampoline looks up and enters
+        again. While the fuel was instructions every entry spent one and the
+        slice ended; spending cycles, a free block is an infinite loop with no
+        fuel between it and the frame. Two blocks in this cartridge are that
+        shape, and one of them, 0x0283C2, is inside the address space the
+        recompiled build can actually be sent to.
+        """
+        total = 0
+        for ins in b.insns:
+            total += self.cost(ins)
+            if ins.kind == INVALID:
+                break
+        return max(total, 1)
 
     # ------------------------------------------------------------------
     def unhandled(self, ins, out):
@@ -516,9 +587,15 @@ class Codegen:
                 cnt = f"({D((w >> 9) & 7)} & 63u)"
             else:
                 cnt = f"{((w >> 9) & 7) or 8}u"
+        # Two cycles a bit, and only the immediate form's count is known at
+        # build time — `cost()` adds that one. This is the other form, charged
+        # where the count exists.
+        by_reg = (w & 0xC0) != 0xC0 and (w & 0x20)
         left = base in ("asl", "lsl", "rol", "roxl")
         bits = BITS[sz]
         out.append(f"    uint32_t n = {cnt}, d = {d.read()}, r = d;")
+        if by_reg:
+            out.append("    m68k_fuel -= (int32_t)(n << 1);")
         out.append(f"    uint32_t last = c->c;")
         out.append("    if (n == 0) { c->c = 0; }")
         out.append("    else {")
@@ -677,17 +754,27 @@ class Codegen:
             return out
 
         if k == BRANCH:
+            # The block already paid this instruction's table cost, which for a
+            # branch is the *taken* one; each edge that costs something else
+            # settles the difference here. Adding fuel back is a discount.
             if m.startswith("db"):
                 cc = m[2:]
                 # `dbcc` falls through when the condition holds; otherwise it
                 # decrements the low word and loops unless it wrapped past zero.
                 # `dbf` is the common one and its condition is never true, so
                 # this is the ordinary counted loop.
+                #
+                # Three edges and three prices: 12 charged, 10 when it loops
+                # (CYC_DBCC_F_NOEXP), 14 when the counter expired
+                # (CYC_DBCC_F_EXP), and 12 unchanged when the condition was true
+                # and it never counted at all.
                 r = D(ins.word & 7)
                 out.append(f"    if (!({CC[cc]})) {{")
                 out.append(f"        uint32_t lo = ({r} - 1) & 0xFFFFu;")
                 out.append(f"        {r} = ({r} & 0xFFFF0000u) | lo;")
-                out.append(f"        if (lo != 0xFFFFu) {to(ins.target).strip()}")
+                out.append(f"        if (lo != 0xFFFFu) {{ m68k_fuel += 2; "
+                           f"{to(ins.target).strip()} }}")
+                out.append("        m68k_fuel -= 2;")
                 out.append("    }")
             else:
                 # `bccs` is bcc with a short displacement, not b + "ccs" — and
@@ -696,6 +783,11 @@ class Codegen:
                 if cc not in CC:
                     cc = cc[:-1]
                 out.append(f"    if ({CC[cc]}) {to(ins.target).strip()}")
+                # Not taken: a short branch is two cycles cheaper than the taken
+                # one and a word branch two dearer, which is the whole of
+                # CYC_BCC_NOTAKE_B and _W.
+                out.append("    m68k_fuel += 2;" if ins.size == 2
+                           else "    m68k_fuel -= 2;")
             out.append(to(fallthrough) if fallthrough is not None
                        else f"    return 0x{after:08X}u;")
             return out
@@ -729,7 +821,7 @@ class Codegen:
             # 68000's own register write; once the two CPUs really interleave,
             # 0x881868 waits for the master's 0xFFFF and spins for good.
             lines.append(f"{lname(b.start)}: M68K_BLOCK(c, 0x{b.start:08X}u, "
-                         f"{len(b.insns)});")
+                         f"{len(b.insns)}, {self.block_cycles(b)});")
             for ins in b.insns:
                 if ins.kind == INVALID:
                     self.notes.append((ins.addr, "invalid opcode"))

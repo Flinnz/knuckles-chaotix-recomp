@@ -42,11 +42,14 @@ static int lookup(uint32_t addr) {
 }
 
 int32_t m68k_fuel;
+uint32_t m68k_insns;
 
-/* `budget` is instructions now, not transfers, and it is spent inside the
- * blocks rather than counted here — see M68K_BLOCK in m68000.h. Counting
- * transfers could not bound a poll loop at all, because an intra-function loop
- * is a `goto` in the generated C and never comes back here. */
+/* `budget` is cycles, and it is spent inside the blocks rather than counted
+ * here — see M68K_BLOCK in m68000.h. It was transfers once, which could not
+ * bound a poll loop at all, because an intra-function loop is a `goto` in the
+ * generated C and never comes back here; then instructions, which bounded it
+ * but had to be converted from cycles by a constant that is only right in one
+ * of the engine's two phases. */
 /* Can recompiled code be entered here? The interpreter needs to know, so that a
  * hand-over can stop at the end of the gap rather than at the end of a slice. */
 int m68k_dispatchable(uint32_t addr) {

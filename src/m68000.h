@@ -153,7 +153,27 @@ extern const unsigned m68k_function_count;
  * even, and 0 is a legitimate address here, unlike on the SH-2 side.
  */
 #define M68K_YIELD 1u
+
+/* The fuel is **cycles**, not instructions.
+ *
+ * It was instructions, and `cpu_run` converted a cycle budget into one with a
+ * single constant — `recomp_cpi`, measured at 11. One constant cannot be right
+ * twice. 11.00 cycles an instruction is this engine's steady-state mix exactly,
+ * and through the boot it sits in a `tst.w ($a15120)` / `bne` poll that costs
+ * 13, so the translated build ran that phase 18% fast: 11,622 instructions a
+ * frame where Musashi and the reference both run 9,834. It was the whole of the
+ * 68000 residue, and for a while it was mistaken for the adapter being free.
+ *
+ * So there is no conversion any more. Each block carries what its instructions
+ * actually cost, summed at build time from Musashi's own table — see
+ * tools/m68kcycles.c — and `cpu_run` hands the fuel a cycle budget directly,
+ * the way it already hands Musashi one.
+ */
 extern int32_t m68k_fuel;
+
+/* And the instructions separately, because the fuel no longer counts them and
+ * `--rate68k` still asks. */
+extern uint32_t m68k_insns;
 
 /* Block-entry trace, for `tools/diff68k.py --blocks`.
  *
@@ -179,13 +199,18 @@ void m68k_block(const M68K *c, uint32_t addr);
  * the alignment never noticed — but every trip count came out twice its true
  * length.
  */
-#define M68K_BLOCK(c, a, n) do {                                \
+/* `n` is the block's instructions and `cyc` what they cost. The branch it ends
+ * on is charged on its own edge instead — Musashi's table holds the *taken*
+ * cost of a `bcc` and adjusts on the other side, and the generated code emits
+ * both sides, so it can do the same. */
+#define M68K_BLOCK(c, a, n, cyc) do {                           \
     if (m68k_fuel <= 0) { (c)->pc = (a); return M68K_YIELD; }   \
     if (m68k_trace) m68k_block((c), (a));                       \
-    m68k_fuel -= (n);                                           \
+    m68k_fuel -= (cyc);                                         \
+    m68k_insns += (n);                                          \
 } while (0)
 
-/* Run from `addr` for at most `budget` transfers and return where it stopped.
+/* Run from `addr` for at most `budget` cycles and return where it stopped.
  * `*known` comes back 0 when it stopped because there is no recompiled block
  * there, which is how an unrecovered indirect target reports itself, and 1 when
  * the budget simply ran out. A budget of 0 means "until it stops".

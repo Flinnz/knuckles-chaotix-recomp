@@ -1635,38 +1635,82 @@ That is the whole of the 68000 residue, it is in the build that is the default,
 and the phase it is wrong in is precisely the phase "2.5 frames early" was
 measured in. The interpreter was never early at all.
 
+### The recompiled 68000 stops converting and starts counting
+
+The fuel is cycles now, and there is no `recomp_cpi` at all.
+
+`M68K_BLOCK(c, addr, n)` already spent `n` of the fuel per block; `n` was
+instructions, which is the whole reason a conversion constant had to exist. It
+takes a second argument now — what those instructions *cost* — and the fuel
+becomes a cycle budget `cpu_run` hands across directly, the way it already
+hands Musashi one.
+
+The costs are Musashi's own `m68ki_cycles[0]`, dumped by `tools/m68kcycles.c`,
+which links Musashi and nothing else — that is what keeps it out of the cycle
+`build/m68k_recomp.c` is already in. m68kmake has expanded the table per
+addressing mode, so a `tst.w (xxx).L` at 16 cycles and a `tst.w (a0)` at 8 are
+different entries and no second table is needed here. Taking it from the
+interpreter rather than from a reading of the manual is the argument
+`src/m68k_testmem.c` makes about semantics, applied to timing: the oracle is
+now measured right against the reference in both phases, and a table copied
+from it agrees by construction instead of by proofreading.
+
+What the table cannot hold is what the handlers add while running, and on a
+68000 that is four things, all of them covered:
+
+| | known when | charged where |
+|---|---|---|
+| `bcc` taken or not | run time | the edge, in `transfer()` |
+| `dbcc` looping, expired, or never counted | run time | the edge, three prices |
+| shift by an immediate, `movem` | build time | the block's sum |
+| shift by a register | run time | where the count exists |
+
+Two more are in Musashi and neither can run here: `mulu`/`muls` add two cycles a
+set bit of the operand and `scc` two when it sets, and across the reference's
+whole 68000 extract — **54,183 instructions — there is not one of either**.
+89.3% of what it executes is pure table cost and the remaining 10.7% is the four
+above. The fixed `USE_CYCLES(2)` and `(3)` in the generated opcodes turn out to
+belong to `moves`, `cas` and `cas2`, which are 68010 and 68020 instructions.
+
+**The gate, which was written before the work:** `--recomp --rate68k` matching
+`--interp` frame for frame.
+
+| frame | before | after | `--interp` | reference |
+|---|---|---|---|---|
+| 14-30, the comm poll | 11,622 at 11.00 | **9,834 at 13.00** | 9,834 at 13.00 | 12.97 c/i |
+| 34-40, steady | 11,622 at 11.00 | **11,623 at 11.00** | 11,619 at 11.00 | 11,611 at 11.00 |
+
+Over sixty frames the two builds now retire 644,195 instructions against
+644,124 — **0.011% apart**, where the phase they disagreed in was 18%. The
+steady state, which was already right and was the thing to watch, moved by one
+instruction a frame.
+
+One hazard came with it and is worth writing down, because it was invisible
+until the fuel changed units. A block's cost is never allowed to be zero. The
+table has no entry for an opcode that is not an instruction, so a block that is
+nothing but an invalid word costs nothing — and such a block hands back *its own
+address*, which the trampoline looks up and enters again. While the fuel was
+instructions every entry spent one and the slice ended; spending cycles, a free
+block is an infinite loop with no fuel between it and the frame. This cartridge
+has two, and one of them, `0x0283C2`, is inside the address space the recompiled
+build can be sent to.
+
+The five diff gates: the four interpreted ones are untouched at 20,077 and
+52,386 instructions and 194 and 1,037 blocks, and the recompiled 68000 holds
+8,736 blocks agreed with 400 divergences against 398 — the same agreement, two
+more rows, which is what a correct clock changing where the CPUs meet looks
+like at this granularity.
+
 ### Next
 
-**1. Give the recompiled 68000 real per-block cycle costs.** The block macro
-already carries a count — `M68K_BLOCK(c, addr, n)` spends `n` of the fuel — and
-that count is instructions, which is why a conversion constant has to exist at
-all. Sum each block's *cycles* at build time instead and the constant, and the
-whole class of error under it, goes away: the fuel becomes a cycle budget and
-`cpu_run` hands it `cpu_credit` directly, the way it already hands Musashi one.
-
-The costs come from Musashi's own `m68ki_cycles[0]` table, dumped by a small
-tool that links it alone, so the recompiled build agrees with the oracle by
-construction rather than by a second reading of the manual — and the oracle is
-now measured right against the reference in both phases. The one thing a static
-sum cannot know is the branch it ends on: Musashi's table holds the *taken* cost
-and adjusts on the other edge, and the recompiler emits both edges, so it can
-charge the difference where it happens.
-
-*The gate for it, written in advance:* `--recomp --rate68k` matching `--interp`
-frame for frame — **9,834 instructions a frame at 13.00 cycles through frames
-14-30, and 11,619 at 11.00 from 33 on**. *Watch for:* the steady state is right
-today by luck of the average, so a change that gets the poll phase right and the
-steady state wrong is a net loss, and the second column is the cheap check for
-it.
-
-**2. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
+**1. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
 writes and report space so the driver never stalls, and the samples go nowhere.
 Everything around it is now in place — the slave's PWM interrupt is on the
 machine's own clock at 365.96 to a frame, and its driver is running real code at
 `0xC000012C` on every one of them. What is missing is a YM2612 and PSG core, a
 PWM sink, and somewhere to put the samples.
 
-**3. The slave diff wants its bound lifted.** It is held to 2,000 reference
+**2. The slave diff wants its bound lifted.** It is held to 2,000 reference
 blocks because our stream is 93% delay-loop entries where the reference collapses
 each run, and the aligner cannot walk two streams of such different densities.
 Collapsing ours the same way costs the master a quarter of its agreement, so the
@@ -1719,11 +1763,18 @@ does not spend the same day finding the same thing.
   timed with the master's steady-state rate through a window where the master
   runs at 1.30. On the PWM clock a 32X register read costs the 68000 exactly
   what the manual charges, across six loops and both kinds of memory.
-* **The recompiled 68000 keeps time with one number.** `recomp_cpi` is 11, which
-  is the reference's own steady-state rate to the digit and 18% fast through the
-  boot's 13-cycle comm poll. Musashi gets both phases right; the translated
-  build — the default — gets one. It is the whole of the 68000 residue and the
-  next thing to fix.
+* ~~**The recompiled 68000 keeps time with one number.**~~ *Settled.* There is
+  no number: each block carries what its own instructions cost, summed from
+  Musashi's table at build time, and the fuel is cycles. The two builds now
+  retire the same instructions to 0.011% over sixty frames where the boot phase
+  was 18% apart.
+* **The slave's PWM tick is 0.34% slow.** Ours is 365.96 interrupts to a frame,
+  from the period the slave itself programs; the reference runs **367.2**, dead
+  steady across sixty frames — 1,044.4 SH-2 cycles a tick against our 1,048.
+  That timer is the whole of the slave's clock, and the slave is the worst of
+  the three diffs. Measured today as a by-product of `tools/refpoll.py` needing
+  a clock; not yet chased to its cause, which is either the SH-2 clock constant
+  or the period arithmetic in `mars_pwm_period`.
 * **Interrupt phase.** The CPUs interleave now, but the vertical interrupt is
   raised at a fixed point in the line and the PWM interrupts on line boundaries,
   where the reference has both on their own clocks. It is what is left of the

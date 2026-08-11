@@ -20,17 +20,35 @@ from disasm68k import analyse                    # noqa: E402
 from recomp.m68kc import Codegen, fname          # noqa: E402
 
 DEFAULT_ROM = "roms/Knuckles' Chaotix (JU) (32X) [!].32x"
+CYCLES = "build/m68k_cycles.bin"
+
+
+def read_cycles(path):
+    """Musashi's 68000 cycle table, one byte per opcode word.
+
+    Written by `build/m68kcycles`, which the Makefile builds from Musashi alone
+    — see tools/m68kcycles.c for why the costs come from the interpreter rather
+    than from a second reading of the manual. Missing it is a build-order
+    mistake rather than something to paper over with a default, because a
+    default would silently be the old flat clock again.
+    """
+    with open(path, "rb") as f:
+        table = f.read()
+    if len(table) != 0x10000:
+        sys.exit("%s is %d bytes, expected 65536" % (path, len(table)))
+    return table
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--rom", default=DEFAULT_ROM)
     p.add_argument("--out", default="build/m68k_recomp.c")
+    p.add_argument("--cycles", default=CYCLES)
     p.add_argument("--build", action="store_true")
     args = p.parse_args()
 
     rom, az = analyse(args.rom)
-    cg = Codegen(az)
+    cg = Codegen(az, read_cycles(args.cycles))
     entries = sorted(az.funcs)
 
     body, protos = [], []

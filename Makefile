@@ -22,8 +22,19 @@ build/mars: $(SRC) src/mars.h src/sh2.h src/m68000.h src/m68kconf.h Makefile $(G
 build/sh2_recomp.c:
 	python3 tools/recompile.py
 
-build/m68k_recomp.c:
+build/m68k_recomp.c: build/m68k_cycles.bin
 	python3 tools/recompile68k.py
+
+# What each 68000 instruction costs, taken from Musashi rather than from a
+# second reading of the manual: the recompiled build sums these per block, so it
+# charges what the interpreter charges by construction. Built from Musashi
+# alone, which is what keeps it out of the cycle that build/m68k_recomp.c is in.
+build/m68k_cycles.bin: tools/m68kcycles.c $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c
+	mkdir -p build
+	clang $(CFLAGS) -o build/m68kcycles tools/m68kcycles.c \
+	    $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c \
+	    $(MUSASHI)/softfloat/softfloat.c
+	./build/m68kcycles > $@
 
 # Musashi generates its opcode tables from a template before it can be built.
 $(GEN)/m68kops.c: $(MUSASHI)/m68k_in.c
