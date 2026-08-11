@@ -181,7 +181,8 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
         switch (a & 0xFE) {
         case 0x00: mars.adapter = (uint16_t)v; return 1;
         case 0x02: mars.intctl = (uint16_t)v; return 1;
-        case 0x04: mars.bank = (uint16_t)v; return 1;
+        /* H Count, not the 68000's bank register — see the note in mars.h. */
+        case 0x04: mars.hcount = (uint16_t)v; return 1;
         case 0x06: mars.dreq_ctl = (uint16_t)v; return 1;
         case 0x10: mars.dreq_len = (uint16_t)v; return 1;
         case 0x12: fifo_push((uint16_t)v); return 1;   /* only the 68000 writes */
@@ -244,7 +245,7 @@ int mars_reg_read_sh2(uint32_t a, uint32_t *out) {
         switch (a & 0xFE) {
         case 0x00: *out = mars.adapter; return 1;
         case 0x02: *out = mars.intctl; return 1;
-        case 0x04: *out = mars.bank; return 1;
+        case 0x04: *out = mars.hcount; return 1;
         case 0x06: *out = mars.dreq_ctl; return 1;
         case 0x10: *out = mars.dreq_len; return 1;
         case 0x30: *out = mars.pwm_ctl; return 1;
@@ -545,12 +546,15 @@ void sh2_trace_close(void) {
  * been a copy of the one written — and `[Omitted: N]` is the reference tracer's
  * own format for it, which `tools/tracediff.py` already parses.
  *
- * Collapsing on the address alone was tried and is worse where it matters.
- * It folds the slave's `dt`/`bf` delay loop, whose r0 counts down, and the
- * reference prints every one of those entries: with fewer records than the
- * reference has, the aligner cannot find the four consecutive matches it wants
- * and the slave fell from 269 blocks in lock step to 196. The master, whose
- * idle poll really is the same line over and over, gained either way.
+ * Collapsing on the address alone is the reference's own policy — it prints one
+ * line of the slave's `dt`/`bf` delay loop and omits 197, so the belief recorded
+ * here before, that it logs every iteration of a loop whose registers move, was
+ * simply wrong. Matching it is still not worth it, and that has now been
+ * measured twice. It buys the slave more of the extract per line of trace, and
+ * costs the master a quarter of its agreement: 193 blocks in lock step to 143,
+ * because the master's poll and its work interleave at the same address in
+ * different states and folding them together loses the distinction the
+ * comparison is made of.
  */
 void sh2_block(SH2 *c, uint32_t addr) {
     if (!sh2_trace_f) return;

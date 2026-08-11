@@ -695,8 +695,13 @@ int main(int argc, char **argv) {
            mars.pwm_ctl, mars.pwm_cycle, mars_pwm_per_frame(), mars.pwm_ints);
     printf("  VDP: dma %u, reg1=%02X addr=%04X\n",
            gen.dma_done, gen.vdpreg[1], gen.vdp_addr);
+    /* Whether the palette has been uploaded at all, asked of the whole of it:
+     * sampling two bytes said "all zero" the moment entry 0 became a legitimate
+     * transparent black, which is what the SEGA logo's own palette starts with. */
+    unsigned cused = 0;
+    for (unsigned i = 0; i < sizeof mars.cram; i++) if (mars.cram[i]) cused++;
     printf("  32X: bitmap mode 0x%04X  palette %s\n", mars.bitmap_mode,
-           mars.cram[0] || mars.cram[3] ? "written" : "all zero");
+           cused ? "written" : "all zero");
     /* Enough of the video state to tell an empty frame from a black one: the
      * line table says where each row lives, and pixels beyond it are the image.
      * A frame needs all three — a table, pixels, and a palette. */

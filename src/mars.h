@@ -20,8 +20,16 @@ typedef struct {
     uint8_t  cram[512];
     uint8_t  onchip[512];    /* FRT / WDT / DMAC / SCI, as a plain store */
 
-    /* 32X system registers */
-    uint16_t adapter, intctl, bank;
+    /* 32X system registers.
+     *
+     * `bank` and `hcount` sit at the same offset in the two register blocks and
+     * are *different registers*: the 68000's 0xA15104 selects which megabyte of
+     * the cartridge shows at 0x900000, and the SH-2's 0x20004004 is the H Count
+     * — how many scanlines apart the horizontal interrupt comes. Sharing one
+     * field meant the SH-2 setting its H count silently moved the 68000's
+     * cartridge window back to bank 0, which is where the engine reads its
+     * palettes from. */
+    uint16_t adapter, intctl, bank, hcount;
     uint16_t comm[8];
 
     /* The 68000 -> SH-2 data path. The 68000 sets a word count, raises the

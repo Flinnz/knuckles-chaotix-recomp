@@ -47,6 +47,13 @@ run: build/mars
 # the signal is, and covering the rest needs a six-million-line trace to compare
 # against.
 #
+# The slave is bounded too now, and for a different reason: its stream is 93%
+# delay loop, the reference collapses those runs and we do not, and the aligner
+# walking two streams of such different densities spends the whole trace
+# searching. Six million lines of ours reached 0.6 of a reference frame. Two
+# thousand reference blocks is the boot, the first PWM interrupts and the sound
+# driver's first work — where the signal is — and it walks that cleanly.
+#
 # The windows are far wider than they were, for one reason: the CPUs now wait
 # for each other. A poll that used to be answered inside the 68000's own
 # register write is a real wait, so our 68000 spins 65,270 times at 0x881A06
@@ -104,7 +111,8 @@ check: build/mars
 	python3 tools/diff68k.py --window 400000 --rows 0 --detail 0
 	python3 tools/diffsh2.py --cpu master --window 3000000 --ref-blocks 200 \
 	    --rows 0 --detail 0
-	python3 tools/diffsh2.py --cpu slave  --window 3000000 --rows 0 --detail 0
+	python3 tools/diffsh2.py --cpu slave  --window 3000000 --ref-blocks 2000 \
+	    --rows 0 --detail 0
 	./build/mars --recomp --frames 300 --trace68k build/trace68k_rc.txt \
 	    --trace68k-lines 6000000 >/dev/null
 	python3 tools/diff68k.py --blocks --ours build/trace68k_rc.txt \

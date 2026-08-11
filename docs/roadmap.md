@@ -1354,6 +1354,83 @@ which is what an emulator's idle-loop handling does. That makes this group an
 artefact of the oracle rather than an error of ours, and it is the last thing on
 the slave.
 
+### The picture was reading its palette out of 68000 code
+
+The next divergence down the list settled the whole of (3) — both halves of it —
+and it took one register that two CPUs disagree about.
+
+`0x8836F6` differs on all 102 vblanks, and the delta is **one register, the same
+two values every time**: `d1 = 0x1C00` in the reference against `0x1D7C` in
+ours. It is the value the handler restores from the stack, so it is whatever the
+interrupted code had, and the code that sets it is a loop at `0x88349E` reading
+words out of a table at `0x9299D6` and queueing each one through `0x88313E` —
+which appends to the list at `0xFFD860` that the vblank handler uploads into the
+32X palette at `0xA15200`. So d1 is a *colour*, and ours was the wrong one.
+
+`0x900000` is the banked cartridge window. Read at bank 0, the 38 words there
+are `B06E 002E 6618 116E 0031 0031 306E 002C …` — which is not a palette, it is
+68000 code: `4E75` is `rts`, `306E 002C` is `movea.w (44,a6),a0`. Read at bank 2
+they are `0000 7E00 7E80 7F00 7F80 7FE0 7FFF …`, an unmistakable ramp of 15-bit
+colours. The reference's own reads settle which: taking every `movew %a1@+,%d1`
+in that loop out of the trace and looking up what it loaded, **38 of 38 match
+the cartridge at 0x200000**, none at 0x000000.
+
+The bank is set by `move.b #$02,($a15105)` at `0x8809EE` — and we were doing
+that correctly. What undid it is that **`mars.bank` was one field serving two
+registers**. The 68000's `0xA15104` is the ROM bank; the SH-2's `0x20004004`, at
+the same offset in its own register block, is the **H Count**. They are
+different registers on the machine and were the same `uint16_t` here, so every
+time the SH-2 set its H count the 68000's cartridge window snapped back to bank
+0 — and the engine went on uploading compiled code as colours.
+
+*Gate met, and it is a picture rather than a number:* at 300 frames the 32X half
+draws **the SEGA logo in blue with a white outline, a "TM", and the magenta
+nebula panels either side of it** — the Knuckles' Chaotix intro screen, correct.
+
+It moves the traces as much as the picture. Reading the right bytes changes what
+the engine computes, and **53,451 of the reference's 54,081 instructions now
+agree exactly — 98.8%**, where it was 42,256 before this and 35,412 at the start
+of the day. The boot goes 19,672 to 20,078 of 20,178.
+
+| | start of day | after the rate fix | after the bank fix |
+|---|---|---|---|
+| 68000 boot | 19,672 of 20,178 | 19,672 | **20,078** |
+| 68000 whole extract | 35,412 agreed, 500 div | 42,256, 434 | **53,451**, 388 |
+| recompiled 68000, `--blocks` | 4,800 agreed, 8,408 div | 5,885, 475 | **9,025** of 9,848, 359 |
+
+**The slave's gate is bounded now, and the reason is worth writing down.** With
+the palette right the slave tracks the reference far more closely — 911 blocks
+in lock step through the first quarter-frame, where the whole extract used to
+manage 173 — and that is exactly what defeats the long walk. Our stream is 93%
+delay-loop entries, one per iteration, where the reference collapses each run
+into a line and a count; two streams of such different densities cost the
+aligner its whole budget searching, and six million lines of ours reached 0.6 of
+a reference frame. `--ref-blocks 2000` covers the boot, the first PWM interrupts
+and the sound driver's first work, and walks it cleanly.
+
+Collapsing our own runs on the address, which is the reference's own policy, was
+measured again here rather than assumed: it does buy the slave more extract per
+line, and it costs the master a quarter of its agreement — 193 blocks to 143 —
+because the master's poll and its work share addresses in different states.
+Lifting the bound properly wants the *phase* fixed, not the tracer.
+
+Two carried debts close with it, neither needing the screenshot they were
+waiting on:
+
+* **The palette conversion is right.** `col & 0x1F` is red and `(col >> 10) &
+  0x1F` is blue, and the proof is that the SEGA logo comes out blue and the
+  nebula magenta rather than the other way round. Read the other way this same
+  frame buffer is a red logo, which is what it was.
+* **The frame-select polarity is right.** With a correct picture to look at, the
+  two buffers can be told apart: the one we display holds the whole logo and the
+  one the CPUs draw into holds a *partial* redraw of its bottom edge. Reversed,
+  the display would be the torn half. That is double buffering working, and it
+  is evidence rather than assumption.
+
+The H count now has its own field and does nothing else, which is honest: we
+deliver no horizontal interrupt to either SH-2, and the reference takes none in
+the extract — every one of its 3,360 slave interrupts is the PWM at level 6.
+
 ### Next
 
 Everything the oracle can reach cheaply has now been reached, and the shape of
@@ -1421,15 +1498,20 @@ and Musashi is the oracle, and the gate for it landed above.
   never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
   during boot; `vdp_dma` returns early on both.
-* **The 32X frame-select polarity is a guess.** Displayed is taken to be
-  `fb[FS]` and the CPUs get the other one; nothing has confirmed which way round
-  it is.
-* **The picture is recognisable now, not merely plausible.** At 300 frames the
-  32X half draws the SEGA logo, which is a thing that can be right or wrong
-  rather than a thing that is non-empty, and the line table matches the
-  reference's own arithmetic. What is still unchecked is the palette conversion
-  — the reference's own CRAM writes fall inside loops its tracer elides — and
-  the frame-select polarity, which no CPU trace can settle.
+* ~~**The 32X frame-select polarity is a guess.**~~ *Settled, once there was a
+  correct picture to look at.* The buffer we display holds the whole SEGA logo
+  and the one the CPUs draw into holds a partial redraw of its bottom edge —
+  reversed, the display would be the torn half.
+* ~~**The palette conversion is unchecked.**~~ *Settled, and it was right.* Red
+  is the low five bits and blue the high five: read that way the logo is blue
+  and the nebula magenta, read the other way it is the red thing this drew
+  before the bank register was fixed. What the trace could not reach directly —
+  the reference's CRAM writes are memory-to-memory inside elided loops — it
+  reached through the *source*: 38 of 38 of the palette words the reference
+  loads come from the cartridge at 0x200000.
+* **The picture is right, not merely recognisable.** At 300 frames the 32X half
+  draws the SEGA logo in blue with its outline, its "TM" and the nebula panels,
+  and the line table matches the reference's own arithmetic.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 
