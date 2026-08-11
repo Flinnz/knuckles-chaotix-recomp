@@ -242,11 +242,22 @@ def diff(ref, ours, window, hold, skip):
             # Worth saying out loud rather than leaving it buried in a register
             # that happens to differ.
             #
-            # Both counts are instructions. Ours is the length of every block we
-            # ran since the last agreed point — a basic block always executes
-            # whole, so that is exact — and theirs is what they did not print
-            # plus the line itself. For an instruction trace every `ran` is 1
-            # and this is just "how many lines apart".
+            # Both counts are instructions, and both measure the same half-open
+            # interval — from the previously matched record up to this one, the
+            # earlier record's own steps included and this one's excluded.
+            # Theirs is `gap + 1` because `gap` is what they ran between the two
+            # lines without printing it; ours is `ran` summed from `j - 1`, the
+            # record that matched the previous reference line. For an
+            # instruction trace every `ran` is 1 and this is just "how many
+            # lines apart"; for a block trace it is the block lengths, a block
+            # always executing whole.
+            #
+            # This is exact only if our tracer never logs a block it did not
+            # run. It used to: SH2_BLOCK and M68K_BLOCK traced before checking
+            # the fuel, so a block that yielded was logged, re-entered next
+            # slice and logged again. The two records are identical, so the
+            # alignment could not see it, and every count here came out about
+            # double.
             if j:
                 trips(i, j, sum(r.ran for r in ours[j - 1:p]), a.gap + 1)
 

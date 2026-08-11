@@ -1248,6 +1248,51 @@ count or the divergence classification, and it is worth fixing in
 `tools/tracediff.py` — where `diffsh2` shares it and has been quietly diluting
 it in long idle loops.
 
+### The trip counts were double, and it was not the interval
+
+The caveat recorded above — that `tracediff` sums an interval one record too
+wide — was wrong, and reading the numbers rather than the code is what said so.
+The rows it produced were not one block high, they were **exactly twice**:
+4 against 2, 6 against 3, 152 against 76, over and over. An off-by-one interval
+cannot do that. Something was counting every block twice.
+
+`M68K_BLOCK` traced *before* it checked the fuel. A block that finds the slice
+spent runs none of itself — it parks its own address and returns — and is
+entered again from the top next slice, so it was logged once for the entry that
+ran nothing and once for the entry that ran. The two records are identical by
+construction, which is exactly why the alignment never noticed: it matched
+either one and walked on. Only the instruction counts, which are what a trip
+count is made of, came out doubled.
+
+It matters this much here because a sub-slice is **about 2.7 instructions** of
+this engine's mix — 127,840 cycles over 4,192 hand-overs at 11.4 cycles an
+instruction — so nearly every block was ending one slice and starting the next.
+`SH2_BLOCK` had the same order and the same bug, diluted rather than doubled:
+an SH-2 slice is some ten blocks long, so roughly a tenth of its entries were
+duplicates.
+
+Checking the yield before the trace is the whole fix, and the interval in
+`tracediff.py` is left alone because it was right: both sides measure from the
+previously matched record up to this one, the earlier record's steps included
+and this one's excluded, which is what `gap + 1` counts on the reference's side.
+
+| | before | after |
+|---|---|---|
+| recompiled 68000, `--blocks` | 4,800 agreed, **8,408** div | 4,800 agreed, **475** div |
+| slave | 269 agreed, **11,969** div | 269 agreed, **6,853** div |
+| master, boot | 193 agreed, 20 div | unchanged |
+| 68000 interpreted | 35,412 agreed, 500 div | unchanged |
+
+Nothing moved on the two interpreted diffs, which is the control: Musashi's hook
+is per instruction and never had the bug. What is left on the recompiled 68000
+is 475 rows that mean something — the four BIOS stand-ins that answer instantly
+(the checksum's 672,348, the VDP DMA busy bit's 16,554, the two comm
+rendezvous), and then real ones.
+
+The other half of the fix is free and worth noting: an `[Omitted: N]` line
+counts against the trace's line budget, so deleting the spurious ones buys game
+time. The slave's trace covers more of the run in the same 1,000,000 lines.
+
 ### Next
 
 Everything the oracle can reach cheaply has now been reached, and the shape of
@@ -1255,22 +1300,14 @@ the work changes here: what is left divides into a few hours of tidying, one
 piece of real reverse engineering, and the milestone that is most of the
 remaining project.
 
-**1. Fix the trip-count interval in `tools/tracediff.py`** — half an hour, and
-it makes every other number on this list trustworthy. `sum(r.ran for r in
-ours[j - 1:p])` includes the previously-matched record, so in block mode a trip
-count runs one block's length high. Both SH-2 diffs and the new `--blocks` mode
-share it. Do this first: it moves 8,408 of the recompiled 68000's divergences
-and an unknown share of the slave's 11,969, and until it is right nobody can
-tell which of those are real.
-
-**2. Read the residual divergences one at a time.** 162 register differences
+**1. Read the residual divergences one at a time.** 162 register differences
 and 83 places control flow parts on the 68000, led by `0x8836F6` and
 `0x883244`; on the slave, the interrupt entries at `0x060001F8`. These are no
 longer trip counts and no longer a mechanism — the clocks are right, the
 rendezvous are real, the interrupts are on their own timers. They want reading,
 and the tooling to read them exists. Expect several to be one bug.
 
-**3. The two things the picture still rests on.** The palette conversion is
+**2. The two things the picture still rests on.** The palette conversion is
 unchecked, because the reference's own CRAM writes fall inside loops its tracer
 elides — so `refframe.py` cannot reach them and this needs a different angle.
 The likeliest one is the *slave*: it has its own extract and nothing has asked
@@ -1278,13 +1315,13 @@ whether the palette is uploaded there. Failing that it wants a known-good
 emulator for one screenshot. The frame-select polarity no CPU trace can settle
 at all; it needs the same screenshot.
 
-**4. Then M6, which is most of what is left.** Sound is untouched: the FIFOs
+**3. Then M6, which is most of what is left.** Sound is untouched: the FIFOs
 accept writes and report space so the driver never stalls, and the samples go
 nowhere. The slave's PWM interrupt is already on the machine's own clock, 365.96
 to a frame, so the timing that an audio path needs is in place — what is missing
 is a YM2612 and PSG core, a PWM sink, and somewhere to put the samples.
 
-**5. And the real end of it: retire Musashi.** `--recomp` now runs the whole
+**4. And the real end of it: retire Musashi.** `--recomp` now runs the whole
 game on translated code with 291 structural hand-overs, and the interpreter is
 kept for exactly two things — the adapter's assembled stubs below `0x100`, and
 the routines the engine builds in work RAM at `0xFF0000`. Neither can be

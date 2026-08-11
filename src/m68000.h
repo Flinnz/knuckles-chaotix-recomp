@@ -171,9 +171,17 @@ extern int32_t m68k_fuel;
 extern int m68k_trace;
 void m68k_block(const M68K *c, uint32_t addr);
 
+/* The yield is checked before the trace for the same reason it is on the SH-2
+ * side, and it matters far more here: a sub-slice is about 2.7 instructions of
+ * this engine's mix, so nearly every block was ending one slice and starting
+ * the next, and logging before the fuel check recorded it once for the entry
+ * that ran nothing and once for the entry that ran. The pair is identical, so
+ * the alignment never noticed — but every trip count came out twice its true
+ * length.
+ */
 #define M68K_BLOCK(c, a, n) do {                                \
-    if (m68k_trace) m68k_block((c), (a));                       \
     if (m68k_fuel <= 0) { (c)->pc = (a); return M68K_YIELD; }   \
+    if (m68k_trace) m68k_block((c), (a));                       \
     m68k_fuel -= (n);                                           \
 } while (0)
 

@@ -81,10 +81,17 @@ extern int sh2_trace;
 void     sh2_block(SH2 *c, uint32_t addr);
 
 /* `n` is the block's instruction count, which the emitter knows statically, so
- * the fuel is spent in instructions without counting any at run time. */
+ * the fuel is spent in instructions without counting any at run time.
+ *
+ * The yield is checked *before* the trace, and the order is load-bearing: a
+ * block that finds the fuel spent runs none of itself and is re-entered from
+ * the top next slice, so logging it first recorded every such block twice.
+ * That is invisible in the sequence — the two records are identical, so the
+ * aligner matches either — and doubles the instruction count the trip-count
+ * comparison is built on. */
 #define SH2_BLOCK(c, a, n) do {                                 \
-    if (sh2_trace) sh2_block((c), (a));                         \
     if (sh2_fuel <= 0) { (c)->pc = (a); return SH2_YIELD; }     \
+    if (sh2_trace) sh2_block((c), (a));                         \
     sh2_fuel -= (n);                                            \
 } while (0)
 
