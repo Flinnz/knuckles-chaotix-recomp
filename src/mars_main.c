@@ -323,6 +323,14 @@ static void sh2_slice(int i, unsigned cycles) {
 
 static void cpu_run(unsigned cycles) {
     cpu_credit += (int)cycles;
+    /* A DMA the last slice started held the 68000 off the bus while it ran.
+     * gen68k.c hands it back in scanlines because that is the unit the VDP's
+     * own transfer table is in; the cycles are this side's business. */
+    if (gen.dma_lines1000) {
+        cpu_credit -= (int)((uint64_t)gen.dma_lines1000 * CYCLES_PER_FRAME
+                            / LINES_PER_FRAME / 1000u);
+        gen.dma_lines1000 = 0;
+    }
     if (cpu_credit <= 0) return;             /* still paying off the last one */
     if (!use_recomp) {
         cpu_credit -= m68k_execute(cpu_credit);

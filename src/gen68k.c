@@ -234,6 +234,31 @@ static uint32_t rom_at(uint32_t a) {
 }
 
 /* ------------------------------------------------------------ Genesis VDP */
+/* What a DMA costs the 68000, in thousandths of a scanline.
+ *
+ * It costs it the bus. The VDP takes the transfers in slots it would otherwise
+ * give the CPU, so for as long as one runs the 68000 does not execute — and the
+ * rate is in the VDP's own table, in transfers a scanline, which is why that is
+ * the unit handed back rather than cycles. Blanking is where nearly all of it
+ * happens and is an order of magnitude faster than active display, because the
+ * VDP is not fetching pattern data.
+ *
+ * This was the last of the 68000's residue and it was worth 264 cycles a frame:
+ * the engine uploads its palette by DMA every vblank, 64 words to CRAM, and we
+ * did the transfer and charged nothing. What the 68000 did with the time was
+ * spin 24 more instructions in the wait loop at 0x8834C0 than the reference —
+ * which is the whole of why our frame retired 11,634 instructions against its
+ * 11,601, the loop being the cheapest thing in the frame at 11 cycles.
+ */
+static uint32_t dma_lines1000(uint32_t len) {
+    int h40 = (gen.vdpreg[12] & 0x81) != 0;
+    int blank = gen.line >= 224 || !(gen.vdpreg[1] & 0x40);
+    int slow = (gen.vdp_code & 7) != 1;          /* CRAM and VSRAM, not VRAM */
+    unsigned per_line = slow ? (blank ? (h40 ? 102 : 83) : (h40 ? 9 : 8))
+                             : (blank ? (h40 ? 205 : 167) : (h40 ? 18 : 16));
+    return (uint32_t)((uint64_t)len * 1000u / per_line);
+}
+
 static void vdp_dma(void) {
     uint32_t len = ((uint32_t)gen.vdpreg[20] << 8) | gen.vdpreg[19];
     uint32_t src = (((uint32_t)gen.vdpreg[23] & 0x7F) << 17)
@@ -241,6 +266,7 @@ static void vdp_dma(void) {
                  | ((uint32_t)gen.vdpreg[21] << 1);
     if (len == 0) len = 0x10000;
     if (gen.vdpreg[23] & 0x80) return;      /* fill / copy: not needed yet */
+    gen.dma_lines1000 += dma_lines1000(len);
     for (uint32_t i = 0; i < len; i++) {
         uint16_t v = (uint16_t)m68k_read_memory_16(src);
         uint32_t a = gen.vdp_addr & 0xFFFFu;

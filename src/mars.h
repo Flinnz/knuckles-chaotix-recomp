@@ -80,6 +80,14 @@ typedef struct {
     uint32_t cmd_hist[16];   /* commands posted to comm 0, by kind */
     uint32_t line;           /* scanline the 68000 is running inside */
     uint32_t hpos;           /* how far into it, 0-255, one step a hand-over */
+    /* What a DMA owes the 68000, in thousandths of a scanline.
+     *
+     * A DMA holds the 68000 off the bus for as long as it runs, and the VDP's
+     * own table gives that as *transfers per scanline* — so a scanline is the
+     * natural unit for src/gen68k.c to hand back and cycles are the frame
+     * loop's business, which is where the clock constants live. Charged and
+     * cleared by cpu_run(). */
+    uint32_t dma_lines1000;
     /* Two different things that used to be one flag. `vint_pending` is VDP
      * status bit 7, which the adapter's boot ROM leaves set before the
      * cartridge runs an instruction — 379,000 instructions of vblanks nothing

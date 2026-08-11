@@ -1863,6 +1863,61 @@ not costing instructions differently; what is left is that we execute a slightly
 different mix. That is a question for the trace diff, whose 411 divergences on
 the whole extract are mostly trip counts, and not for another clock.
 
+### The 68000's last residue was a DMA nobody was charged for
+
+Our frame retired 11,634 instructions against the reference's 11,611 and the
+guesses about why had all been wrong, so the trace diff was asked instead — not
+its divergence list, which is dominated by the boot, but one steady frame counted
+per address on both sides. Getting that count right needs one thing said out
+loud: the reference prints its `[Omitted: N]` for a collapsed run *after* the
+vertical interrupt that broke into it, so a naive frame split throws away 11,238
+of a frame's 11,611 instructions and leaves the handler looking like the whole
+of it.
+
+The answer is almost embarrassingly clean. Split the frame into the wait loop at
+`0x8834C0` and everything else:
+
+| | reference | ours | delta |
+|---|---|---|---|
+| the wait loop | 11,242.0 | 11,266.0 | **+24.0** |
+| everything else | 369.5 | 367.8 | −1.7 |
+
+**The work is the same work.** Excluding the loop, exactly two addresses differ
+in the whole frame, by two instructions each. All 33 of the extra instructions
+are extra *spins*, and the loop — `tst.b ($ffffd1)` / `beq`, 11 cycles an
+instruction — is the cheapest thing in the frame, which is the entire mix
+difference: our 11.003 cycles an instruction against 11.034 is not a cheaper
+price for the same work, it is more of the cheapest work.
+
+So the 68000 had spare time, about **264 cycles a frame**, and the trace says
+where it went. The engine uploads its palette by DMA every vblank — 64 words to
+CRAM, source `0xFFD460`, and the reference logs all 64 in every steady frame.
+Our `vdp_dma` did the transfer and charged nothing. A DMA costs the 68000 the
+bus for as long as it runs.
+
+The rate is the VDP's own table, in transfers a scanline, and it is an order of
+magnitude slower during active display than blanking because the VDP is fetching
+pattern data:
+
+| | H32 display | H32 blank | H40 display | H40 blank |
+|---|---|---|---|---|
+| → VRAM | 16 | 167 | 18 | 205 |
+| → CRAM, VSRAM | 8 | 83 | 9 | 102 |
+
+64 words to CRAM in H40 blanking is 0.63 of a scanline, **307 cycles**. Charged,
+counted the same way on both sides:
+
+| | reference | before | after |
+|---|---|---|---|
+| the wait loop | 11,242.0 | 11,266.0 | **11,238.3** |
+| everything else | 369.5 | 367.8 | 367.7 |
+| a frame | 11,611.5 | 11,633.8 | **11,606.0** |
+
+From 22 instructions a frame over to 5 under — 0.19% to **0.05%**. The table
+over-corrects slightly against the 264 cycles the frame measured, which is the
+honest way round: 307 is what the VDP documents, and 264 is a difference between
+two rates that each carry their own error bars.
+
 ### Next
 
 **1. M6, which is most of what is left.** Sound is untouched: the FIFOs accept
@@ -1915,6 +1970,11 @@ does not spend the same day finding the same thing.
   average reads 2.6% *under* a steady rate that is really 1.95% *over*. Take the
   marginal rate between two run lengths. The same average is what made a credit
   that banked the hold look like an improvement.
+* **Splitting the reference into frames at the vertical interrupt marker.** The
+  collapsed run the interrupt broke into is printed *after* the marker, so a
+  split that resets its history there loses it — 11,238 of a steady frame's
+  11,611 instructions, leaving the handler looking like the whole frame and its
+  373 instructions looking like the rate.
 * **Reading the slave diff's reach as an aligner result.** It is a trace-size
   result. A bound that walks further because the slave burst through a banked
   backlog is not coverage of anything, and it is what made the aligner fix look
@@ -1959,15 +2019,10 @@ does not spend the same day finding the same thing.
   rest is the frame below.
 * ~~**The frame is 60 Hz where NTSC is 59.9227.**~~ *Settled.* 128,006 now, the
   true 896,040/7, confirmed against the reference's own clock at 127,985.
-* **The 68000's steady state is 11,634 a frame against the reference's 11,601.**
-  Correcting the frame unmasked it: our mix averages 11.003 cycles an instruction
-  where the reference's averages 11.034, so a frame 0.13% short was hiding a
-  0.28% difference in *what is executed*. It was guessed to be downstream of the
-  SH-2 rates and it is not — putting both of those within 0.03% moved it by
-  nothing. Under `--interp` the cost model is Musashi's and the loops `refpoll`
-  prices land on Musashi's charges exactly, so this is a different mix rather
-  than a different price. The trace diff's 411 divergences, mostly trip counts,
-  are where to look.
+* ~~**The 68000's steady state is 11,634 a frame against the reference's
+  11,601.**~~ *Settled, and it was the DMA.* All 33 instructions were extra
+  spins of the cheapest loop in the frame, bought with the 264 cycles a palette
+  DMA should have cost the 68000 and did not. 11,606 now.
 * ~~**`sh2_cpi1000` was measured against the short frame.**~~ *Settled.* 1.634
   and 1.009 now, from the same reference counts over the right frame.
 * **Interrupt phase.** The CPUs interleave and both timers are on their own
@@ -1980,7 +2035,10 @@ does not spend the same day finding the same thing.
 * **No audio.** The sample FIFOs accept writes and report space so the driver
   never stalls, and the samples go nowhere.
 * **Genesis DMA fill and copy are skipped.** The reference issues 65,535 fills
-  during boot; `vdp_dma` returns early on both.
+  during boot; `vdp_dma` returns early on both — and now returns early *before*
+  charging the 68000 for them too, so a fill is free where a transfer is not.
+  The transfers are the ones the engine uses every frame; the fills are the
+  boot's.
 * ~~**The 32X frame-select polarity is a guess.**~~ *Settled, once there was a
   correct picture to look at.* The buffer we display holds the whole SEGA logo
   and the one the CPUs draw into holds a partial redraw of its bottom edge —
