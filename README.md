@@ -15,7 +15,7 @@ tools/            analysis pipeline (Python, no dependencies)
   disasm.py       CLI front end
   validate_decoder.py
 toolchain/        locally built sh-elf binutils
-docs/             architecture findings and roadmap
+docs/             state.md (current numbers), architecture findings, roadmap
 ```
 
 ## Setup
@@ -157,11 +157,15 @@ picture from each half of the machine.
   set up — but past it there is music from every part of the machine at once:
   32X PWM samples, PSG squares, and six channels of FM through Nuked-OPN2.
   `--sound` separates them
-- Next: the vertical interrupt's *phase* — where in the engine's frame it lands
-  — which is what nearly all the remaining trace differences are
+- The game runs: SEGA logo, title screen, and the attract mode through two
+  levels, for about four and a half minutes before it stops
+- Next: a gate that does not need the reference logs, which end 1.7 seconds in
+  while the game now runs for two hundred and fifty
 
-See [docs/architecture.md](docs/architecture.md) for findings and
-[docs/roadmap.md](docs/roadmap.md) for the plan.
+See [docs/state.md](docs/state.md) for where things stand — numbers, flags and
+open items, no prose — [docs/architecture.md](docs/architecture.md) for
+findings, and [docs/roadmap.md](docs/roadmap.md) for how each of them was
+arrived at and what was tried and rejected.
 
 The headline finding: the SH-2 program is only 36 KB. This is a 68000
 Sonic-engine game that uses the 32X as a video co-processor, so the 68000 is the
