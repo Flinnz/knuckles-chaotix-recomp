@@ -68,6 +68,26 @@ the playable build needs no cross-toolchain at all. Two things to know: the
 after a few minutes of play, which costs the statistics and nothing else; and
 the trace files come out with CRLF endings, which the diff tools read anyway.
 
+Cross-compiling from macOS or Linux works, and is how the Windows build was
+checked — Fedora's MinGW packages in a container, which is the least effort
+for the most coverage:
+
+```bash
+make CC=x86_64-w64-mingw32-gcc CC_BUILD=gcc PKG_CONFIG=x86_64-w64-mingw32-pkg-config
+```
+
+`CC_BUILD` is a second compiler because `m68kmake` and `m68kcycles` are not
+part of the program: they run *during* the build to generate its sources, so
+they belong to the machine doing the building rather than to the target. What
+they emit does not depend on which — the cycle table comes out byte for byte
+the same from either.
+
+The result is a PE32+ console executable whose only non-system import is
+`SDL2.dll`. **It has been compiled and linked, not run.** Wine under QEMU on
+an ARM Mac dies in its own memory manager on a host/target page-size mismatch,
+long before reaching any of this, so the runtime half of the Windows story is
+still waiting on someone with an actual Windows machine.
+
 ### Cross-binutils, for `make check` only
 
 `emit --verify` and the recompiler tests assemble what they emitted, which is

@@ -1,25 +1,41 @@
 MUSASHI = third_party/musashi
 NUKED   = third_party/nuked-opn2
 GEN     = build/musashi
-SDLCF  := $(shell pkg-config --cflags sdl2)
-SDLLD  := $(shell pkg-config --libs sdl2)
-
-# Which compiler, and what the linker will call what it produces.
+# Which compiler, what it targets, and what the linker will call the result.
 #
 # `cc` is make's own built-in default for CC and is the one name that does not
 # exist on MinGW, so neither host can just take the default. $(origin) is
 # `default` only when nothing else has said anything, which leaves an
 # environment or command-line CC winning; exporting it is what carries a
 # `make CC=...` down into the recompilers, which compile their own output.
-#
-# EXE is not cosmetic: GCC on Windows appends `.exe` to an -o argument that has
-# no extension, so a target named without it is never the file that appeared
-# and make rebuilds it every time.
-ifeq ($(OS),Windows_NT)
-  EXE = .exe
-  ifeq ($(origin CC),default)
+ifeq ($(origin CC),default)
+  ifeq ($(OS),Windows_NT)
     CC = gcc
+  else
+    CC = clang
   endif
+endif
+export CC
+
+# Ask the compiler what it targets rather than asking the shell what it runs
+# on. Those are the same question building natively under MSYS2 and different
+# ones when cross-compiling: `make CC=x86_64-w64-mingw32-gcc` emits Windows
+# binaries from a host that never says Windows_NT, and keying off $(OS) there
+# names every output without its suffix and links the wrong subsystem.
+TARGET  := $(shell $(CC) -dumpmachine 2>/dev/null)
+WINDOWS := $(findstring mingw,$(TARGET))$(findstring cygwin,$(TARGET))$(findstring msys,$(TARGET))
+
+# Likewise pkg-config: a cross build needs the one that answers for the target
+# sysroot, not the one that answers for the host.
+PKG_CONFIG ?= pkg-config
+SDLCF  := $(shell $(PKG_CONFIG) --cflags sdl2)
+SDLLD  := $(shell $(PKG_CONFIG) --libs sdl2)
+
+# EXE is not cosmetic: GCC targeting Windows appends `.exe` to an -o argument
+# that has no extension, so a target named without it is never the file that
+# appeared and make rebuilds it every time.
+ifneq (,$(WINDOWS))
+  EXE = .exe
   # pkg-config's MinGW SDL2 ends its libs with -mwindows, which is the GUI
   # subsystem: a program with no stdout at all. Everything here reports on
   # stdout, and the trace gates redirect it, so take the console back. Last
@@ -27,19 +43,43 @@ ifeq ($(OS),Windows_NT)
   SDLLD += -mconsole
 else
   EXE =
-  ifeq ($(origin CC),default)
-    CC = clang
-  endif
 endif
-export CC
+
+# Two compilers, not one. m68kmake and m68kcycles are not part of the program:
+# they run *during* the build to generate its sources, so they have to be
+# native to the machine doing the building while everything else is built for
+# the target. Those are the same compiler in a native build and different ones
+# the moment you cross-compile, where building a generator with the cross
+# compiler yields a generator the build host cannot execute. What they emit —
+# an opcode table and a cycle table — is the same bytes either way.
+# Musashi compiles m68kfpu.c unconditionally — see SRC below for why — and it
+# calls sin, cos and sincos. macOS and MinGW both answer those from libc; a
+# glibc link does not, and fails at the generator before it ever reaches the
+# program. Naming it costs the other two nothing, since -lm is a no-op stub on
+# both, and it is what lets this build on Linux at all.
+LIBM ?= -lm
+
+CC_BUILD ?= $(CC)
+BUILD_TARGET  := $(shell $(CC_BUILD) -dumpmachine 2>/dev/null)
+BUILD_WINDOWS := $(findstring mingw,$(BUILD_TARGET))$(findstring cygwin,$(BUILD_TARGET))$(findstring msys,$(BUILD_TARGET))
+ifneq (,$(BUILD_WINDOWS))
+  BUILD_EXE = .exe
+else
+  BUILD_EXE =
+endif
 
 # -include is what makes src/m68kconf.h effective: Musashi's own sources say
 # #include "m68kconf.h", which a quoted include resolves to the copy sitting
 # next to them in third_party/, so -Isrc alone never overrode anything. Forcing
 # ours in first claims the shared M68KCONF__HEADER guard and the vendored file
 # then expands to nothing.
-CFLAGS  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
-          -Isrc -I$(MUSASHI) -I$(NUKED) -I$(GEN) $(SDLCF)
+#
+# BASECF is the part with no SDL in it, which is what the generators compile
+# with: they draw on Musashi and nothing else, and a cross build's SDL include
+# path is the target's.
+BASECF  = -O2 -Wall -Wno-unused-label -include src/m68kconf.h \
+          -Isrc -I$(MUSASHI) -I$(NUKED) -I$(GEN)
+CFLAGS  = $(BASECF) $(SDLCF)
 
 # m68kcpu.c includes m68kfpu.c unconditionally, which needs softfloat even for
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
@@ -50,7 +90,7 @@ SRC = build/sh2_recomp.c build/m68k_recomp.c src/m68000.c \
 
 build/mars$(EXE): $(SRC) src/mars.h src/sh2.h src/sound.h src/psg.h src/z80.h src/genz80.h \
             src/m68000.h src/m68kconf.h Makefile $(GEN)/m68kops.c
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(SDLLD)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(SDLLD) $(LIBM)
 
 build/sh2_recomp.c:
 	python3 tools/recompile.py
@@ -64,16 +104,16 @@ build/m68k_recomp.c: build/m68k_cycles.bin
 # alone, which is what keeps it out of the cycle that build/m68k_recomp.c is in.
 build/m68k_cycles.bin: tools/m68kcycles.c $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c
 	mkdir -p build
-	$(CC) $(CFLAGS) -o build/m68kcycles$(EXE) tools/m68kcycles.c \
+	$(CC_BUILD) $(BASECF) -o build/m68kcycles$(BUILD_EXE) tools/m68kcycles.c \
 	    $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c \
-	    $(MUSASHI)/softfloat/softfloat.c
-	./build/m68kcycles$(EXE) $@
+	    $(MUSASHI)/softfloat/softfloat.c $(LIBM)
+	./build/m68kcycles$(BUILD_EXE) $@
 
 # Musashi generates its opcode tables from a template before it can be built.
 $(GEN)/m68kops.c: $(MUSASHI)/m68k_in.c
 	mkdir -p $(GEN)
-	$(CC) -O2 -o $(GEN)/m68kmake$(EXE) $(MUSASHI)/m68kmake.c
-	cd $(GEN) && ./m68kmake$(EXE) . ../../$(MUSASHI)/m68k_in.c
+	$(CC_BUILD) -O2 -o $(GEN)/m68kmake$(BUILD_EXE) $(MUSASHI)/m68kmake.c
+	cd $(GEN) && ./m68kmake$(BUILD_EXE) . ../../$(MUSASHI)/m68k_in.c
 
 .PHONY: run clean check
 run: build/mars$(EXE)
