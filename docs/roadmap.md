@@ -2307,7 +2307,10 @@ the fill count, the words and that percentage, because a fill that is wrong by
 hold 16 rows of real content — 40 cells wide on A, 62 on B, with a 38-entry
 palette — and VSRAM holds `0xFF20`, a vertical scroll of exactly −224 lines,
 which is the screen's own height. So the renderer is not drawing nothing; the
-engine has a screen ready to slide in and never slides it.
+engine has a screen ready to slide in and never slides it. Chased further in the
+carried debts below: the picture is the title screen's tunnel and is correct,
+the engine writes that one scroll value 2,800 times without ever changing it,
+and neither the recompiler nor the fill cost is what holds it there.
 
 **And there is 68000 code past the logo that discovery has never seen.** The
 recompiled build hands over to the interpreter 4,163 times at
@@ -2508,10 +2511,30 @@ does not spend the same day finding the same thing.
   is 69% of its clock, and what reaches the frame buffer afterwards is 255
   bytes. Whether a real 32X is that fill-bound is not something the extract can
   say — it never reaches the blitter at `0x06004750`.
-* **The Mega Drive screen past the logo is parked below the display.** Both
-  planes hold 16 rows of content and a 38-entry palette, and VSRAM holds a
-  vertical scroll of exactly -224 lines — the screen's own height. The engine
-  has a screen ready and never slides it in.
+* **The Mega Drive screen past the logo is parked below the display, and the
+  engine parks it.** Rendered with the vertical scroll forced to zero it is the
+  Chaotix title screen's perspective tunnel, drawn correctly — so the tiles, the
+  tilemap, the palette and the renderer are all sound. What holds it off-screen
+  is the engine writing VSRAM 0 and 1 as `0xFF20`, exactly -224 lines and
+  exactly the screen's own height, from frame 422 onward: 2,800 writes over
+  3,600 frames and **one distinct value**. It is not a DMA being dropped either
+  — there is no transfer to VSRAM in the whole run, every write is through the
+  data port.
+* **It is not the recompiler.** `--interp` and `--recomp` are identical past the
+  logo: the same 359 commands at 1,200 frames and 492 at 3,600, the same 9,583
+  VRAM bytes, the same 38 CRAM entries, the same frame buffer. The only
+  difference is the reported PC, which is the same instruction seen through the
+  direct and `0x880000` windows.
+* **The fill cost throttles the engine but is not what stops it.** Making
+  autofills instantaneous takes the command rate from 492 to 1,291 in 3,600
+  frames, 2.6x — and the scroll is still that one value and the screen is still
+  black.
+* **The level picture recorded under M5 was a much faster machine, not a
+  regression.** Bisected at 3,000 frames: `a5b2522` and `bd06bcc` post 1,751
+  commands where the current build posts about 400, because the SH-2 rates, the
+  FEN model and the interleaving were all still wrong in the direction of
+  running the game too fast. None of those commits draws a Mega Drive picture at
+  3,000 frames either.
 * **`0x0749C2`-`0x0749D0` is 68000 code discovery has never found.** Not a
   block, not in `az.code`, between known blocks at `0x749AA` and `0x749E4`, and
   entered 4,163 times in 3,600 frames. `coverage` is clean because it is only
