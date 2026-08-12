@@ -1,4 +1,9 @@
-# chaotix
+# Knuckles Chaotix Recomp
+[!WARNING]
+I used many LLM dark spells making this project, please be patient.
+
+[!NOTE]
+If you don't mind usage of dark magic in repo, please feel free to contribute.
 
 Reverse-engineering Knuckles' Chaotix (Sega 32X, 1995) toward a natively
 recompiled ARM build.
