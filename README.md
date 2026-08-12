@@ -200,3 +200,19 @@ arrived at and what was tried and rejected.
 The headline finding: the SH-2 program is only 36 KB. This is a 68000
 Sonic-engine game that uses the 32X as a video co-processor, so the 68000 is the
 main target and the SH-2 side is a small appendix.
+
+## License
+
+This repository's own code — the runtime in `src/`, the analysis and
+recompilation pipeline in `tools/`, the tests and the docs — is MIT, in
+[LICENSE](LICENSE).
+
+The submodules keep their own terms: Musashi is MIT, and Nuked-OPN2 is
+LGPL 2.1-or-later, which is a condition on distributing a *binary* that links
+it rather than on anything here. SDL2 is zlib.
+
+None of this licenses the game. *Knuckles' Chaotix* is Sega's, no cartridge
+data is in the repository, and nothing here runs without a dump you provide.
+The recompiler's output is derived from that dump and is written to `build/`,
+which is ignored for the same reason `roms/` is: what the pipeline produces
+from a copyrighted ROM is not this project's to hand out.
