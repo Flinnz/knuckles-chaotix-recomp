@@ -2165,15 +2165,107 @@ against the PWM's full swing and the PSG's half, which puts a loud FM channel
 where a loud PSG channel is. What the three are worth against each other on real
 hardware is an analogue question and the traces do not answer it.
 
+### An interrupt lands where the clock puts it, not where the hand-over does
+
+Both SH-2s were being told about an interrupt at the start of a window in which
+it had not yet happened, and the two cases are the same defect seen from
+different sides: an event's *position inside a hand-over* was being thrown away.
+
+**The slave's timer was firing early by construction.** The PWM interrupt is the
+only clock it has, and the frame loop raised it for a whole hand-over at that
+hand-over's start — up to 90 SH-2 cycles ahead of the timer's own edge on a
+period of 1,046, a twelfth of the clock, and then the driver began mixing from a
+point the timer had not reached. `sound_pwm_ahead()` says how much of the next
+share falls before the edge, and the slave's slice is cut there: run to the
+edge, take the sample out of the FIFOs, raise the interrupt, run the rest.
+
+**The master was answering the 68000 before the 68000 had asked.** Inside a
+hand-over the 68000 runs its whole share and the SH-2s run theirs afterwards,
+both standing for the same wall-clock window — so a register write in the last
+cycles of the 68000's turn was acted on from the *start* of the SH-2's, a reply
+that precedes the question by up to a whole hand-over.
+
+The game measures exactly that, and the measurement is a count the trace already
+holds. At `0x883232` the 68000 arms a DREQ transfer, raises the master's command
+interrupt, and spins at `0x88323A` on the bit until the handler clears it —
+which takes the master eighteen instructions, twelve of the dispatcher at
+`0x060001B0` and six more to the `mov.w r0,@r0` at `0x0600133E`. So how many
+times the 68000 goes round is how long the master took. The reference goes round
+twice in 45 of its 103 transfers, three times in 26 and once in 31, mean
+**1.97**. Ours went round *once* in 194 of 270, mean 1.28: whenever the write
+landed near the end of a hand-over, the master answered before the 68000
+executed another instruction at all.
+
+So a raise now carries where in the window it happened — `mars_slice_pos()`
+turns the 68000's unspent cycles into the SH-2's own — and the target's slice is
+split there, the same cut the PWM edge makes.
+
+**Measuring from what is *left* rather than what has been spent is what makes
+that a position at all.** The budget is not the window: a slice that overshot
+leaves a debt and a DMA that held the bus takes more off, so `cpu_credit` is
+short by exactly how far into the window the 68000 starts. And the answer is
+allowed to land past the window's end, carried into the next hand-over rather
+than clamped — which is the two backends being honest about themselves.
+Musashi charges an instruction when it finishes, so it places a write within one
+instruction of the truth; a recompiled block is charged whole in its prologue,
+so it places every access inside the block at the block's *end*. For the block
+that matters here that is five hand-overs out, and costs nothing, because
+`0x883202` is fifteen instructions and 154 cycles and the raising write is its
+last one.
+
+| | before | after |
+|---|---|---|
+| 68000 boot | 20,083 agreed, 21 div | **20,084**, **19** |
+| 68000 whole extract | 52,391 agreed, 421 div | **52,414**, **389** |
+| recompiled 68000, `--blocks` | 8,741 blocks, 395 div | 8,741, **384** |
+| slave, 2,000 blocks | 1,131 agreed, 482 div | **1,344**, 593 |
+| master, boot | 197 blocks, 18 div | unchanged |
+
+The picture is unchanged to the byte — 15,116 frame-buffer bytes, 224 of 224
+line-table entries, 362 palette bytes, 249 commands — and so is the sound: the
+same 659,860 samples over 1,800 frames at the same peak, and 3,170 RMS against
+3,162. Every byte reaching the two Mega Drive chips is still the reference's.
+
+The slave's divergence count rising while its agreement rises by a fifth is the
+same thing that happened when it stopped being unwound after 64 idle reads:
+more of it is being compared. 1,344 of 2,000 reference blocks in lock step is
+67%, where it was 57%.
+
+**What is left of the command rendezvous is a cycle model, not a schedule.**
+Ours now polls twice in 121 of 270 transfers, mean **1.57** against the
+reference's 1.97. The poll loop is a `btst` whose read lands about 16 cycles in
+and a `bne`, 30 cycles a lap, so the counts price the ack directly: the
+reference's is about 45 68000 cycles after the raising write, or 135 of the
+master's, where ours is 29 — eighteen instructions at `sh2_cpi1000`'s flat 1.634
+apiece. That constant is a frame average dominated by cache-resident tight
+loops, and this path is nearly all memory: PC-relative loads out of SDRAM and
+writes into the 32X register block. A short run of exactly the wrong kind of
+instruction is charged a quarter of what it costs.
+
+The third of a poll left over is ten 68000 cycles, and two things we cannot
+separate from it are that size or larger: the SH-2's own exception entry, which
+we charge nothing for, and the reference emulator's scheduling quantum — the
+interleaved log shows it handing the master 44 instructions in one uninterrupted
+run, and its own poll counts spread over 1 to 4.
+
+The same debt is what the largest remaining 68000 group is made of. 104 rows at
+`0x88314C`, `0x8831B4`, `0x8831B6` and `0x8836E6` are all one fact: our master
+finishes a command before the next vertical interrupt where the reference's is
+still busy, so the engine's vblank handler drains the palette queue at
+`0xFFD860` every frame instead of skipping it. At the divergence the reference's
+queue holds 32 entries and ours holds one.
+
 ### Next
 
-**1. Interrupt phase, which is what nearly every remaining trace difference
-is.** The 68000's 421 divergences over the whole extract, the slave's 482 and
-the master's 18 are dominated by *when* an interrupt lands rather than by what
-any CPU computes: the vertical interrupt is raised at the top of line 224 where
-the reference takes it at a pixel inside it, and a hand-over is a sixteenth of a
-line where the PWM's period is a twelfth of one. Nothing here is a wrong answer
-any more, which is why this is the largest thing left.
+**1. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and
+1.009 cycles an instruction, measured over whole reference frames — and the
+68000 has already been through this: `recomp_cpi` was 11, exactly right in the
+steady state and 18% fast through the boot, and the fix was for each block to
+carry what its own instructions cost. The SH-2 side is the same shape and
+harder, because there is no Musashi to take a table from and because an SH-2's
+cost is mostly its cache. It is what the two largest remaining 68000 groups are
+made of — 114 rows of command-interrupt latency and 104 of a master that
+finishes too early — and it is now the thing in front.
 
 **2. The sound has no accuracy gate, only an input gate.** Every byte that
 reaches the two chips is the reference's, and what comes out of them is
@@ -2236,8 +2328,12 @@ does not spend the same day finding the same thing.
   like a ten-fold lift when the honest figure was 2,500 blocks for 2,000,000
   traced lines.
 * **Finer hand-overs.** 32 and 64 sub-slices to the line are both worse than 16.
+  Neither is the lever anyway: what the granularity was costing was an event's
+  *position* inside the window, and carrying that explicitly is free where
+  halving the window is not.
 * **Reordering the CPUs inside a hand-over.** It brackets the answer and hits
-  neither side.
+  neither side. Carrying the raise's position does what reordering was reaching
+  for, without having to pick a side.
 * **Reproducing the reference's interrupt *landing points*.** It defers the
   slave's PWM interrupt to one point in a 206-instruction loop, 3,360 times out
   of 3,360, which is idle-loop handling in the emulator rather than a fact about
@@ -2280,13 +2376,20 @@ does not spend the same day finding the same thing.
   DMA should have cost the 68000 and did not. 11,606 now.
 * ~~**`sh2_cpi1000` was measured against the short frame.**~~ *Settled.* 1.634
   and 1.009 now, from the same reference counts over the right frame.
-* **Interrupt phase.** The CPUs interleave and both timers are on their own
-  clocks now — the PWM counts SH-2 cycles against its period rather than landing
-  on line boundaries. What is left is quantisation: a hand-over is a sixteenth
-  of a line, about ninety SH-2 cycles, so a PWM interrupt whose period is 1,048
-  of them lands within a twelfth of it, and the vertical interrupt is raised at
-  the top of line 224 rather than at a pixel in it. It is most of what is left
-  of the slave's diff; the 68000's clock is no longer part of it.
+* ~~**Interrupt phase — the hand-over quantises both timers.**~~ *Settled.*
+  Neither is quantised to the hand-over now: the slave's slice is cut at the PWM
+  timer's own edge, and an interrupt the 68000 raises carries the position in
+  the window it was raised at and cuts the target's slice there. What was left
+  after that is a cycle model rather than a schedule — see the section above.
+* **The vertical interrupt's position inside line 224 is not measured.** We
+  raise it at the top of the line and the 68000 takes it at the first
+  instruction boundary, which is what the reference's own markers look like:
+  102 of them, all `@ 224,n` with n between 3 and 8 of the ~211 hpos units in a
+  line, or 7 to 18 cycles in. Never 0 to 2, which hints the raise itself is a
+  unit or two past the line's start rather than on it — but that is a couple of
+  cycles inside a 22-cycle wait loop, and it cannot be told apart from where the
+  reference emulator happened to have an instruction boundary. 38 rows at
+  `0x8834C0`/`0x8834C4`, down from 58, are this loop's phase.
 * ~~**No audio.**~~ *Settled.* All three sources play and every byte reaching
   them is the reference's: the 32X's PWM gated sample for sample, the Z80 gated
   instruction by instruction, the PSG tested against its own arithmetic, and

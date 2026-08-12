@@ -715,6 +715,67 @@ void mars_deliver_int(int slave, unsigned level) {
     c->pc = handler;
 }
 
+/* --- an interrupt raised by the other CPU, and when it may be acted on -----
+ *
+ * The three CPUs take turns inside one hand-over: the 68000 runs its whole
+ * share of the window, then the SH-2s run theirs. So an interrupt the 68000
+ * raises at the *end* of its share was, until this, acted on by an SH-2 from
+ * the *start* of the same window — an answer that precedes the question by up
+ * to a whole hand-over.
+ *
+ * The game measures that directly, and the count is in the trace already. The
+ * 68000 arms a DREQ transfer at 0x883232, raises the master's command interrupt,
+ * and spins at 0x88323A on the bit until the master's handler clears it —
+ * eighteen instructions away, twelve of the dispatcher at 0x060001B0 and six
+ * more to the `mov.w r0,@r0` at 0x0600133E. So how many times the 68000 goes
+ * round says how long the master took: the reference goes round twice in 45 of
+ * its 103 transfers, three times in 26 and once in 31, mean 1.97. Ours went
+ * round once in 194 of 270, mean 1.28, because whenever the write landed near
+ * the end of a hand-over the master answered before the 68000 executed another
+ * instruction at all. With the split it is 1.57 — what is left is that our
+ * master reaches that ack in 29 SH-2 cycles where the reference's poll counts
+ * price it at about 135, which is `sh2_cpi1000` being a frame average applied
+ * to eighteen instructions of nothing but memory access.
+ *
+ * So the raise carries *where in the window it happened*, in the target's own
+ * cycles, and the target's slice is split there. One slot per CPU is enough:
+ * a second raise while the first is still pending is the same asserted line,
+ * and the earlier offset is the one that matters.
+ */
+typedef struct { unsigned at, level; int armed; } Pending;
+static Pending pend[2];
+
+void mars_raise_int(int slave, unsigned level, unsigned at) {
+    Pending *p = &pend[slave & 1];
+    if (p->armed && p->at <= at) return;
+    p->at = at;
+    p->level = level;
+    p->armed = 1;
+}
+
+unsigned mars_int_due(int slave, unsigned cycles) {
+    const Pending *p = &pend[slave & 1];
+    return p->armed && p->at < cycles ? p->at : cycles;
+}
+
+void mars_int_fire(int slave) {
+    Pending *p = &pend[slave & 1];
+    if (!p->armed) return;
+    p->armed = 0;
+    mars_deliver_int(slave, p->level);
+}
+
+/* A raise can fall past the end of the hand-over it was made in — the 68000
+ * wrote in its last cycles, or a recompiled block was charged whole and put
+ * every access inside it at the block's end. Carrying the remainder into the
+ * next hand-over is what keeps that an offset rather than a clamp: the event is
+ * still in the future, just less of it. Called once a hand-over is over, with
+ * how much of the target's clock it was worth. */
+void mars_int_rebase(unsigned elapsed) {
+    for (int i = 0; i < 2; i++)
+        pend[i].at = pend[i].at > elapsed ? pend[i].at - elapsed : 0;
+}
+
 /* The PWM timer, which is the only clock the slave has.
  *
  * Its sound driver programs the two registers from 0xC0000008 and then idles in

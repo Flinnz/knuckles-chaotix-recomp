@@ -168,6 +168,24 @@ void mars_deliver_int(int slave, unsigned level);
 #define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
 #define MARS_INT_PWM 6           /* the PWM timer, which only the slave takes */
 
+/* The same, for an interrupt one CPU raises inside another's hand-over.
+ *
+ * `at` is how far into the target's own slice for this hand-over the raise
+ * happened, in that CPU's cycles — `mars_slice_pos()` converts the 68000's
+ * position into it. The frame loop splits the slice there rather than letting
+ * the target act on the interrupt from the start of a window the raise was
+ * three quarters of the way through. See the note in src/mem32x.c for the
+ * measurement that says it matters.
+ */
+void mars_raise_int(int slave, unsigned level, unsigned at);
+unsigned mars_int_due(int slave, unsigned cycles);   /* cycles before it lands */
+void mars_int_fire(int slave);                       /* deliver what is due */
+void mars_int_rebase(unsigned elapsed);              /* a hand-over has passed */
+
+/* Where the 68000 stands inside the current hand-over, in the SH-2s' cycles.
+ * Lives in src/mars_main.c, which is the only thing that knows the window. */
+unsigned mars_slice_pos(void);
+
 /* One PWM cycle in SH-2 cycles, and the timer interrupt's period, which is TM
  * of those — both from the registers the slave itself programmed. src/sound.c
  * counts SH-2 cycles against the first; the second is the only clock the slave

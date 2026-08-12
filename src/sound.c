@@ -326,6 +326,22 @@ void sound_psg_tick(unsigned clocks) { psg_tick(&psg, clocks); }
  */
 static unsigned pwm_acc, pwm_tm_n;
 
+/* How many of the next `cycles` the slave may run before the timer's own edge
+ * falls inside them.
+ *
+ * The frame loop runs the slave in chunks of this, so the interrupt lands where
+ * the timer puts it rather than where the hand-over does. It used to be raised
+ * for the whole of a hand-over at its start — up to 90 SH-2 cycles early on a
+ * period of 1,046, which is a twelfth of the slave's only clock — and the
+ * driver's own work then started from a point the timer had not reached.
+ */
+unsigned sound_pwm_ahead(unsigned cycles) {
+    unsigned period = mars_pwm_sample_period();
+    if (!period) return cycles;
+    unsigned to_edge = pwm_acc < period ? period - pwm_acc : 0;
+    return to_edge < cycles ? to_edge : cycles;
+}
+
 void sound_pwm_tick(unsigned sh2_cycles) {
     unsigned period = mars_pwm_sample_period();
     if (!period) return;

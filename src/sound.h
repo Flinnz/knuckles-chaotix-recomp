@@ -22,6 +22,11 @@ uint16_t sound_pwm_status(unsigned which);
  * timer interrupt, which is the only clock that CPU has. */
 void sound_pwm_tick(unsigned sh2_cycles);
 
+/* How much of the next `cycles` falls before the timer's next edge. The slave
+ * is run in chunks of this so that the interrupt lands on the timer's own
+ * boundary rather than on the hand-over's. */
+unsigned sound_pwm_ahead(unsigned cycles);
+
 /* The Mega Drive's two chips. Nothing synthesises yet — these latch the
  * register file, count, and are where the cores will go. `port` is the two
  * address lines of the YM2612's block: 0 and 1 are the address and data ports

@@ -1,13 +1,20 @@
-/* Run the machine: Musashi drives the 68000, the recompiled code drives the
- * master SH-2, and the picture — the Mega Drive planes and sprites with the 32X
- * bitmap composited over them — goes to an SDL window.
+/* Run the machine: recompiled C drives the 68000 and both SH-2s, Musashi and a
+ * Z80 core fill in the rest, and the picture — the Mega Drive planes and
+ * sprites with the 32X bitmap composited over them — goes to an SDL window.
  *
- * The two CPUs are cooperatively scheduled rather than interleaved: the 68000
- * runs a frame's worth of cycles, and the SH-2s run inside its register writes —
- * a command posted to comm register 0, or an interrupt raised at 0xA15102, is
- * handled there and then. That is enough while the SH-2s only ever act on
- * request, and it is what the handshakes need, since the 68000 goes straight on
- * to wait for an answer. It will need revisiting once timing matters.
+ * All four CPUs are cooperatively scheduled, a sixteenth of a scanline at a
+ * time, each spending its own share of that window's cycles. They used to run
+ * inside each other: a command posted to comm register 0, or an interrupt
+ * raised at 0xA15102, ran the SH-2's handler to completion inside the 68000's
+ * own register write, which is what the handshakes needed while the SH-2s could
+ * not be entered any other way.
+ *
+ * What is left of that is the one asymmetry a turn-taking scheduler cannot help
+ * having: inside a window the 68000 runs first and the SH-2s after, so an event
+ * the 68000 generates late in its turn would be acted on from the start of
+ * theirs. Interrupts carry the position they were raised at and split the
+ * target's slice there — see mars_slice_pos() below and mars_raise_int() in
+ * src/mem32x.c.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -329,7 +336,7 @@ static int sh2_credit[2];
  * remainder, because a sub-slice is some ninety cycles and truncating that
  * division 4,192 times a frame is a percent of the clock. */
 static unsigned sh2_insn_acc[2];
-static void sh2_slice(int i, unsigned cycles) {
+static void sh2_chunk(int i, unsigned cycles) {
     sh2_insn_acc[i] += cycles * 1000;
     unsigned n = sh2_insn_acc[i] / sh2_cpi1000[i];
     sh2_insn_acc[i] -= n * sh2_cpi1000[i];
@@ -345,6 +352,61 @@ static void sh2_slice(int i, unsigned cycles) {
     unsigned ran = sh2_run(&mars_cpu[i], sh2_credit[i]);
     sh2_credit[i] -= (int)ran;
     sh2_insns[i] += ran;
+}
+
+/* The same share, but cut where an interrupt falls inside it.
+ *
+ * A CPU that is going to take an interrupt part way through a hand-over has to
+ * run the part before it first: the 68000 raising the command interrupt at the
+ * end of its own share is not the same event as raising it at the start, and
+ * running the handler from the start of the window is a reply sent before the
+ * question. The split is what makes the two different.
+ */
+static void sh2_slice(int i, unsigned cycles) {
+    for (;;) {
+        unsigned n = mars_int_due(i, cycles);
+        if (n) sh2_chunk(i, n);
+        cycles -= n;
+        if (!cycles) return;
+        mars_int_fire(i);
+    }
+}
+
+/* The hand-over's own window, so that an event the 68000 generates inside it
+ * can say *when*. Both are set once per hand-over, before anything runs. */
+static unsigned slice_m68k, slice_sh2;
+
+/* Where the 68000 stands inside it, in the SH-2s' cycles.
+ *
+ * The recompiled build spends `m68k_fuel` in the block prologue and Musashi
+ * counts its own timeslice down, so either says how much of the window is left
+ * without anything having to be threaded through the generated code.
+ *
+ * What is left, rather than what has been spent — because the budget is not the
+ * window. A slice that overshot leaves a debt and a DMA that held the bus takes
+ * more off, so `cpu_credit` is short by exactly how far into the window the
+ * 68000 starts. Measuring from the far end is what makes this a position in the
+ * window whatever the budget was.
+ *
+ * The answer can be past the end of the window, and that is not an error to be
+ * clamped away. The two backends place an event differently and both are the
+ * timing model being honest about itself: Musashi charges an instruction when
+ * it finishes, so a write is placed within one instruction of the truth, where
+ * a recompiled block is charged whole in its prologue, so every access inside
+ * it is placed at the block's *end*. That is five hand-overs out for the block
+ * this matters most in — 0x883202, fifteen instructions and 154 cycles — and
+ * costs nothing there, because the raising write at 0x883232 is its last
+ * instruction. It is also when `cpu_credit` next lets the 68000 run, so where
+ * the event lands and where the CPU resumes stay consistent with each other.
+ *
+ * A hand-over to the interpreter freezes `m68k_fuel` where the gap started,
+ * which is a few cycles out on the 295 hand-overs a 300-frame run makes.
+ */
+unsigned mars_slice_pos(void) {
+    int left = use_recomp ? m68k_fuel : m68k_cycles_remaining();
+    int at = (int)slice_m68k - left;
+    if (at < 0) at = 0;
+    return slice_m68k ? (unsigned)((uint64_t)at * slice_sh2 / slice_m68k) : 0;
 }
 
 static void cpu_run(unsigned cycles) {
@@ -767,8 +829,15 @@ int main(int argc, char **argv) {
                 /* Where the beam is inside the line, for the two VDPs' HBLK
                  * bits. One step a hand-over is as fine as this clock gets. */
                 gen.hpos = s * 256u / SUBSLICES_PER_LINE;
-                cpu_poll_irq();
                 unsigned mc = step_cycles();
+                unsigned sh2c = sh2_step_cycles();
+                /* The window all four CPUs share, measured before any of them
+                 * runs: an interrupt raised part way through the 68000's turn
+                 * is not the same event as one raised at its start, and only a
+                 * window known in advance can say which it was. */
+                slice_m68k = mc;
+                slice_sh2 = sh2c;
+                cpu_poll_irq();
                 /* The YM2612 has the 68000's own clock, so it is spent here
                  * and in the same units. */
                 sound_ym_tick(mc);
@@ -779,7 +848,6 @@ int main(int argc, char **argv) {
                  * how the driver gets uploaded without a conflict to model. */
                 z80_slice();
 
-                unsigned sh2c = sh2_step_cycles();
                 /* The 32X VDP's autofill runs on the same clock as everything
                  * else, and the master polls FEN until it finishes. */
                 mars.fen_left -= mars.fen_left < sh2c ? mars.fen_left : sh2c;
@@ -793,9 +861,22 @@ int main(int argc, char **argv) {
                  * error, and no extra slice is handed out for taking one: the
                  * interrupt only redirects the CPU, and the fuel below is what
                  * runs the handler. src/sound.c owns the accumulator now,
-                 * because the same clock takes the samples out of the FIFOs. */
-                sound_pwm_tick(sh2c);
-                sh2_slice(1, sh2c);
+                 * because the same clock takes the samples out of the FIFOs.
+                 *
+                 * The share is cut at the timer's own edges rather than handed
+                 * over whole. Raising the interrupt for a whole hand-over at
+                 * its start put it up to ninety SH-2 cycles early on a period
+                 * of 1,046 — a twelfth of the only clock the slave has, and the
+                 * driver then began work the timer had not yet asked for. */
+                for (unsigned left = sh2c; left; ) {
+                    unsigned n = sound_pwm_ahead(left);
+                    sh2_slice(1, n);
+                    sound_pwm_tick(n);
+                    left -= n;
+                }
+                /* The window is over. Whatever it raised that neither SH-2
+                 * reached is that much nearer. */
+                mars_int_rebase(sh2c);
             }
         }
 

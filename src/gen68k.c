@@ -428,11 +428,16 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
      * completion inside this write, so the 68000 never once saw the request
      * pending; it now runs on the SH-2's own slices and the 68000 spins for it,
      * which is what the reference does — and the bit is cleared by the handler
-     * writing 0x4000|0x1A, not by us. */
+     * writing 0x4000|0x1A, not by us.
+     *
+     * The raise carries where in the hand-over it happened, because the SH-2s
+     * run after the 68000 and stand for the same window: without it a write in
+     * the last cycles of a hand-over was answered before the 68000's next
+     * instruction. */
     case 0xA15102:
         mars.intctl = v;
-        if (v & 1) mars_deliver_int(0, MARS_INT_CMD);
-        if (v & 2) mars_deliver_int(1, MARS_INT_CMD);
+        if (v & 1) mars_raise_int(0, MARS_INT_CMD, mars_slice_pos());
+        if (v & 2) mars_raise_int(1, MARS_INT_CMD, mars_slice_pos());
         return 1;
     case 0xA15104: mars.bank = v; return 1;
     /* Raising 68S is what arms the transfer, so the word count is taken on that
