@@ -27,7 +27,17 @@ static uint32_t canon68k(uint32_t a) {
      * actually there. */
     if (a < 0x100u) return 0xFFFFFFFFu;
     if (a >= 0x880000u && a < 0x900000u) return a - 0x880000u;
-    if (a >= 0x900000u && a < 0xA00000u) return a - 0x900000u;
+    /* And 0x900000-0x9FFFFF is *not* an offset at all. It is the banked window,
+     * and which megabyte of the cartridge it shows is a register the game
+     * writes at 0xA15104 — so the same address is different code at different
+     * moments, and no static translation can name it. This folded it to bank 0
+     * unconditionally, which was invisible for as long as the game never called
+     * through the window: the engine's `jsr 0x928EEC` at 0x88F688 wants bank 2,
+     * where the bytes are a dispatch prologue, and ran bank 0's data instead,
+     * decoding as `ori.b #110,(a0)+` and falling into the halt stub at
+     * 0x880B2E. Handing the whole window to the interpreter is what is
+     * available: it reads through src/gen68k.c, which honours the register. */
+    if (a >= 0x900000u && a < 0xA00000u) return 0xFFFFFFFFu;
     return a;
 }
 

@@ -656,6 +656,13 @@ int main(int argc, char **argv) {
     int mute = 0, audio = 0;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     unsigned hold = 0;
+    /* `--hold` is a button held down from the first frame, which is what the
+     * trace comparisons want — nothing held means the pad reads exactly what it
+     * read before there was one. It is useless for a menu, though: a game acts
+     * on a button becoming pressed, and one held from frame zero never becomes
+     * anything. `--press` pulses instead, a third of a second down and
+     * two thirds up, which is what a person at the keyboard produces. */
+    unsigned press = 0;
     /* Which frame the tracers start at. Everything gated reads a trace from
      * the reset, because that is where the reference logs begin; this is for
      * the part of the run that has no reference at all. */
@@ -703,6 +710,8 @@ int main(int argc, char **argv) {
             gen.layers = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)
             hold = parse_hold(argv[++i]);
+        else if (!strcmp(argv[i], "--press") && i + 1 < argc)
+            press = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--recomp"))
             use_recomp = 1;                 /* the default; kept so it still runs */
         else if (!strcmp(argv[i], "--interp"))
@@ -816,7 +825,9 @@ int main(int argc, char **argv) {
          * had got. */
         trace_armed = frames >= trace_from;
         gen68k_frame_start();
-        gen.pad_buttons = headless_frames ? hold : (read_pad() | hold);
+        unsigned pulse = press && frames % 45 < 15 ? press : 0;
+        gen.pad_buttons = headless_frames ? (hold | pulse)
+                                          : (read_pad() | hold | pulse);
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
             /* Raised as the beam reaches the line, before the 68000 runs any of

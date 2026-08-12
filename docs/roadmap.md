@@ -2446,6 +2446,67 @@ outside this model. No such site is known in this game, but nothing detects one
 yet." One is known now, and a literal that a `lds` puts into PR is as good a
 block leader as any branch target.
 
+### A computed return, a banked window, and the game plays
+
+Three things between the title screen and gameplay, and the first was the one
+this roadmap had already named.
+
+**A literal that a `lds` puts into PR is a block leader.** `0x06000AA6` loads
+the literal `0x06000A64` and `lds r0,pr` in the delay slot of a `bra`, so the
+routine it tail-branches to returns into the *middle* of another handler's
+block. Nothing else in the front end can see that address: no branch targets it,
+no table holds it, no sweep produces it. `_note_computed_pr` in
+`tools/sh2/analyze.py` seeds it, in the main path and in the delay slot both,
+because the delay slot runs with the register state the branch saw. `lds.l
+@Rn+,pr` is deliberately excluded — that is a handler restoring PR from the
+stack, and what it holds is not a literal.
+
+Four sites, not one: `0x060009A6`, `0x06000A64`, `0x06000C5C`, `0x06000EA4`.
+247 -> **251 functions**, 1,971 -> 1,974 blocks, both images still byte-exact.
+M3 recorded this shape and said "no such site is known in this game, but nothing
+detects one yet"; the sites were always there and the game only reaches them
+after the title screen.
+
+**`--press` presses a button, where `--hold` only holds one.** `--hold` is what
+the trace comparisons want — held from the first frame, and nothing held reads
+exactly as it read before there was a pad. It is useless for a menu, because a
+game acts on a button *becoming* pressed and one held from frame zero never
+becomes anything. `--press start` pulses a third of a second down and two thirds
+up, which reproduced the reported behaviour exactly: the cutscene is skipped,
+a tenth as many commands are posted, and it stops in the same place.
+
+**And `0x900000` is not an offset.** It is the banked window, and which
+megabyte of the cartridge it shows is the register at `0xA15104`. `src/gen68k.c`
+has always read it correctly; `canon68k` in `src/m68000.c` folded it to bank 0
+unconditionally, so the recompiled build executed bank 0's bytes whatever bank
+was selected. Invisible for as long as the game never called through the window
+— and the engine's `jsr 0x928EEC` at `0x88F688` wants **bank 2**, where the
+bytes are a dispatch prologue:
+
+    bank 0   orib #110,%a0@+ ; orib #64,%a2@+ ; .short 0x000f      data
+    bank 2   tstb %fp@(6) ; bnes ; movew 0xffffe038,%d0            code
+
+Running the data fell into `0x880B2E` — `nop / nop / bra 0x880B2E`, the halt
+stub the boot fills every unfilled trampoline with — with a minimal vblank
+handler that only reads the pad. That is the freeze reported from the keyboard,
+and it is the same freeze whether the cutscene is watched or skipped.
+
+No static translation can name an address whose identity is a register, so the
+whole window goes to the interpreter, which reads through `src/gen68k.c` and
+honours the bank. It costs 988,493 hand-overs in 3,600 frames and the run is
+still faster than the interpreted build — 5.6 seconds against 8.0 for 60 seconds
+of game.
+
+**The game plays.** Past the title screen it enters its attract mode and runs a
+real level: at 2,600 and 3,200 frames Vector is on a Chaotix platform level with
+rings, palm trees and machinery. Commands posted by 3,600 frames go from 1,404
+to **2,869**, and the 68000 is in the engine rather than in a halt stub.
+
+*Gate note:* every number in `make check` is identical across all three changes
+— both round-trips, both semantics suites, all five diffs. That is not luck and
+it is not reassurance: the reference extract is 1.7 seconds and reaches none of
+this. The gates could not have caught any of the three, and did not.
+
 ### Next
 
 **1. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and

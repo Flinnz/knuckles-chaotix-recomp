@@ -199,6 +199,7 @@ class Analyzer:
             del recent[:-16]
 
             self._track_const(ins, regs)
+            self._note_computed_pr(ins, regs)
 
             if ins.kind == INVALID:
                 self.block_ends[addr + 2] = (INVALID, None)
@@ -211,6 +212,11 @@ class Analyzer:
                 self.code.add(addr + 2)
                 if ds.pool:
                     self._note_pool(ds)
+                # A delay slot runs with the register state the branch saw, so
+                # the constants tracked up to here are the right ones — and
+                # `lds Rn,pr` in the delay slot of a `bra` is exactly how this
+                # engine arranges a computed return.
+                self._note_computed_pr(ds, regs)
                 end = addr + 4
 
             if ins.kind == BRANCH:
@@ -243,6 +249,34 @@ class Analyzer:
                 self.block_ends[end] = (RET, None)
                 return
             addr = end
+
+    def _note_computed_pr(self, ins, regs):
+        """A return address the code computes, rather than one a call leaves.
+
+        `bsr`/`jsr` write PR themselves and the instruction after them is
+        already a leader. `lds Rn,pr` with Rn holding a literal is the other way
+        to set one, and it is invisible to everything else here: the address it
+        names is usually *inside* an existing block, so no branch target, no
+        table entry and no sweep will ever produce it.
+
+        This game has one, and it is what stopped the run after the title
+        screen. At 0x06000AA6 a command handler loads the literal 0x06000A64 and
+        puts it in PR in the delay slot of a `bra`, so the routine it
+        tail-branches to returns into the middle of another handler's block. The
+        runtime dispatches by block address, found nothing there, and parked the
+        master at zero. M3 recorded this shape as the one hole in the PR model
+        and said no site was known in this game; this is the site.
+
+        `lds.l @Rn+,pr` is deliberately not included — that is a handler
+        restoring PR from the stack, and what it holds is not a literal.
+        """
+        if ins.mnem != "lds" or "pr" not in ins.writes or ins.rn is None:
+            return
+        v = regs.get(ins.rn)
+        if v is None or not self.is_code_addr(v):
+            return
+        self.xrefs[v].add(ins.addr)
+        self.add_function(v, "computed pr")
 
     def _note_pool(self, ins):
         paddr, psz = ins.pool
