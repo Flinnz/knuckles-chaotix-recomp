@@ -13,6 +13,7 @@
 
 Mars mars;
 SH2 mars_cpu[2];
+int trace_armed = 1;
 /* Which SH-2 is executing, so that a register write can tell which one did it.
  * Only the interrupt-clear registers need this; everything else in the 32X
  * register block is shared between the two by design. */
@@ -626,7 +627,7 @@ void sh2_trace_close(void) {
  * comparison is made of.
  */
 void sh2_block(SH2 *c, uint32_t addr) {
-    if (!sh2_trace_f) return;
+    if (!sh2_trace_f || !trace_armed) return;
     int i = c->slave & 1;
     if (run_open[i] && addr == run_addr[i] && same_state(c, &run_state[i])) {
         run_n[i]++;

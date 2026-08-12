@@ -2322,6 +2322,53 @@ That is the shape of everything above. Five trace diffs, two byte-exact
 round-trips and a sample-for-sample audio gate, all of them ending 1.7 seconds
 in — and the first thing past that end was a register width.
 
+### Command 7 is not being suppressed; the 68000 never gets to run
+
+The asset table is filled by command 7 and the 68000 issues it three or four
+times in a 3,600-frame run, so the question was what gates it. Nothing does.
+**The 68000 executes eight distinct block addresses in ten frames.**
+
+Seeing that needed an instrument the project did not have. Every gate reads a
+trace that starts at the machine's reset, because that is where the reference
+logs start, so nothing could look at a late window at all. `--trace-from N` arms
+all four tracers at a frame, and ten frames at 1,200 is 92 block entries:
+
+    0045ce [x4900]  003ba8 076efa 076f06 076f10 076f20 076f5e 003bb2  0045ce [x4900] …
+
+That is the whole frame. `0x8845CE` is the comm-0 acknowledgement wait, spun
+4,900 times, and the seven blocks between are one vertical interrupt. The 68000
+is blocked on the master for 100% of its time, so the state machine that would
+issue command 7 never advances. There is nothing to find on the 68000 side.
+
+**The master is inside one polygon.** Three frames of its trace hold 225,529
+block entries over **twelve** distinct addresses, all in the span filler at
+`0x06004750` and the rectangle loop at `0x06004724`, and 84% of its instructions
+are the two FEN poll loops at `0x06004770` and `0x0600479E`. Reading the fill
+parameters out of the same trace says why: the spans are **53,000 pixels wide**,
+growing 13 a row — a perspective trapezoid with the right shape and the wrong
+scale — and the loop counter `r5` is **20,670 rows** on a 224-line screen. Each
+row is one autofill the master waits on, so one such polygon takes about 27
+frames.
+
+**It starts at frame 429**, which is the frame the game switches to the title
+screen — `mars_reg_write_sh2` first sees a fill length above 255 there, and the
+engine's first `0xFF20` scroll write is at 422. So the bad geometry comes
+*before* the 68000 is starved, not after.
+
+**And it is a rasteriser being handed bad vertices, not a rasteriser that is
+wrong.** `0x06004642` walks two edge lists out of a buffer on the master's own
+stack at `0x0603FF04`, differencing vertex pairs and looking the slope up in a
+reciprocal table at `0x06003E48`. Entering it, the first pair gives a height of
+`0xE0` — 224, exactly the screen — and every pointer is sane. The *next* pair
+gives `0x7120`. Whatever fills that buffer, at `0x0600494E`-`0x060049C0`, is
+where this stops being about the runtime and starts being about what the master
+was given.
+
+So the shape of the failure is a loop: garbage geometry consumes the master, the
+68000 blocks on comm 0, the state machine that issues command 7 stalls, and the
+asset table stays empty. Which end to break it at is the open question — the
+geometry appears first, so the empty table is at most a fellow victim.
+
 ### Next
 
 **1. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and

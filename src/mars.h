@@ -234,6 +234,16 @@ void gen68k_frame_start(void);
  * in that hook too rather than being lost whenever `--trace68k` is on. */
 extern unsigned long cpu_insns;
 
+/* Whether the tracers are recording.
+ *
+ * Every gate in this project reads a trace that starts at the machine's reset,
+ * because that is where the reference logs start. Nothing could look at a *late*
+ * window — and the game stops working well past the end of the reference, so
+ * "what is the engine doing at frame 1,200" had no instrument at all. The frame
+ * loop arms this at `--trace-from`, and all four tracers honour it.
+ */
+extern int trace_armed;
+
 /* One line per 68000 instruction, in the reference tracer's format, for
  * `tools/diff68k.py` to compare against a known-good emulator's log. */
 /* `blocks` records one line per recompiled basic block entered instead of one

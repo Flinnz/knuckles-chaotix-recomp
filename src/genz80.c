@@ -200,6 +200,7 @@ static void flush_run(void) {
 }
 
 void z80_trace_line(const Z80 *c) {
+    if (!trace_armed) return;
     if (!tf) return;
     if (run_open && same_state(c, &run_state)) { run_n++; return; }
     flush_run();

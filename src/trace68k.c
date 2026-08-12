@@ -49,6 +49,7 @@ static void hook(unsigned int pc) {
     /* This hook replaces the counting one — see cpu_insns in src/mars.h — so it
      * has to keep the count itself or every traced run reports none. */
     cpu_insns++;
+    if (!trace_armed) return;
     uint32_t r[16];
     for (int i = 0; i < 16; i++)
         r[i] = (uint32_t)m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_D0 + i));
@@ -117,7 +118,7 @@ static void line(unsigned int pc, const uint32_t *r, uint32_t sr, uint32_t osp) 
 int m68k_trace;
 
 void m68k_block(const M68K *c, uint32_t addr) {
-    if (!tf) return;
+    if (!tf || !trace_armed) return;
     uint32_t r[16], sr = m68k_get_sr(c), osp = c->usp;
     for (int i = 0; i < 8; i++) { r[i] = c->d[i]; r[8 + i] = c->a[i]; }
 

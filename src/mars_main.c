@@ -656,6 +656,10 @@ int main(int argc, char **argv) {
     int mute = 0, audio = 0;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     unsigned hold = 0;
+    /* Which frame the tracers start at. Everything gated reads a trace from
+     * the reset, because that is where the reference logs begin; this is for
+     * the part of the run that has no reference at all. */
+    unsigned trace_from = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             headless_frames = atoi(argv[i + 1]);
@@ -663,6 +667,8 @@ int main(int argc, char **argv) {
             mars.trace = 1;
         else if (!strcmp(argv[i], "--trace68k") && i + 1 < argc)
             trace68k = argv[++i];
+        else if (!strcmp(argv[i], "--trace-from") && i + 1 < argc)
+            trace_from = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--trace68k-lines") && i + 1 < argc)
             trace68k_lines = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--trace-sh2") && i + 1 < argc)
@@ -808,6 +814,7 @@ int main(int argc, char **argv) {
          * the end of the frame instead — which is what this did — put every
          * post-boot comparison out by however far into its wait loop the engine
          * had got. */
+        trace_armed = frames >= trace_from;
         gen68k_frame_start();
         gen.pad_buttons = headless_frames ? hold : (read_pad() | hold);
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
