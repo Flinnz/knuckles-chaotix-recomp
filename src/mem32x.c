@@ -150,6 +150,75 @@ static void oc32w(uint32_t a, uint32_t v) {
     p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
 }
 
+/* --- the SH7604's on-chip divide unit --------------------------------------
+ *
+ * The SH-2 has no divide instruction. It has this instead: write the divisor to
+ * DVSR and the dividend to DVDNT, and thirty-nine cycles later DVDNT holds the
+ * quotient and DVDNTH the remainder. So every division this game does goes
+ * through four longword accesses to 0xFFFFFF00, and the on-chip block was plain
+ * storage — which returns the *dividend* where the quotient should be.
+ *
+ * That is not a subtle wrongness. The master's polygon clipper at 0x060048F4
+ * interpolates a clipped vertex as `(a * b) / c`, and without the divide it
+ * gets `a * b`: the right shape at thousands of times the scale. At frame 429,
+ * where the game leaves the SEGA logo for the title screen, it hands the
+ * rasteriser a quad 20,670 rows tall with spans 53,000 pixels wide, and since
+ * every row of a span is one 32X autofill the master waits on, one polygon
+ * takes about twenty-seven frames. The 68000 then spends whole frames in the
+ * comm-0 acknowledgement wait at 0x8845CE, which is why nothing else advanced.
+ *
+ * Four literal pools in the master's image hold 0xFFFFFF00 — 0x06001FD0,
+ * 0x060026A4, 0x06005BB8 and 0x06005C20 — so this is four routines, not one.
+ *
+ * Signed throughout, and C's truncation toward zero is the SH-2's own rule.
+ * A 32-bit write to DVDNT sign-extends into the 64-bit dividend; a write to
+ * DVDNTL divides whatever DVDNTH:DVDNTL holds. Overflow and divide-by-zero set
+ * DVCR's OVF bit and saturate, which is what the manual specifies; nothing in
+ * this game reads either, so they are here to be right rather than because
+ * anything depends on them.
+ */
+#define DVSR   0xFFFFFF00u
+#define DVDNT  0xFFFFFF04u
+#define DVCR   0xFFFFFF08u
+#define DVDNTH 0xFFFFFF10u
+#define DVDNTL 0xFFFFFF14u
+
+static void oc32w(uint32_t a, uint32_t v);
+static uint32_t oc32(uint32_t a);
+
+static void divu_run(void) {
+    int32_t dvsr = (int32_t)oc32(DVSR);
+    int64_t dvd = (int64_t)(((uint64_t)oc32(DVDNTH) << 32) | oc32(DVDNTL));
+    int64_t q, r = 0;
+    if (!dvsr || (dvd == INT64_MIN && dvsr == -1)) {
+        q = dvd < 0 ? INT32_MIN : INT32_MAX;
+        oc32w(DVCR, oc32(DVCR) | 1u);
+    } else {
+        q = dvd / dvsr;
+        r = dvd % dvsr;
+        if (q > INT32_MAX || q < INT32_MIN) {
+            q = dvd < 0 ? INT32_MIN : INT32_MAX;
+            oc32w(DVCR, oc32(DVCR) | 1u);
+        }
+    }
+    oc32w(DVDNT, (uint32_t)(int32_t)q);
+    oc32w(DVDNTL, (uint32_t)(int32_t)q);
+    oc32w(DVDNTH, (uint32_t)(int32_t)r);
+}
+
+/* A longword write into the divider's block. Returns 1 when it was one. */
+static int divu_w32(uint32_t a, uint32_t v) {
+    if (a != DVDNT && a != DVDNTL) return 0;
+    if (a == DVDNT) {
+        oc32w(DVDNTL, v);
+        oc32w(DVDNTH, (uint32_t)((int32_t)v >> 31));   /* sign-extended */
+    } else {
+        oc32w(DVDNTL, v);
+    }
+    divu_run();
+    return 1;
+}
+
 static void dma_drain(void) {
     while (mars.fifo_n) {
         uint32_t chcr = oc32(DMAC_CHCR0), tcr = oc32(DMAC_TCR0);
@@ -447,6 +516,11 @@ void sh2_w16(SH2 *c, uint32_t a, uint16_t v) {
     trap("w16", ra);
 }
 void sh2_w32(SH2 *c, uint32_t a, uint32_t v) {
+    /* Before the split, because starting a division is a whole-longword event:
+     * the unit divides when the low half of the dividend lands, and two 16-bit
+     * halves would run it on a half-written operand. */
+    uint32_t ra = canon(a);
+    if (ra >= 0xFFFFFE00u && divu_w32(ra, v)) return;
     sh2_w16(c, a, (uint16_t)(v >> 16));
     sh2_w16(c, a + 2, (uint16_t)v);
 }

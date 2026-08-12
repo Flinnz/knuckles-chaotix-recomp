@@ -2369,6 +2369,83 @@ So the shape of the failure is a loop: garbage geometry consumes the master, the
 asset table stays empty. Which end to break it at is the open question — the
 geometry appears first, so the empty table is at most a fellow victim.
 
+### The vertex buffer came through a divide that never happened
+
+`0x0600494E` is a polygon clipper. It walks a vertex list, and where an edge
+crosses the clip plane it interpolates the new vertex — and the interpolation is
+four longword accesses to `0xFFFFFF00`:
+
+    06004936  mov.l  r1,@(0,r14)     divisor
+    0600493A  mov.l  r2,@(4,r14)     dividend — and the division starts here
+    06004940  mov.l  @(4,r14),r2     quotient
+
+**That is the SH7604's on-chip divide unit.** The SH-2 has no divide
+instruction; this is the only way it divides. `mars.onchip` was "a plain store",
+so the read at `0x06004940` returned the *dividend*: `(a * b) / c` came back as
+`a * b`. The right shape at thousands of times the scale — which is exactly the
+signature the rasteriser showed, a 20,670-row quad with 53,000-pixel spans whose
+width grew 13 a row.
+
+Four literal pools in the master's image hold `0xFFFFFF00` — `0x06001FD0`,
+`0x060026A4`, `0x06005BB8`, `0x06005C20` — so this is four routines, one of them
+beside the decompressor at `0x06001F18`.
+
+`divu_run()` in src/mem32x.c is the unit: signed, truncating toward zero, a
+32-bit write to DVDNT sign-extending into the 64-bit dividend, quotient to
+DVDNT and DVDNTL and remainder to DVDNTH, with DVCR's OVF bit set on overflow
+or divide by zero. Nothing in this game reads OVF; it is there to be right.
+
+**The game reaches its title screen.** At 1,800 frames the five characters stand
+on the tunnel road with the Mega Drive background scrolled in behind them —
+which also settles the previous section's open question, since the scroll the
+engine was writing over and over was simply the transition never advancing.
+
+| | before | after |
+|---|---|---|
+| autofill, share of the master's clock at 3,600 frames | 90% | **8%** |
+| commands posted by 3,600 frames | 492 | **1,404** |
+| frame buffer at 1,800 frames | 255 bytes | **16,601** |
+
+And the gates, which are not all in the same direction:
+
+| | before | after |
+|---|---|---|
+| 68000 boot | 20,084 agreed, 19 div | unchanged |
+| 68000 whole extract | 52,414 agreed, 389 div | 51,782, **361** |
+| master, boot | 197 blocks, 18 div | unchanged |
+| slave, 2,000 blocks | 1,344 blocks, 593 div | unchanged |
+| recompiled 68000, `--blocks` | 8,741 blocks, 384 div | **4,847**, 493 |
+| recompiled 68000, boot only | 2,466 blocks, 23 div | unchanged |
+
+**The interpreted gate improves and says why.** The group this roadmap named
+last session — our master finishing a command before the next vertical interrupt
+where the reference's is still busy — collapses: `0x8831B4`, `0x8831B6` and
+`0x8836E6` go from 66 rows to 19, and the palette queue at `0xFFD860` that the
+divergence reads out is now 3 entries from the reference's depth where it was
+31. The master's timing is closer to the machine's, which is what a working
+divider should do.
+
+**The block-granular gate loses agreement, and the boot is the control.** Its
+boot half is identical either way, 2,466 blocks and 23 divergences, so the whole
+of the loss is past the boot — in the engine, where the master's timing decides
+which branch the vblank handler takes. A register difference costs one row and
+one instruction in the fine gate and one row and *a block's worth of agreement*
+in the coarse one, which is how the two can move opposite ways on the same run.
+The two backends themselves still agree: 232 commands and the same 15,116-byte
+frame buffer at 300 frames from either.
+
+**Where it stops now, and it is one address.** At about frame 2,400 the run
+freezes again with the master dead — `sh2_call` parks a CPU at 0 when a transfer
+has no block — and the message says `no recompiled block at 0x06000A64`. That
+address is *known code* in the middle of an existing block, and what reaches it
+is `mov.l @(12,pc),r0` at `0x06000AA6` loading the literal `0x06000A64` and
+`lds r0,pr` in the delay slot of a `bra`: **a computed return address into the
+middle of another handler.** M3 recorded exactly this shape as the one hole in
+the PR model — "code that computes a return address to skip inline data is
+outside this model. No such site is known in this game, but nothing detects one
+yet." One is known now, and a literal that a `lds` puts into PR is as good a
+block leader as any branch target.
+
 ### Next
 
 **1. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and
