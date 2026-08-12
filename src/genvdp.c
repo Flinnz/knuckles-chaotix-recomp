@@ -96,11 +96,12 @@ static void sprite_line(Px *line, unsigned w, unsigned y, int h40) {
     }
 }
 
-void genvdp_render(uint32_t *px, unsigned w, unsigned h) {
+void genvdp_render(uint32_t *px, unsigned w, unsigned h, uint8_t *opaque) {
     uint32_t back = colour(gen.vdpreg[7] & 0x3F);
+    if (opaque) memset(opaque, 0, w * h);
     if (!(gen.vdpreg[1] & 0x40)) {              /* display disabled */
         for (unsigned i = 0; i < w * h; i++) px[i] = back;
-        return;
+        return;                                 /* all backdrop, all see-through */
     }
 
     int h40 = gen.vdpreg[12] & 1;
@@ -156,6 +157,13 @@ void genvdp_render(uint32_t *px, unsigned w, unsigned h) {
             if (a.idx && a.pri)  e = a.pal * 16 + a.idx;
             if (s.idx && s.pri)  e = s.pal * 16 + s.idx;
             px[y * w + x] = colour(e);
+            /* Whether anything at all was drawn here, which is a different
+             * question from what colour came out: a plane pixel may resolve to
+             * the same colour as the backdrop and is still not the backdrop.
+             * The 32X needs the distinction — when the Mega Drive has priority
+             * it shows only through the pixels the Mega Drive left alone. */
+            if (opaque)
+                opaque[y * w + x] = (uint8_t)(a.idx || b.idx || s.idx);
         }
     }
 }

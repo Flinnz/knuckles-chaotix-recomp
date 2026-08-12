@@ -3,8 +3,8 @@
 Facts only. Reasoning, history and rejected approaches are in
 [roadmap.md](roadmap.md).
 
-Generated from the build at commit `edc5301` plus the delay-slot fix.
-`make check` passes.
+Generated from the build at commit `edc5301` plus this session's two fixes —
+the dropped delay slot and the 32X priority bit. `make check` passes.
 
 ## What this is
 
@@ -100,6 +100,9 @@ reference logs. Nothing gates anything after that.
 | ~2,400 | attract mode, first level, with HUD, both characters and the ring tether |
 | 200,000 | still going — the attract loop, level after level, no stall |
 
+`--press start --press-until 350` goes through the title and the save select
+into a playable level instead of watching the attract loop.
+
 Commands a frame varies with the scene: about 1.0 in a level and 0.5 on the
 title screen, against the reference's 0.83 over its own 1.7 seconds. Zero
 unmapped accesses on either side across the whole run.
@@ -122,6 +125,7 @@ audio device paces it to the machine's speed.
 | `--interp` / `--recomp` | Musashi or recompiled 68000 (recompiled is the default) |
 | `--hold LIST` | hold buttons from frame 0 (`up,down,left,right,a,b,c,start,x,y,z,mode`) |
 | `--press LIST` | pulse buttons, 15 frames in every 45 — what a menu needs |
+| `--press-until N` | stop pulsing at frame N, so a run can sit on the screen it reached |
 | `--layers N` | 1 plane B, 2 plane A, 4 sprites, 8 the 32X bitmap |
 | `--sound N` | 1 PWM, 2 PSG, 4 YM2612 |
 | `--audio` / `--mute` | force a device on / off |
@@ -168,8 +172,8 @@ Ordered as in the roadmap's plan.
 5. The sound mix is chosen, not measured; the chips have no output gate.
 6. The slave diff is bounded at 2,000 reference blocks by trace size.
 
-Also open: the 32X bitmap mode register's priority bit is not modelled, so the
-32X is always composited in front; `0x0749C2`-`0x0749D0` is 68000 code discovery
-has never found; the recompiled 68000's PC is not masked to 24 bits; the Genesis
+Also open: the 32X's priority is the bitmap mode register's bit 7 only, with no
+per-pixel priority modelled; `0x0749C2`-`0x0749D0` is 68000 code discovery has
+never found; the recompiled 68000's PC is not masked to 24 bits; the Genesis
 VDP has no window plane, shadow/highlight, interlace or per-line sprite limits;
 Genesis DMA fill and copy are skipped.

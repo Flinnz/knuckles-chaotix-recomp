@@ -212,8 +212,13 @@ unsigned mars_pwm_rate(void);
  * 365.96 here, so it is not a quantity to schedule from. */
 unsigned mars_pwm_per_frame(void);
 
-/* Draw the Mega Drive picture: planes, sprites and palette. */
-void genvdp_render(uint32_t *px, unsigned w, unsigned h);
+/* Draw the Mega Drive picture: planes, sprites and palette.
+ *
+ * `opaque`, if given, receives one byte a pixel: whether any plane or sprite
+ * put something there, as opposed to the backdrop showing. That is what the
+ * 32X composites against when the bitmap mode register gives the Mega Drive
+ * priority — see render() in src/mars_main.c. */
+void genvdp_render(uint32_t *px, unsigned w, unsigned h, uint8_t *opaque);
 
 /* The Mega Drive checksum the adapter's boot ROM computes over the cartridge:
  * 16-bit words from 0x200 to the end. It reproduces the header word of both the

@@ -2615,6 +2615,41 @@ where one register difference costs a whole block of agreement.
 first grouped asset the game gets wrong is loaded at frame 31 and first *drawn*
 long after the extract ends.
 
+### Which half is in front is the game's to say
+
+The save select — `DATA LOAD`, the slot box, `PLAY` / `DELETE` — came out as a
+screen of brown diamonds and nothing else. `--layers` split it in one run:
+**the diamonds are the 32X**, a full-screen tiled background, and the entire
+interface is on the Mega Drive underneath it. Nothing was missing; the two
+halves were stacked the wrong way round.
+
+**Bit 7 of the bitmap mode register is the priority bit**, and `render()` drew
+as though it were always set — a gap its own comment had recorded. The game
+settles both the bit's position and its polarity without any documentation
+being needed, because it uses both values and only one reading of them makes
+either screen right:
+
+| screen | bitmap mode | what has to be in front |
+|---|---|---|
+| SEGA logo, title, every level | `0x0081` | the 32X — sprites over a Mega Drive background |
+| save select | `0x0001` | the Mega Drive — its interface over a 32X backdrop |
+
+With the Mega Drive in front the 32X shows through wherever the Mega Drive left
+the backdrop, which is a different test from "is this pixel the backdrop
+colour": a plane pixel that resolves to the same colour is still not the
+backdrop. `genvdp_render` returns that as a mask rather than having the
+compositor guess it back out of the colours.
+
+`--press-until N` is what made the screen reachable headless. `--press` pulses
+for the whole run, so it walks straight through every menu it reaches and the
+save select cannot be looked at at all; stopping the pulse leaves the game
+sitting on whatever it last entered.
+
+*Gates:* every number in `make check` is unchanged — this is the compositor and
+nothing upstream of it — and frame 3,000 of the attract loop renders
+byte-identically, which is what says the screens with the bit set were not
+touched.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what

@@ -549,19 +549,31 @@ static void handoff(SH2 *c, int slave) {
     c->slave = slave;
 }
 
-/* The picture is the Mega Drive's with the 32X bitmap composited over it.
+/* The picture is the two halves composited, and which is in front is the
+ * game's to say.
  *
  * Packed pixel and direct colour both start with a per-line table of 16-bit
  * word offsets. Index 0 in packed pixel, and a zero word in direct colour, are
- * transparent and leave the Mega Drive pixel showing — which is currently the
- * whole screen, since the 32X frame buffer holds no pixels yet. The bitmap mode
- * register's priority bit, which can put the 32X behind the Mega Drive instead,
- * is not modelled.
+ * transparent and leave the Mega Drive pixel showing.
+ *
+ * **Bit 7 of the bitmap mode register is which layer is on top**, and this
+ * drew as though it were always set. The game says so itself, in the one place
+ * the two readings differ: every screen where the 32X draws over the Mega
+ * Drive — the logo, the title, every level — has it at 0x0081, and the save
+ * select, whose 32X half is a full-screen tiled background and whose Mega
+ * Drive half is the whole interface, has it at 0x0001. Composited the one way
+ * for both, the save select is a screen of brown diamonds and nothing else.
+ *
+ * With the Mega Drive in front the 32X shows through where the Mega Drive left
+ * the backdrop, which is what `opaque` records — not "is this pixel the
+ * backdrop colour" but "did any plane or sprite put something here".
  */
 static void render(uint32_t *px) {
-    genvdp_render(px, W, H);
+    static uint8_t md_opaque[W * H];
+    genvdp_render(px, W, H, md_opaque);
 
     unsigned mode = mars.bitmap_mode & 3;
+    int mars_front = (mars.bitmap_mode & 0x0080u) != 0;
     if (!(gen.layers & 8)) return;              /* 32X layer switched off */
     if (mode != 1 && mode != 2) return;         /* blank: Mega Drive only */
     const uint8_t *fb = mars_fb_shown();
@@ -578,6 +590,7 @@ static void render(uint32_t *px) {
         uint32_t base = (entry * 2u) & 0x1FFFFu;
         for (int x = 0; x < W; x++) {
             uint16_t col;
+            if (!mars_front && md_opaque[y * W + x]) continue;
             if (mode == 1) {
                 uint8_t idx = fb[(base + (uint32_t)x) & 0x1FFFFu];
                 if (!idx) continue;
@@ -702,6 +715,11 @@ int main(int argc, char **argv) {
      * anything. `--press` pulses instead, a third of a second down and
      * two thirds up, which is what a person at the keyboard produces. */
     unsigned press = 0;
+    /* And when to stop pressing. A pulse that never ends walks straight through
+     * every menu it reaches, so a screen that is entered *and stayed on* — the
+     * save select, say — cannot be looked at with `--press` alone. Zero means
+     * press for the whole run, which is what it did before. */
+    unsigned press_until = 0;
     /* Which frame the tracers start at. Everything gated reads a trace from
      * the reset, because that is where the reference logs begin; this is for
      * the part of the run that has no reference at all. */
@@ -760,6 +778,8 @@ int main(int argc, char **argv) {
             hold = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--press") && i + 1 < argc)
             press = parse_hold(argv[++i]);
+        else if (!strcmp(argv[i], "--press-until") && i + 1 < argc)
+            press_until = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--recomp"))
             use_recomp = 1;                 /* the default; kept so it still runs */
         else if (!strcmp(argv[i], "--interp"))
@@ -875,7 +895,8 @@ int main(int argc, char **argv) {
          * had got. */
         trace_armed = frames >= trace_from;
         gen68k_frame_start();
-        unsigned pulse = press && frames % 45 < 15 ? press : 0;
+        unsigned pulse = press && (!press_until || frames < press_until)
+                      && frames % 45 < 15 ? press : 0;
         gen.pad_buttons = headless_frames ? (hold | pulse)
                                           : (read_pad() | hold | pulse);
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
