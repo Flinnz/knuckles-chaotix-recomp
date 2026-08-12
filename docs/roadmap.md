@@ -312,7 +312,8 @@ dispatch loop that never returns becomes a finite call chain that unwinds. It
 is why the master "returns" at all. Harmless here, wrong in general, and worth
 fixing when the 68000 starts driving real work.
 
-**M5 — first pixels** 🔵 *both halves draw; the 32X image is the SH-2's own*
+**M5 — first pixels** ✅ *done — both halves draw, and the 32X image is the
+SH-2's own*
 
 There is a frame. It is a recognisable Knuckles' Chaotix level — sky, palm
 trees, machinery, plant sprites, foreground platforms — and it took one thing
@@ -2509,37 +2510,66 @@ this. The gates could not have caught any of the three, and did not.
 
 ### Next
 
-**1. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and
+*Written after the session that got the game playing. The ordering is by what
+each would have caught, not by how interesting it is.*
+
+**1. A gate that does not need the reference.** This is the whole of what M7
+owes. Everything found today was found by running the game and reading a trace;
+`make check` was byte-identical across all three fixes, and would have been
+across all three bugs. The reference cannot help — it is 1.7 seconds and the
+game runs for two hundred and fifty — but three oracles are already in hand and
+cost nothing:
+
+* **The two 68000 backends against each other.** `--interp` reads memory through
+  `src/gen68k.c` and `--recomp` through `canon68k`, so they disagree exactly
+  where a translation is wrong about what an address *is*. The banked window
+  would have been caught outright, on the frame it happened. Compare commands
+  posted, the frame buffer, VRAM, CRAM and the palette at checkpoints across a
+  long headless run.
+* **Liveness.** Four conditions that are always bugs and are all one line each:
+  `mars.missing` nonzero (an SH-2 transfer with no block — this killed the
+  master at `0x06000A64`), an SH-2 parked at 0, the 68000 sitting in the halt
+  stub at `0x880B2E`, and unmapped accesses growing without bound.
+* **Progress.** Commands a frame is 0.83 when the engine is healthy. The fill
+  length bug took it to 0.07 and the divide unit to 0.14, and both were visible
+  within a few hundred frames. A long run whose rate collapses is a failed run.
+
+None of these needs a new instrument, and the first is the one to write first.
+
+**2. The frontier is about frame 17,000.** It runs the attract loop through two
+levels and then stops: commands frozen at 13,337, VRAM and CRAM cleared, and the
+68000's PC `0xFFFFDD32` — work RAM, and worth noting that it is more than 24
+bits, which `canon68k` passes through unchanged and only works because the
+lookup then fails and the interpreter masks it. `--trace-from 17000` is the
+instrument; it is the same method that found the last three.
+
+**3. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and
 1.009 cycles an instruction, measured over whole reference frames — and the
 68000 has already been through this: `recomp_cpi` was 11, exactly right in the
 steady state and 18% fast through the boot, and the fix was for each block to
 carry what its own instructions cost. The SH-2 side is the same shape and
 harder, because there is no Musashi to take a table from and because an SH-2's
-cost is mostly its cache. It is what the two largest remaining 68000 groups are
-made of — 114 rows of command-interrupt latency and 104 of a master that
-finishes too early — and it is now the thing in front.
+cost is mostly its cache. It is what the two largest remaining 68000 trace
+groups are made of — 114 rows of command-interrupt latency and, before the
+divide unit shrank it, a master that finished too early.
 
-**2. The sound has no accuracy gate, only an input gate.** Every byte that
+**4. The banked window is wholly interpreted.** 988,493 hand-overs in 3,600
+frames, which is most of the engine's calls into bank 2. It is correct and it is
+not free; the run is still faster than the interpreted build, 5.6 seconds
+against 8.0 for a minute of game, so this is a cost to measure rather than an
+emergency. The real fix is to key translation by *(bank, offset)* rather than
+offset, which means four images of the window in the front end and a dispatch
+that reads the register — a front-end change, not a runtime one.
+
+**5. The sound has no accuracy gate, only an input gate.** Every byte that
 reaches the two chips is the reference's, and what comes out of them is
 unmeasured against anything: the reference logs instructions and not audio.
 Nuked-OPN2 removes the question for the FM, and the PSG has its arithmetic
 test, but the *mix* — three sources at chosen relative levels — is a judgement
 and would stay one even with a better oracle.
 
-**3. Everything is gated on 1.7 seconds.** Every diff, and therefore every
-claim of accuracy, stops where the reference logs stop — and the game stops
-working shortly after that. The fill-length bug is what that costs: a
-hardware-register width wrong in a way no gate could see. Three threads lead out
-of it, in order of how much they would buy: why the 68000 issues command 7 three
-times in 5,400 frames when the asset table it fills is what the master draws
-from; why the Mega Drive screen sits parked at a scroll of -224; and the
-`0x0749C2` region the front end has never discovered. None of them has an
-oracle, which is the point — past 1.7 seconds the only instrument is the run
-report, so anything found there should leave a number behind in it.
-
-**4. The slave diff's bound.** Still 2,000 reference blocks, but for a different
-reason than before: the aligner walks collapsed runs now, and what limits the
-bound is how far our own trace reaches. It is roughly linear in trace size —
+**6. The slave diff's bound.** Still 2,000 reference blocks, and what limits it
+is how far our own trace reaches. It is roughly linear in trace size —
 2,000,000 lines cross about 2,500 blocks, 8,000,000 about 7,000 — so raising
 `--trace-sh2-lines` and the bound together is the lift, and it costs disk rather
 than cleverness. 20,000 would want some 21 million lines.
@@ -2601,6 +2631,15 @@ does not spend the same day finding the same thing.
   slave's PWM interrupt to one point in a 206-instruction loop, 3,360 times out
   of 3,360, which is idle-loop handling in the emulator rather than a fact about
   the machine.
+* **Holding a button to test a menu.** `--hold` presses from frame zero and
+  therefore never *becomes* pressed, which is the edge a menu acts on. Every
+  hold tried against the title screen changed nothing at all; `--press`, which
+  pulses, skipped the cutscene on the first run.
+* **The long master extract as a discriminator.** `diffsh2.py --cpu master --ref
+  build/ref-long-shm.txt --ref-blocks 20000` returns 215 blocks agreed and 3,432
+  divergences, and returns *exactly that* with the divide unit in and with it
+  out. It walks the whole extract and cannot tell the two apart, so it is not
+  the instrument for anything past the boot as configured.
 * **A VDP bus-contention model** — the first attempt at the 68000's clock. It
   changed the instruction count by nothing at all, which is what said the budget
   was not what governed. See the note above `cpu_credit` in `src/mars_main.c`.
@@ -2691,13 +2730,16 @@ does not spend the same day finding the same thing.
 * **The picture is right, not merely recognisable.** At 300 frames the 32X half
   draws the SEGA logo in blue with its outline, its "TM" and the nebula panels,
   and the line table matches the reference's own arithmetic.
-* **The master is fill-bound past the logo.** 133,224 words a frame through the
-  32X VDP's autofill, which at the two SH-2 cycles a word the reference measures
-  is 69% of its clock, and what reaches the frame buffer afterwards is 255
-  bytes. Whether a real 32X is that fill-bound is not something the extract can
-  say — it never reaches the blitter at `0x06004750`.
-* **The Mega Drive screen past the logo is parked below the display, and the
-  engine parks it.** Rendered with the vertical scroll forced to zero it is the
+* ~~**The master is fill-bound past the logo.**~~ *Settled — it was the divide
+  unit.* The spans it was filling came out of a clipper whose interpolation
+  returned `a * b` where it wanted `(a * b) / c`. With the divider in, autofill
+  is 8% of the master's clock at 3,600 frames where it was 90%.
+* ~~**The Mega Drive screen past the logo is parked below the display.**~~
+  *Settled — it was the divide unit too.* The scroll the engine wrote over and
+  over was a transition that could not advance, because the master never
+  finished a frame's work. The note below is kept for what it ruled out.
+* **What that chase ruled out, which is still worth having.** Rendered with the
+  vertical scroll forced to zero it is the
   Chaotix title screen's perspective tunnel, drawn correctly — so the tiles, the
   tilemap, the palette and the renderer are all sound. What holds it off-screen
   is the engine writing VSRAM 0 and 1 as `0xFF20`, exactly -224 lines and
@@ -2705,11 +2747,14 @@ does not spend the same day finding the same thing.
   3,600 frames and **one distinct value**. It is not a DMA being dropped either
   — there is no transfer to VSRAM in the whole run, every write is through the
   data port.
-* **It is not the recompiler.** `--interp` and `--recomp` are identical past the
-  logo: the same 359 commands at 1,200 frames and 492 at 3,600, the same 9,583
-  VRAM bytes, the same 38 CRAM entries, the same frame buffer. The only
-  difference is the reported PC, which is the same instruction seen through the
-  direct and `0x880000` windows.
+* ~~**It is not the recompiler.**~~ *True of that symptom and wrong as a general
+  claim, which is worth leaving visible.* `--interp` and `--recomp` were indeed
+  identical past the logo — the same 359 commands at 1,200 frames and 492 at
+  3,600, the same VRAM, CRAM and frame buffer — so the parked screen was not
+  the recompiler's. The halt that came after it was: `canon68k` folded the
+  banked window to bank 0, which only `--recomp` does. Two backends agreeing on
+  one symptom says nothing about the next one, and that is exactly the argument
+  for making them agree *by gate* rather than by spot check.
 * **The fill cost throttles the engine but is not what stops it.** Making
   autofills instantaneous takes the command rate from 492 to 1,291 in 3,600
   frames, 2.6x — and the scroll is still that one value and the screen is still
@@ -2720,6 +2765,24 @@ does not spend the same day finding the same thing.
   FEN model and the interleaving were all still wrong in the direction of
   running the game too fast. None of those commits draws a Mega Drive picture at
   3,000 frames either.
+* **The banked window is wholly interpreted.** `canon68k` refuses
+  `0x900000`-`0x9FFFFF` because which megabyte it shows is a register, so every
+  call the engine makes into bank 2 goes to Musashi — 988,493 hand-overs in
+  3,600 frames. Correct, and not free. Keying translation by *(bank, offset)*
+  is the fix and it is a front-end change.
+* **The recompiled 68000's block gate lost half its agreement to the divide
+  unit.** 8,741 blocks to 4,847, with divergences 384 to 493, while the
+  instruction-granular interpreted gate went the other way, 389 divergences to
+  361. The boot halves are identical either way — 2,466 blocks, 23 divergences
+  — so all of it is past the boot, where the master's timing decides which
+  branch the vblank handler takes, and where one register difference costs an
+  instruction of agreement in the fine gate against a whole block in the coarse
+  one. Reporting the coarse gate's agreement in instructions rather than blocks
+  would make the two comparable and is probably the honest fix.
+* **The recompiled 68000's PC is not masked to 24 bits.** At the frontier it
+  holds `0xFFFFDD32`, which `canon68k` passes through unchanged; it works only
+  because the lookup then fails and the interpreter masks it on the way in.
+  Accidental rather than designed.
 * **`0x0749C2`-`0x0749D0` is 68000 code discovery has never found.** Not a
   block, not in `az.code`, between known blocks at `0x749AA` and `0x749E4`, and
   entered 4,163 times in 3,600 frames. `coverage` is clean because it is only
@@ -2742,6 +2805,36 @@ and not audio — see the note under Next. The other half of this milestone,
 replacing the 68000 interpreter with recompiled code, was done earlier and is
 the default; what remains of it is optimisation, and the interpreter stays for
 the code the engine writes at run time.
+
+**M7 — it plays** 🔵 *the attract mode runs; the gates still stop at 1.7 seconds*
+
+`./build/mars` boots, draws the SEGA screen, assembles the title screen with its
+five characters over the scrolling tunnel, and goes on into the attract mode:
+Vector on a Chaotix platform stage at 2,600 frames, Espio on a different one at
+12,000, the title and the logo between them as the loop comes round. It keeps
+that up for about **17,000 frames — four and a half minutes** — posting 0.83
+commands a frame, which is the rate the reference posts them at.
+
+Three things stood between the SEGA logo and that, and the shape they share is
+the point of this milestone: **not one of them could have been caught by a
+gate.**
+
+* The 32X VDP's **auto fill length register is eight bits** and this took
+  sixteen, so every fill was charged 256 times its FEN and the master spent 90%
+  of its clock waiting.
+* The SH7604's **on-chip divide unit** was plain storage, so every division in
+  the game returned its dividend — which the polygon clipper turned into a quad
+  20,670 rows tall.
+* **`0x900000` is the banked window**, not a cartridge offset, and the
+  recompiled build folded it to bank 0 whatever the register said — so the
+  engine's `jsr 0x928EEC` ran data and fell into the halt stub.
+
+Each is a hardware fact the runtime had wrong, each stopped the game dead, and
+`make check` is byte-identical across all three. The reference extract is 1.7
+seconds; the game had been running for two hundred and fifty.
+
+What the milestone still owes is therefore not more emulation but a gate that
+does not need the reference — see Next.
 
 ## Verification strategy
 
