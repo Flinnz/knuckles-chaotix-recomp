@@ -1,7 +1,6 @@
 build/
 toolchain/build/
 toolchain/sh-elf/
-third_party/
 roms/*.32x
 roms/*.bin
 roms/*.log

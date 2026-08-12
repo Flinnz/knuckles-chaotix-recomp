@@ -1,0 +1,6 @@
+[submodule "third_party/musashi"]
+	path = third_party/musashi
+	url = https://github.com/kstenerud/Musashi.git
+[submodule "third_party/nuked-opn2"]
+	path = third_party/nuked-opn2
+	url = https://github.com/nukeykt/Nuked-OPN2.git
