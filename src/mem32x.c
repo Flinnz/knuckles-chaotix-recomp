@@ -50,6 +50,25 @@ static void trap(const char *what, uint32_t a) {
                 mars_running ? "master" : "no cpu");
 }
 
+/* A watchpoint on the SH-2s' address space.
+ *
+ * The tables the 32X draws from are built by one routine and read by another,
+ * frames apart, so "which entry is wrong" and "who wrote it" are different
+ * questions and only the second one is answerable by reading code. `trap_fn` is
+ * the last address the dispatch loop transferred to, which is the block the
+ * write is inside — not the exact PC, and enough to name the routine. */
+uint32_t mars_watch_lo, mars_watch_hi;
+static unsigned watch_n;
+
+static void watch(const char *what, uint32_t a, uint32_t v) {
+    if (a < mars_watch_lo || a >= mars_watch_hi) return;
+    if (watch_n++ >= 200) return;
+    fprintf(stderr, "  [watch] %s 0x%08X = 0x%X  in 0x%08X  (%s)\n",
+            what, a, v, trap_fn,
+            mars_running == &mars_cpu[1] ? "slave" :
+            mars_running ? "master" : "no cpu");
+}
+
 /* Bit 15 of the bitmap mode register reads back set whatever is written to it.
  * The cartridge's 32X check at 0x880790 reads the register and refuses to boot
  * unless the bit is there, and with it clear the 68000 falls into the failure
@@ -494,6 +513,7 @@ uint32_t sh2_r32(SH2 *c, uint32_t a) {
 }
 void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
     (void)c; uint32_t ra = canon(a);
+    if (mars_watch_hi) watch("w8", ra, v);
     if (is_purge(ra)) return;
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 1)) return;
     if (is_overwrite(ra) && v == 0) return;
@@ -503,6 +523,7 @@ void sh2_w8(SH2 *c, uint32_t a, uint8_t v) {
 }
 void sh2_w16(SH2 *c, uint32_t a, uint16_t v) {
     (void)c; uint32_t ra = canon(a);
+    if (mars_watch_hi) watch("w16", ra, v);
     if (is_purge(ra)) return;
     if (ra < 0x10000u && mars_reg_write_sh2(ra, v, 2)) return;
     uint8_t *p = resolve(ra, 2);

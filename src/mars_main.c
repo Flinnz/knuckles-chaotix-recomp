@@ -594,6 +594,44 @@ static void render(uint32_t *px) {
     }
 }
 
+/* One line every N frames, of everything that says the machine is still alive.
+ *
+ * Every gate in this project reads a trace against the reference, and the
+ * reference is 1.7 seconds where the game runs for minutes. What is wanted past
+ * that is not accuracy but liveness: four conditions that are always a bug and
+ * cost nothing to watch — an SH-2 transfer with no recompiled block, a CPU
+ * parked at zero, unmapped accesses growing, and the command rate collapsing.
+ * A run whose rate goes to zero has stopped being the game whatever else is
+ * true of it, and this is what says on which frame that happened.
+ *
+ * `unmapped` is the sharpest of the four and the least obvious. A pointer the
+ * game reads through is either right or it is somewhere the machine has no
+ * memory, so a steady trickle of unmapped SH-2 reads is a table full of wrong
+ * entries reporting itself one access at a time — which is what it was, at
+ * 64,676 in 2,600 frames, before the delay slot below it was found.
+ *
+ * `c7` is the asset loader: command 7 is how the engine decompresses a group of
+ * art into SDRAM, and a run that stops issuing them has stopped changing scene.
+ */
+static void progress(unsigned frame) {
+    static uint32_t last_cmds, last_unk_sh2, last_unk_68k;
+    unsigned nz = 0;
+    for (unsigned i = 0; i < MARS_FB; i++) if (mars_fb_shown()[i]) nz++;
+    unsigned vram = 0;
+    for (unsigned i = 0; i < sizeof gen.vram; i++) if (gen.vram[i]) vram++;
+    printf("  f%-6u cmds %6u (+%4u) c7 %3u  68k %06X  shm %08X shs %08X  "
+           "fb %6u  vram %5u  unmapped +%u/+%u%s%s\n",
+           frame, gen.cmd_posted, gen.cmd_posted - last_cmds, gen.cmd_hist[7],
+           cpu_pc(), mars_cpu[0].pc, mars_cpu[1].pc, nz, vram,
+           mars.unknown - last_unk_sh2, gen.unknown_r - last_unk_68k,
+           mars.missing ? "  MISSING-BLOCK" : "",
+           (!mars_cpu[0].pc || !mars_cpu[1].pc) ? "  PARKED" : "");
+    fflush(stdout);
+    last_cmds = gen.cmd_posted;
+    last_unk_sh2 = mars.unknown;
+    last_unk_68k = gen.unknown_r;
+}
+
 /* The keyboard, as a pad. Held once a frame into gen.pad_buttons and read out
  * of it by src/gen68k.c whenever the game strobes TH.
  *
@@ -651,6 +689,7 @@ int main(int argc, char **argv) {
     int headless_frames = 0;
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
     const char *dump_32x = NULL, *wav = NULL, *tracepwm = NULL;
+    const char *dump_sdram = NULL;
     const char *tracez80 = NULL, *dump_z80 = NULL, *tracechips = NULL;
     unsigned long tracez80_lines = 400000;
     int mute = 0, audio = 0;
@@ -667,6 +706,7 @@ int main(int argc, char **argv) {
      * the reset, because that is where the reference logs begin; this is for
      * the part of the run that has no reference at all. */
     unsigned trace_from = 0;
+    unsigned progress_every = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             headless_frames = atoi(argv[i + 1]);
@@ -686,6 +726,14 @@ int main(int argc, char **argv) {
             dump_vdp = argv[++i];
         else if (!strcmp(argv[i], "--dump-32x") && i + 1 < argc)
             dump_32x = argv[++i];
+        else if (!strcmp(argv[i], "--dump-sdram") && i + 1 < argc)
+            dump_sdram = argv[++i];
+        else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
+            char *end;
+            mars_watch_lo = (uint32_t)strtoul(argv[++i], &end, 0);
+            mars_watch_hi = mars_watch_lo
+                          + (*end == ':' ? (uint32_t)strtoul(end + 1, NULL, 0) : 4);
+        }
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc)
             wav = argv[++i];
         else if (!strcmp(argv[i], "--trace-pwm") && i + 1 < argc)
@@ -718,6 +766,8 @@ int main(int argc, char **argv) {
             use_recomp = 0;
         else if (!strcmp(argv[i], "--rate68k"))
             rate68k_report = 1;
+        else if (!strcmp(argv[i], "--progress") && i + 1 < argc)
+            progress_every = (unsigned)strtoul(argv[++i], NULL, 0);
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -919,6 +969,7 @@ int main(int argc, char **argv) {
          * one without a window. Without a device this returns at once, which
          * is what leaves a headless run running as fast as it can. */
         sound_pace();
+        if (progress_every && frames % progress_every == 0) progress(frames);
         if (limit && frames >= limit) running = 0;
     }
 
@@ -961,6 +1012,20 @@ int main(int argc, char **argv) {
             fputc(mars.bitmap_mode >> 8, d); fputc(mars.bitmap_mode & 0xFF, d);
             fclose(d);
             printf("  wrote %s (fb0, fb1, cram, fbctl, bitmap mode)\n", dump_32x);
+        }
+    }
+
+    /* The master's 256 KB, which is where everything the 32X draws lives: the
+     * object list, the asset pointer table at 0x06003614 and the decompressed
+     * art the table points into. A null slot is an object that draws nothing
+     * and a wrong one is the blitter running away, so both questions are read
+     * out of this rather than inferred from the picture. */
+    if (dump_sdram) {
+        FILE *d = fopen(dump_sdram, "wb");
+        if (d) {
+            fwrite(mars.sdram, 1, MARS_SDRAM, d);
+            fclose(d);
+            printf("  wrote %s (SDRAM at 0x06000000)\n", dump_sdram);
         }
     }
 

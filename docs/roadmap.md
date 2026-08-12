@@ -2508,6 +2508,113 @@ to **2,869**, and the 68000 is in the engine rather than in a halt stub.
 it is not reassurance: the reference extract is 1.7 seconds and reaches none of
 this. The gates could not have caught any of the three, and did not.
 
+### One delay slot, and everything the 32X could not draw
+
+Three reports from playing it: **no HUD at all**, some characters missing, and
+a **freeze after the end of a level**. They are one bug, and it is in the
+recompiler rather than in the hardware model — the first of those this project
+has had.
+
+**The instrument came first, because the last three bugs were found by reading
+a trace and there was nothing that said where to look.** `--progress N` prints
+one line every N frames of the four things that are always a bug: a transfer
+with no recompiled block, a CPU parked at zero, unmapped accesses accumulating,
+and the command rate. It put the freeze on **frame 16,236** — the master at
+`0x06001478` from that frame to the end of the run, unmapped SH-2 accesses going
+from 200 a frame to 94,000, and not one command posted after it.
+
+`0x06001478` is the sprite blitter's copy loop, `mov.w @r4+,r2 / dt r1 /
+mov.w r2,@(r0,r8)`, and it was running with **r1 = 0x7FFC82A4** and r4 past the
+end of SDRAM. That is a run count of two billion words from a source that does
+not exist. The blitter had been handed a pointer that is not one.
+
+**Where the pointer comes from is a display list, and the list said the same
+thing thirteen times a frame.** The 68000 DMAs a command list to the master each
+frame; opcode 1 is a sprite draw, and it names its art by two bytes — an index
+into the asset table at `0x06003614`, then an index into the sub-table that
+entry points at. Logged at `0x06000A64`, where the two lookups are done and r4
+holds the result, **ten of the thirteen draws a frame resolved to zero**. The
+game was asking for its HUD and being handed a null pointer.
+
+The sub-tables are built by the group decompressor at `0x06000464`, and every
+one it had built in SDRAM had the same shape: entry 0 valid, every other entry
+zero. A watchpoint on one of them — `--watch ADDR:LEN`, which logs SH-2 writes
+with the block they came from — showed why in four lines. Every write went to
+the *same* address:
+
+    [watch] w16 0x060136B8 = 0x601   in 0x06000464
+    [watch] w16 0x060136BA = 0x3718  in 0x06000464
+    [watch] w16 0x060136B8 = 0x601   in 0x0600048A
+    [watch] w16 0x060136BA = 0x374A  in 0x0600048A
+
+`r5`, the table write pointer, never advanced. It is advanced by `add #4,r5` at
+`0x06000488` — **which is the delay slot of the `bsr` at `0x06000486`, and also
+the target of the `bf.s` at `0x06000482`.** The cartridge overlaps the two: the
+skip path branches *to* the slot and executes it as an ordinary instruction, and
+the call path executes it as a slot. One instruction, two roles.
+
+The front end is right about this — a branch target is a block leader, so
+`0x06000488` starts a block. The emitter was not. It took a delay slot only from
+the instruction *after* the branch within the same block:
+
+```python
+ds = b.insns[i + 1] if (ins.delay and i + 1 < len(b.insns)) else None
+```
+
+and at a site where the slot is the next block's first instruction that is
+`None` — the transfer was emitted with no delay slot at all and the instruction
+was dropped. Not reordered, not mistimed: gone. `_borrowed_slot` in
+`tools/recomp/sh2c.py` takes it from `az.insns` instead, and the block's
+instruction count includes it so the fuel and the trip counts stay honest.
+
+**There is exactly one site in the image**, and it is this one. That is why the
+bug reads as a data problem: it does not corrupt anything, it just means that
+every asset group the game decompresses comes out with one usable pointer and
+the rest zero. Two thirds of everything the 32X draws, missed at one address.
+
+The one shape the fix has to be careful about is not present here and would be
+silent if it were: a *conditional* delayed branch whose slot is borrowed falls
+through to `b.end`, which is the slot's own address, so the not-taken path would
+run it twice. The fall-through goes to `ins.addr + 4` in that case.
+
+**What it fixes:**
+
+| at 2,600 frames | before | after |
+|---|---|---|
+| sprite draws a frame resolving to null | 10 of 13 | **0 of 13** |
+| unmapped SH-2 accesses | 64,676 | **0** |
+| grouped asset sub-tables fully filled | 0 of 13 | **13 of 13** |
+| the run stops | frame 16,236 | not by frame 200,000 |
+
+The HUD is there — `SCORE`, `TIME`, `RINGS` and their digits in the top left,
+which is what was asked for and what the reference emulator shows. So is the
+title screen's text, which had been five characters standing on an empty
+tunnel: the logo, `FEATURING KNUCKLES THE ECHIDNA`, `PUSH START` and the
+copyright line are all grouped art and all of them were the second entry of a
+table onward. So are the second player, the ring tether between the two
+characters, and the level's objects.
+
+**And the freeze was the same thing seen later.** A null pointer draws nothing,
+because the blitter's first read is a zero terminator; a *stale* one — the one
+entry the loader did write, pointing at art of a different size — is a run
+count read out of unrelated bytes. The game froze on the first object unlucky
+enough to get the second reading, which is why starting a level by hand ran
+indefinitely and ending one did not.
+
+*Gates:* `make check` passes. The interpreted 68000's whole extract improves,
+**51,782 agreed to 52,525 and 361 divergences to 344** — the master is doing the
+work it always should have been, so its timing moves toward the reference's. The
+68000 boot (20,084 / 19), the master (197 blocks / 18) and the slave (1,344 /
+593) are unchanged. Two gates lose: the Z80 goes 32,782 to 32,622 agreed, and
+the recompiled 68000's block gate 4,847 to 3,376 with divergences 493 to 599 —
+whose boot half is **identical at 2,466 blocks and 23 divergences**, so all of
+it is past the boot and it is the same coarse-gate effect the divide unit had,
+where one register difference costs a whole block of agreement.
+
+*And no gate could have caught it.* The reference extract is 1.7 seconds; the
+first grouped asset the game gets wrong is loaded at frame 31 and first *drawn*
+long after the extract ends.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what
@@ -2534,14 +2641,22 @@ cost nothing:
   length bug took it to 0.07 and the divide unit to 0.14, and both were visible
   within a few hundred frames. A long run whose rate collapses is a failed run.
 
-None of these needs a new instrument, and the first is the one to write first.
+*Watched, not yet gated.* `--progress N` prints all of it, one line every N
+frames, and the delay-slot bug above was found with it in one run — the freeze
+frame, the master's address and the unmapped-access step change all came off
+that line. What is still missing is the *gate*: nothing fails a build for it,
+and the two-backend comparison is not written at all.
 
-**2. The frontier is about frame 17,000.** It runs the attract loop through two
-levels and then stops: commands frozen at 13,337, VRAM and CRAM cleared, and the
-68000's PC `0xFFFFDD32` — work RAM, and worth noting that it is more than 24
-bits, which `canon68k` passes through unchanged and only works because the
-lookup then fails and the interpreter masks it. `--trace-from 17000` is the
-instrument; it is the same method that found the last three.
+Of the four, **unmapped accesses are the one that was earning its keep before
+anyone looked.** They had been at 64,676 in 2,600 frames for as long as the game
+had been running, and no report added them up per frame or said they were
+supposed to be zero. They are zero now.
+
+**2. ~~The frontier is about frame 17,000.~~** *Gone with the delay slot.* It
+ran the attract loop through two levels and stopped at frame 16,236 with the
+master inside the blitter's copy loop on a pointer that was never a pointer.
+The loop now runs indefinitely — 200,000 frames, an hour and a half of game,
+with no unmapped access, no parked CPU and no stall in the command rate.
 
 **3. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and
 1.009 cycles an instruction, measured over whole reference frames — and the
@@ -2646,11 +2761,17 @@ does not spend the same day finding the same thing.
 
 ### Carried debts
 
-* ~~**The asset table is barely filled.**~~ *Settled.* The extended extract
-  shows the reference issuing command 7 exactly once across 5,643,099 master
-  instructions, and our 300-frame run posts exactly one. A mostly-empty asset
-  table is what this point in the game looks like. The 10.8 million reads of
-  address 0 are the sprite drawer walking slots that are legitimately unfilled.
+* ~~**The asset table is barely filled.**~~ *Settled, and the second half of the
+  settlement was wrong — worth leaving visible.* The count was right: the
+  reference issues command 7 exactly once across 5,643,099 master instructions
+  and our 300-frame run posts exactly one, so a mostly-empty **first-level**
+  table is what this point in the game looks like. What was then concluded from
+  it — that the 10.8 million reads of address 0 were the sprite drawer walking
+  slots that are legitimately unfilled — was not. Those reads were the *second*
+  level of the table, and every entry of it but the first was zero because the
+  loader's pointer never advanced. Counting the loads answered a question next
+  to the one the null reads were asking; the reads themselves were the evidence
+  and went uninvestigated for being explained.
 * ~~**96 of the 224 lines have no line-table entry.**~~ *Settled — it was a bug,
   not a property.* The autofill start register was being read as a byte address
   where it holds a word address, so every fill landed at half its address and
@@ -2806,18 +2927,18 @@ replacing the 68000 interpreter with recompiled code, was done earlier and is
 the default; what remains of it is optimisation, and the interpreter stays for
 the code the engine writes at run time.
 
-**M7 — it plays** 🔵 *the attract mode runs; the gates still stop at 1.7 seconds*
+**M7 — it plays** 🔵 *the attract loop runs indefinitely; the gates still stop
+at 1.7 seconds*
 
-`./build/mars` boots, draws the SEGA screen, assembles the title screen with its
-five characters over the scrolling tunnel, and goes on into the attract mode:
-Vector on a Chaotix platform stage at 2,600 frames, Espio on a different one at
-12,000, the title and the logo between them as the loop comes round. It keeps
-that up for about **17,000 frames — four and a half minutes** — posting 0.83
-commands a frame, which is the rate the reference posts them at.
+`./build/mars` boots, draws the SEGA screen, assembles the title screen — logo,
+`PUSH START`, the five characters and the copyright line — and goes on into the
+attract mode, level after level with its HUD, both characters and the ring
+tether between them. It no longer stops: 200,000 frames, an hour and a half of
+game, with no unmapped access and no stall in the command rate.
 
-Three things stood between the SEGA logo and that, and the shape they share is
-the point of this milestone: **not one of them could have been caught by a
-gate.**
+Four things stood between the SEGA logo and that, and the shape the first three
+share is the point of this milestone: **not one of them could have been caught
+by a gate.**
 
 * The 32X VDP's **auto fill length register is eight bits** and this took
   sixteen, so every fill was charged 256 times its FEN and the master spent 90%
@@ -2829,12 +2950,22 @@ gate.**
   recompiled build folded it to bank 0 whatever the register said — so the
   engine's `jsr 0x928EEC` ran data and fell into the halt stub.
 
-Each is a hardware fact the runtime had wrong, each stopped the game dead, and
-`make check` is byte-identical across all three. The reference extract is 1.7
-seconds; the game had been running for two hundred and fifty.
+Each of those is a hardware fact the runtime had wrong, each stopped the game
+dead, and `make check` is byte-identical across all three. The reference extract
+is 1.7 seconds; the game had been running for two hundred and fifty.
+
+The fourth is not a hardware fact and is the more uncomfortable one: **a delay
+slot that is also a branch target was dropped by the recompiler**, at one
+address, and it was the instruction that walks the asset loader's output table.
+Two thirds of what the 32X draws — the HUD, the second player, the title
+screen's own text — resolved to a null pointer, and the game froze on the first
+object that resolved to a stale one instead. The gates could not have caught
+that either, but for a different reason: they compare the code the reference
+reached, and the reference reaches this site's *caller* and never its effect.
 
 What the milestone still owes is therefore not more emulation but a gate that
-does not need the reference — see Next.
+does not need the reference — see Next. The instruments now exist; nothing
+fails a build for them yet.
 
 ## Verification strategy
 

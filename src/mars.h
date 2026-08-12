@@ -149,6 +149,12 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size);
 void mars_trace_dump(const char *why);
 void mars_trace_reset(void);
 
+/* A watchpoint over the SH-2s' address space, half-open, from `--watch`. Off
+ * when `mars_watch_hi` is zero. What it buys over reading the code is the
+ * *writer*: a table built in one routine and read in another, frames later,
+ * has two candidate culprits and only this says which. */
+extern uint32_t mars_watch_lo, mars_watch_hi;
+
 /* The two SH-2s live here rather than in main() so that the runtime can enter
  * one from anywhere — specifically from a 68000 register write, which is what
  * raising an interrupt is. */

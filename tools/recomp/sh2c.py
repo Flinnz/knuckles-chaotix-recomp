@@ -375,6 +375,31 @@ class Codegen:
         return out
 
     # ------------------------------------------------------------------
+    def _borrowed_slot(self, b):
+        """The delay slot of a transfer that ends a block, when the slot is not
+        in the block.
+
+        A delay slot that is also a branch target is a block leader, so the
+        front end starts the next block on it — and it still runs as part of
+        the transfer before it. The instruction therefore belongs to two blocks
+        and has to be emitted in both.
+
+        One site in this cartridge has that shape and it is not a cheap one:
+        `bsr 0x0600075A` at 0x06000486, inside the group decompressor at
+        0x06000464, whose slot `add #4,r5` advances the pointer table the
+        loader is filling in. Dropped, every entry of every multi-part asset
+        was written over the first one, so each came out with one valid pointer
+        and the rest zero — which is every object the 32X then drew nothing
+        for, and the blitter running away on the wrong pointer after that.
+        """
+        if not b.insns:
+            return None
+        last = b.insns[-1]
+        if not last.delay or last.kind not in (BRANCH, JUMP, JUMP_IND,
+                                               CALL, CALL_IND, RET):
+            return None
+        return self.az.insns.get(last.addr + 2)
+
     def function(self, fn):
         blocks = sorted(fn.blocks.values(), key=lambda b: b.start)
         lines = [f"/* 0x{fn.start:08X}  {fn.size()} bytes, "
@@ -391,24 +416,32 @@ class Codegen:
         else:
             lines.append("    (void)entry;")
         for b in blocks:
+            # The delay slot of a transfer that ends this block, when the slot
+            # is a block leader and so is not among this block's instructions.
+            # Taking the slot from the block alone dropped the instruction
+            # outright — see _borrowed_slot for what that cost.
+            borrowed = self._borrowed_slot(b)
             # The one hook in the generated code. It is what makes the output
             # comparable against the reference logs at all: they record every
             # instruction, so their stream filtered to these addresses is
             # exactly the sequence this emits. Compiled out to a not-taken
             # branch when tracing is off — see SH2_BLOCK in src/sh2.h.
             lines.append(f"{lname(b.start)}: SH2_BLOCK(c, 0x{b.start:08X}u, "
-                         f"{len(b.insns)});")
+                         f"{len(b.insns) + (1 if borrowed else 0)});")
             i = 0
             closed = False       # did an unconditional transfer end this block?
             while i < len(b.insns):
                 ins = b.insns[i]
                 if ins.kind in (BRANCH, JUMP, JUMP_IND, CALL, CALL_IND, RET):
-                    ds = b.insns[i + 1] if (ins.delay and i + 1 < len(b.insns)) else None
+                    if ins.delay and i + 1 < len(b.insns):
+                        ds, own = b.insns[i + 1], True
+                    else:
+                        ds, own = (borrowed if i + 1 == len(b.insns) else None), False
                     lines += self.transfer(ins, ds, fn)
                     # A conditional branch is the one transfer control can come
                     # back from, so it does not close the block.
                     closed = ins.kind is not BRANCH
-                    i += 2 if ds is not None else 1
+                    i += 2 if own else 1
                     continue
                 for s in self.insn(ins):
                     lines.append("    " + s)
@@ -423,7 +456,15 @@ class Codegen:
             # 0x060008EC through f_06001250 ran on into 0x06001250 itself, where
             # the hardware falls through to 0x060008F2.
             if not closed:
-                lines += self._goto(b.end, fn, 4)
+                # `b.end` is past the block's own instructions, which for a
+                # conditional branch whose slot was borrowed stops *at* the
+                # slot — and the slot has already run. The not-taken path
+                # resumes past it. No site in this cartridge has that shape
+                # today; getting it wrong would run one instruction twice.
+                end = b.end
+                if borrowed is not None and b.insns[-1].kind is BRANCH:
+                    end = b.insns[-1].addr + 4
+                lines += self._goto(end, fn, 4)
         # Unreachable now that every block ends in an explicit transfer, and
         # still required: C wants a return on the path out of the function.
         lines.append("    return 0;")
