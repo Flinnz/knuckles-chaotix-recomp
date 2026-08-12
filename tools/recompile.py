@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mars                                   # noqa: E402
 from disasm import analyse                    # noqa: E402
+from hostcc import host_cc                    # noqa: E402
 from recomp.sh2c import Codegen, fname        # noqa: E402
 
 DEFAULT_ROM = "roms/Knuckles' Chaotix (JU) (32X) [!].32x"
@@ -71,7 +72,7 @@ def main():
 
     if args.build:
         obj = args.out.replace(".c", ".o")
-        cmd = ["clang", "-c", "-O2", "-Isrc", "-Wall", "-Wno-unused-label",
+        cmd = [host_cc(), "-c", "-O2", "-Isrc", "-Wall", "-Wno-unused-label",
                "-o", obj, args.out]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:

@@ -19,6 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from hostcc import EXE, host_cc                  # noqa: E402
 from m68k.analyze import Analyzer                # noqa: E402
 from recomp.m68kc import Codegen, fname          # noqa: E402
 from recompile68k import CYCLES_PATH, read_cycles # noqa: E402
@@ -112,8 +113,8 @@ def main():
     if cg.notes:
         print("  outside the model:", cg.notes)
 
-    exe = os.path.join(OUT, "arith68")
-    sh("clang", "-O2", "-Wall", "-Wno-unused-label",
+    exe = os.path.join(OUT, "arith68" + EXE)
+    sh(host_cc(), "-O2", "-Wall", "-Wno-unused-label",
        "-include", os.path.join(ROOT, "src", "m68kconf.h"),
        f"-I{ROOT}/src", f"-I{MUSASHI}", f"-I{GEN}", "-o", exe,
        cfile, os.path.join(ROOT, "src", "m68000.c"),

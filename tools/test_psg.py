@@ -18,6 +18,10 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from hostcc import EXE, host_cc                  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "build", "test")
 CLOCK = 3579545          # the Z80's, which is the PSG's
@@ -174,10 +178,10 @@ int main(void) {
 def main():
     os.makedirs(OUT, exist_ok=True)
     src = os.path.join(OUT, "psg_test.c")
-    exe = os.path.join(OUT, "psg_test")
+    exe = os.path.join(OUT, "psg_test" + EXE)
     with open(src, "w") as f:
         f.write(HARNESS.replace("@CLOCK@", str(CLOCK)))
-    cmd = ["clang", "-O2", "-Wall", "-I", os.path.join(ROOT, "src"),
+    cmd = [host_cc(), "-O2", "-Wall", "-I", os.path.join(ROOT, "src"),
            "-o", exe, src, os.path.join(ROOT, "src", "psg.c"), "-lm"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:

@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from disasm68k import analyse                    # noqa: E402
+from hostcc import host_cc                       # noqa: E402
 from recomp.m68kc import Codegen, fname          # noqa: E402
 
 DEFAULT_ROM = "roms/Knuckles' Chaotix (JU) (32X) [!].32x"
@@ -98,7 +99,7 @@ def main():
 
     if args.build:
         obj = args.out.replace(".c", ".o")
-        r = subprocess.run(["clang", "-O2", "-Wall", "-Isrc", "-c",
+        r = subprocess.run([host_cc(), "-O2", "-Wall", "-Isrc", "-c",
                             args.out, "-o", obj])
         if r.returncode:
             return 1

@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mars                                    # noqa: E402
+from hostcc import EXE, host_cc                # noqa: E402
 from sh2.analyze import Analyzer, Image        # noqa: E402
 from recomp.sh2c import Codegen, fname         # noqa: E402
 
@@ -85,8 +86,8 @@ def main():
     if cg.notes:
         print("  unhandled:", cg.notes)
 
-    exe = os.path.join(OUT, "arith")
-    sh("clang", "-O2", "-Wall", "-Wno-unused-label", f"-I{ROOT}/src",
+    exe = os.path.join(OUT, "arith" + EXE)
+    sh(host_cc(), "-O2", "-Wall", "-Wno-unused-label", f"-I{ROOT}/src",
        "-o", exe, cfile, os.path.join(ROOT, "src", "sh2_testmem.c"))
     got = [int(x) & 0xFFFFFFFF for x in
            sh(exe, binf, str(len(CASES))).split()]

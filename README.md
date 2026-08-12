@@ -20,17 +20,15 @@ docs/             state.md (current numbers), architecture findings, roadmap
 
 ## Setup
 
-Third-party dependencies (not vendored):
+The two C dependencies are submodules, pinned at the commits this is built
+against. A fresh clone wants `--recurse-submodules`; an existing one wants:
 
 ```bash
-brew install sdl2
-git clone --depth 1 https://github.com/kstenerud/Musashi.git third_party/musashi
-git clone --depth 1 https://github.com/nukeykt/Nuked-OPN2.git third_party/nuked-opn2
-make run
+git submodule update --init
 ```
 
 Musashi (MIT, Karl Stenerud) provides the 68000 interpreter; `src/m68kconf.h`
-overrides its config down to a bare 68000 so the vendored copy stays untouched.
+overrides its config down to a bare 68000 so the submodule stays untouched.
 
 Nuked-OPN2 (LGPL 2.1, Alexey Khokholov) provides the YM2612. It is derived from
 a die shot and is what every other implementation is measured against, which
@@ -38,15 +36,47 @@ matters here because a sound chip has no trace oracle: the reference logs
 instructions, not audio. Everything else that makes a sound — the 32X's PWM, the
 Z80 that drives the chips, the PSG — is in `src/`.
 
-Neither is in the repository; `third_party/` is ignored.
+SDL2 is the one thing the platform provides rather than the repository.
 
+### macOS
 
-`m68k-elf-binutils` comes from Homebrew; `sh-elf` is built locally because no
-bottle exists for it.
+```bash
+brew install sdl2 && make run
+```
+
+### Windows
+
+Under an MSYS2 UCRT64 shell — the Makefile is a Unix one and `pkg-config`,
+`mkdir -p` and the redirects in `check` all want a real shell.
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-SDL2 mingw-w64-ucrt-x86_64-pkgconf make git python
+```
+
+Then `make run`. The build picks `gcc` and an `.exe` suffix on its own; a
+`make CC=clang` still overrides it, and reaches the recompilers too.
+
+Nothing else is Windows-specific. The runtime is standard C plus SDL2 — no
+POSIX calls anywhere in `src/` — and the recompiler front ends are Python, so
+the playable build needs no cross-toolchain at all. Two things to know: the
+`unsigned long` instruction counters in the summary are 32-bit there and wrap
+after a few minutes of play, which costs the statistics and nothing else; and
+the trace files come out with CRLF endings, which the diff tools read anyway.
+
+### Cross-binutils, for `make check` only
+
+`emit --verify` and the recompiler tests assemble what they emitted, which is
+what proves the front ends round-trip. `m68k-elf-binutils` comes from Homebrew;
+`sh-elf` is built locally because no bottle exists for it.
 
 ```bash
 brew install m68k-elf-binutils && ./toolchain/build_sh_binutils.sh
 ```
+
+On Windows both have to be built — the script works under MSYS2, and the same
+`--target=m68k-elf` invocation covers the other. `make check` additionally
+compares against reference traces in `roms/*.log`, which are not in the
+repository.
 
 ## Use
 

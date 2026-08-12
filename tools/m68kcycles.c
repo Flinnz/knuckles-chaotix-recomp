@@ -22,7 +22,14 @@
  * cost — and `tools/recomp/m68kc.py` adds those itself, statically where the
  * count is an immediate and on the edge where it is a branch.
  *
- * 65,536 bytes on stdout, one per opcode word.
+ * 65,536 bytes, one per opcode word, into the file named on the command line.
+ *
+ * A named file rather than stdout because stdout is a text stream on Windows:
+ * a shell redirect there turns every 0x0A in the table into 0x0D 0x0A, and the
+ * table is full of them — 10 cycles is the cost of a great many instructions.
+ * That arrives as a longer-than-65,536-byte file, which `read_cycles` in
+ * tools/recompile68k.py rejects, so it fails loudly rather than mispricing the
+ * build; asking for the file by name is what keeps the bytes the bytes.
  */
 #include <stdio.h>
 #include "m68k.h"
@@ -43,10 +50,25 @@ void m68k_write_memory_8(unsigned int a, unsigned int v) { (void)a; (void)v; }
 void m68k_write_memory_16(unsigned int a, unsigned int v) { (void)a; (void)v; }
 void m68k_write_memory_32(unsigned int a, unsigned int v) { (void)a; (void)v; }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <out.bin>\n", argv[0]);
+        return 2;
+    }
     m68k_init();
     /* The table is filled by m68k_init(); selecting the type is what points
      * CYC_INSTRUCTION at row 0, and asserts here that row 0 is the 68000. */
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-    return fwrite(m68ki_cycles[0], 1, 0x10000, stdout) == 0x10000 ? 0 : 1;
+
+    FILE *f = fopen(argv[1], "wb");
+    if (!f) { perror(argv[1]); return 1; }
+    size_t n = fwrite(m68ki_cycles[0], 1, 0x10000, f);
+    if (fclose(f) != 0 || n != 0x10000) {
+        /* %lu rather than %zu: MinGW against the old msvcrt does not know %zu,
+         * and 65,536 fits an unsigned long on every host here. */
+        fprintf(stderr, "%s: wrote %lu of 65536 bytes\n",
+                argv[1], (unsigned long)n);
+        return 1;
+    }
+    return 0;
 }
