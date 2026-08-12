@@ -2255,6 +2255,70 @@ still busy, so the engine's vblank handler drains the palette queue at
 `0xFFD860` every frame instead of skipping it. At the divergence the reference's
 queue holds 32 entries and ours holds one.
 
+### Past the logo the game stopped moving, and the register was eight bits wide
+
+Asked whether it is playable, the honest answer was no, and the way it fails is
+worth more than the answer. It boots, draws the SEGA screen correctly at frame
+300, and plays the music — and then everything freezes. VRAM, CRAM, the 32X
+frame buffer and the command counts are **byte-identical at frames 600, 1,200,
+3,600 and 9,000**, which is two and a half minutes of game time; `--hold start`
+changes nothing. Speed is not the constraint: a headless run does 1,800 frames
+in 2.4 seconds, twelve times real time.
+
+Where it stopped said what was wrong. The 68000 parks at `0x8845CE`, the comm-0
+acknowledgement wait, and the master parks in a FEN spin at `0x060047E6` —
+inside the 32X VDP's autofill blitter at `0x06004750`: wait for FEN, write a
+length to `0x20004104`, a start to `0x4106`, data to `0x4108`. Counting what
+that costs is one line of instrumentation and it is unambiguous:
+
+| | 300 frames | 1,200 | 3,600 |
+|---|---|---|---|
+| longest fill | 256 words | **65,534** | **65,534** |
+| words a frame | 31,145 | 132,925 | 172,231 |
+| of the master's cycles | 16% | 69% | **90%** |
+
+**The auto fill length register has eight bits and we were taking sixteen.** The
+blitter hands it a count that can arrive as `0xFFFE`, which is 254 words on the
+machine and 65,534 here — the same 256 words written over and over, because
+`autofill()` already increments only the low eight bits of the address, but
+charged 256 times the FEN. The master waited for every one of them.
+
+The reference settles it from the other side without needing to reach the
+blitter at all. Its own clear loop at `0x06003180` writes **`0xFF`**, the
+maximum an eight-bit field holds, and steps the start address by `0x100`,
+256 times, to cover the 128 KB frame buffer exactly. A length wider than the
+block a fill wraps inside cannot mean anything.
+
+**Masked, the game starts moving again.** Commands go from frozen at 309 to 999
+by frame 5,400, and the 68000 leaves `0x8845CE`. Every gate is untouched — the
+reference extract is 1.7 seconds and never asks for a fill longer than 256
+words, so the 300-frame run this is all measured on is identical to the byte.
+
+**It still does not reach the title screen**, and there are now two named
+reasons rather than a freeze.
+
+*The master is fill-bound.* 133,224 words a frame is the whole frame buffer
+cleared twice over, 69% of its cycles, and what it draws into the buffer
+afterwards is 255 bytes — it clears and clears again. `--frames N` now reports
+the fill count, the words and that percentage, because a fill that is wrong by
+256x has no other symptom than a game that stops.
+
+*The Mega Drive picture is parked one screen below the display.* Both planes
+hold 16 rows of real content — 40 cells wide on A, 62 on B, with a 38-entry
+palette — and VSRAM holds `0xFF20`, a vertical scroll of exactly −224 lines,
+which is the screen's own height. So the renderer is not drawing nothing; the
+engine has a screen ready to slide in and never slides it.
+
+**And there is 68000 code past the logo that discovery has never seen.** The
+recompiled build hands over to the interpreter 4,163 times at
+`0x0749C2`-`0x0749D0`, which is not a block and is not in `az.code` at all,
+sitting between known blocks at `0x749AA` and `0x749E4`. `coverage` is clean
+because it is asked only of traces that stop at 1.7 seconds.
+
+That is the shape of everything above. Five trace diffs, two byte-exact
+round-trips and a sample-for-sample audio gate, all of them ending 1.7 seconds
+in — and the first thing past that end was a register width.
+
 ### Next
 
 **1. The SH-2s keep time with one number each.** `sh2_cpi1000` is 1.634 and
@@ -2274,7 +2338,18 @@ Nuked-OPN2 removes the question for the FM, and the PSG has its arithmetic
 test, but the *mix* — three sources at chosen relative levels — is a judgement
 and would stay one even with a better oracle.
 
-**3. The slave diff's bound.** Still 2,000 reference blocks, but for a different
+**3. Everything is gated on 1.7 seconds.** Every diff, and therefore every
+claim of accuracy, stops where the reference logs stop — and the game stops
+working shortly after that. The fill-length bug is what that costs: a
+hardware-register width wrong in a way no gate could see. Three threads lead out
+of it, in order of how much they would buy: why the 68000 issues command 7 three
+times in 5,400 frames when the asset table it fills is what the master draws
+from; why the Mega Drive screen sits parked at a scroll of -224; and the
+`0x0749C2` region the front end has never discovered. None of them has an
+oracle, which is the point — past 1.7 seconds the only instrument is the run
+report, so anything found there should leave a number behind in it.
+
+**4. The slave diff's bound.** Still 2,000 reference blocks, but for a different
 reason than before: the aligner walks collapsed runs now, and what limits the
 bound is how far our own trace reaches. It is roughly linear in trace size —
 2,000,000 lines cross about 2,500 blocks, 8,000,000 about 7,000 — so raising
@@ -2428,6 +2503,19 @@ does not spend the same day finding the same thing.
 * **The picture is right, not merely recognisable.** At 300 frames the 32X half
   draws the SEGA logo in blue with its outline, its "TM" and the nebula panels,
   and the line table matches the reference's own arithmetic.
+* **The master is fill-bound past the logo.** 133,224 words a frame through the
+  32X VDP's autofill, which at the two SH-2 cycles a word the reference measures
+  is 69% of its clock, and what reaches the frame buffer afterwards is 255
+  bytes. Whether a real 32X is that fill-bound is not something the extract can
+  say — it never reaches the blitter at `0x06004750`.
+* **The Mega Drive screen past the logo is parked below the display.** Both
+  planes hold 16 rows of content and a 38-entry palette, and VSRAM holds a
+  vertical scroll of exactly -224 lines — the screen's own height. The engine
+  has a screen ready and never slides it in.
+* **`0x0749C2`-`0x0749D0` is 68000 code discovery has never found.** Not a
+  block, not in `az.code`, between known blocks at `0x749AA` and `0x749E4`, and
+  entered 4,163 times in 3,600 frames. `coverage` is clean because it is only
+  ever asked of traces that end at 1.7 seconds.
 * **Genesis VDP gaps:** no window plane, shadow/highlight, interlace, or the
   per-line sprite and pixel limits.
 

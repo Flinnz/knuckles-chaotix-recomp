@@ -205,6 +205,8 @@ static void autofill(void) {
      * VDP holds the frame buffer while doing it, because the master waits for
      * exactly that. Two SH-2 cycles a word — see vdp_status(). */
     mars.fen_left = (mars.fill_len + 1u) * 2u;
+    mars.fills++;
+    mars.fill_words += mars.fill_len + 1u;
     uint32_t addr = mars.fill_start;
     for (uint32_t i = 0; i <= mars.fill_len; i++) {
         uint32_t o = (addr * 2u) & 0x1FFFEu;
@@ -272,7 +274,21 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
         switch (a & 0xFE) {
         case 0x00: mars.bitmap_mode = (uint16_t)v & ~BITMAP_MODE_SET; return 1;
         case 0x02: mars.shift = (uint16_t)v; return 1;
-        case 0x04: mars.fill_len = (uint16_t)v; return 1;
+        /* Eight bits, and the other eight are not there to be written. The
+         * fill wraps inside a 256-word block — which is what the address
+         * increment in autofill() already models — so a length wider than the
+         * block it runs in cannot mean anything. The reference's own clear loop
+         * at 0x06003180 says the same from the other side: it writes 0xFF, the
+         * maximum, and steps the start address by 0x100, 256 times, to cover
+         * the 128 KB buffer exactly.
+         *
+         * Taking all sixteen bits is what stalled the game after the SEGA logo.
+         * The blitter at 0x06004750 hands this a count that can arrive as
+         * 0xFFFE, which is 254 words on the machine and 65,534 here — the same
+         * 256 words written over and over, but charged 256 times the FEN, and
+         * the master waits for every one of them. At 3,600 frames 90% of its
+         * cycles were going into fills. */
+        case 0x04: mars.fill_len = (uint16_t)v & 0xFFu; return 1;
         case 0x06: mars.fill_start = (uint16_t)v; return 1;
         case 0x08: mars.fill_data = (uint16_t)v; autofill(); return 1;
         case 0x0A: mars.fbctl = (uint16_t)v; return 1;

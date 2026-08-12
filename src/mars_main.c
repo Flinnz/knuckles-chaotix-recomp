@@ -1033,6 +1033,15 @@ int main(int argc, char **argv) {
     printf("           regs:");
     for (unsigned i = 0; i < 24; i++) printf(" %02X", gen.vdpreg[i]);
     printf("\n");
+    /* The 32X VDP's autofill, and what it costs the master — which is the whole
+     * of its time if anything about it is wrong, because it waits on FEN for
+     * every fill. Two SH-2 cycles a word is what the reference's own clear loop
+     * measures; see vdp_status() in src/mem32x.c. */
+    printf("  autofill: %u fill(s), %u word(s), %lu/frame — %.0f%% of the "
+           "master's cycles\n", mars.fills, mars.fill_words,
+           (unsigned long)mars.fill_words / (frames ? frames : 1),
+           100.0 * mars.fill_words * 2
+               / ((double)(frames ? frames : 1) * CYCLES_PER_FRAME * 3));
     printf("  unmapped: 68k r=%u w=%u, sh2=%u\n",
            gen.unknown_r, gen.unknown_w, mars.unknown);
     printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",

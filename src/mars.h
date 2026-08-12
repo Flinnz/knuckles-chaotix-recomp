@@ -56,6 +56,12 @@ typedef struct {
      * while it runs and says so through FEN, which the master polls after every
      * fill. See vdp_status() in src/mem32x.c for where the rate comes from. */
     uint32_t fen_left;
+    /* And what the fills have cost altogether, because the master waits for
+     * every one of them and nothing else in the report would show it. A fill
+     * length taken as sixteen bits where the register has eight had the master
+     * spending 90% of its cycles on FEN after the SEGA logo, and the only
+     * visible symptom was a game that stopped moving. */
+    uint32_t fills, fill_words;
 
     uint32_t ticks;          /* stands in for elapsed time when polling */
     uint32_t unknown;        /* accesses outside the modelled map */
