@@ -331,6 +331,16 @@ class Codegen:
             return out
 
         if ins.kind in (CALL_IND, JUMP_IND):
+            # `trapa` is decoded as an indirect jump and has no register to jump
+            # through, so it cannot go down this path at all: emitting one gave
+            # `c->r[None]`, which is a Python value in a C file rather than a
+            # translation that is merely wrong. Nothing in this game executes
+            # one — both sites are data a sweep mistook for code — so it is
+            # recorded as outside the model, like the seven 68000 instructions
+            # that are, and ends the run if it is ever reached.
+            if ins.mnem == "trapa":
+                self.notes.append((ins.addr, "trapa"))
+                return ["    return 0;   /* trapa: outside the model */"]
             # The target register is read at the branch, not after the delay
             # slot, so capture it first.
             if ins.mnem in ("bsrf", "braf"):

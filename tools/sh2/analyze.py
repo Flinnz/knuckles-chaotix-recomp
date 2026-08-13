@@ -431,6 +431,80 @@ class Analyzer:
             a += 2
         return False
 
+    # Encodings a walk can reach that say the bytes are not code after all.
+    # Both are things no assembler emits and this SH-2 cannot execute, which is
+    # what makes them usable as a veto rather than a heuristic.
+    def _sweep_rejects(self, addr, max_insns=64):
+        """`trapa`, or a control transfer in a delayed transfer's delay slot."""
+        a = addr
+        for _ in range(max_insns):
+            if not self.img.readable(a, 2):
+                return False
+            ins = decode(self.img.u16(a), a)
+            if ins.mnem == "trapa":
+                return True
+            if ins.kind in (RET, JUMP, JUMP_IND, BRANCH, CALL, CALL_IND):
+                if not ins.delay or not self.img.readable(a + 2, 2):
+                    return False
+                slot = decode(self.img.u16(a + 2), a + 2)
+                # A branch cannot sit in a delay slot. 0x06005BA4 is `bra`
+                # followed by `bra`, which is a longword pointer table read as
+                # instructions — the one false positive the two-instruction
+                # bound let through.
+                return slot.kind in (RET, JUMP, JUMP_IND, BRANCH, CALL, CALL_IND)
+            if ins.kind == INVALID:
+                return False
+            a += 2
+        return False
+
+    def scan_self_relative(self, lo, hi, min_insns=2):
+        """Seed the targets of a script stream of 16-bit self-relative offsets.
+
+        `0x06005E9C` is a byte-code interpreter for the 32X's 3D objects:
+
+            06005E9E  mov.w @r12+,r1
+            06005EA0  add   r12,r1
+            06005EA4  jmp   @r1
+
+        so an entry is an offset from the address just past itself, and the
+        stream it walks is a *runtime* pointer — `mov.l @(44,r13),r12`, a field
+        of an object. Nothing static can say where a given stream is, which is
+        why 5.6 KB of the master's image was reached by no branch, no table and
+        no sweep, and why the special stage killed the master on a transfer to
+        0x06006188 with no block.
+
+        What is static is the arithmetic. Applied to every word that is not
+        already an instruction, and keeping only the targets that decode as a
+        real sequence, it recovers the handlers without having to find the
+        streams: a script entry and its handler are in the same region by
+        construction, because the offset is only sixteen bits.
+
+        A handler can also be two instructions long, and `min_insns` is 2 here
+        for the same reason the installed-handler sweep on the 68000 side had
+        to stop inheriting four: that bound exists to keep a *blind* sweep
+        honest, and this is not a blind sweep — the target is named by the
+        interpreter's own arithmetic. `0x06006D50` is `mova` then `rts`, and
+        four turned it away.
+        """
+        found = 0
+        for a in range(lo, hi, 2):
+            if a in self.code or not self.img.readable(a, 2):
+                continue                      # an instruction, not an offset
+            t = a + 2 + self.img.s16(a)
+            if not (lo <= t < hi) or t in self.code:
+                continue
+            if not self.looks_like_code(t, min_insns=min_insns):
+                continue
+            # `looks_like_code` treats `trapa` as a terminator, which is what
+            # lets a walk that has run into a literal pool finish and be
+            # believed. Existing seeds depend on that — 0x06004A24 is accepted
+            # only because of it — so the veto belongs here rather than there.
+            if self._sweep_rejects(t):
+                continue
+            self.add_function(t, "script dispatch target")
+            found += 1
+        return found
+
     def scan_pointer_tables(self, lo, hi, min_run=2, min_insns=1):
         """Seed functions from arrays of code pointers sitting in data.
 

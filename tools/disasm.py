@@ -93,12 +93,28 @@ def analyse(rom_path, scan_tables=True):
         # sweep for them and re-run until nothing new turns up.
         sweep = [(mars.SDRAM_BASE + h.sh2_dst, h.sh2_size)]
         sweep += [(d, s_) for d, _, s_, _ in OVERLAYS]
-        for _ in range(8):
-            found = sum(az.scan_pointer_tables(lo, lo + size) for lo, size in sweep)
-            found += az.scan_after_returns()
-            if not found:
-                break
-            az.run()
+        def converge(with_self_relative):
+            for _ in range(8):
+                found = sum(az.scan_pointer_tables(lo, lo + size)
+                            for lo, size in sweep)
+                found += az.scan_after_returns()
+                if with_self_relative:
+                    found += sum(az.scan_self_relative(lo, lo + size)
+                                 for lo, size in sweep)
+                if not found:
+                    return
+                az.run()
+
+        # The self-relative sweep runs only once the others have converged, and
+        # the order is load-bearing. `scan_after_returns` skips an address that
+        # is already code, and it needs more than one round to reach some of
+        # them — 0x06004A24 is seeded on the second. Sweeping in the same round
+        # claimed those bytes as fall-through first, so the address stayed code
+        # and stopped being an *entry*, which is the one thing an indirect
+        # transfer to it needs. That cost the attract loop its 200,000 frames
+        # and showed up as "no recompiled block at 0x06004A24" at frame 688.
+        converge(False)
+        converge(True)
     return rom, h, img, az
 
 
