@@ -429,6 +429,14 @@ class Analyzer:
         a branch that leaves mapped memory. Both guards matter: constant fill
         such as 0xAAAA decodes as a lone `bra` to nowhere, which would otherwise
         pass instantly on the very first instruction.
+
+        Running out of `max_insns` is a pass, not a failure. The bound is there
+        to stop the walk, not to express doubt: sixty-four consecutive valid
+        encodings with every branch target in range is stronger evidence than
+        the short sequences this accepts without hesitation, and rejecting on
+        it means rejecting a routine *for being long*. `0x060068F2` is 119
+        instructions before its `rts`, and it is what the special stage
+        transfers to after a while.
         """
         if addr & 1 or not self.is_code_addr(addr):
             return False
@@ -444,7 +452,7 @@ class Analyzer:
             if ins.kind in (RET, JUMP, JUMP_IND):
                 return i + 1 >= min_insns
             a += 2
-        return False
+        return True
 
     # Encodings a walk can reach that say the bytes are not code after all.
     # Both are things no assembler emits and this SH-2 cannot execute, which is
