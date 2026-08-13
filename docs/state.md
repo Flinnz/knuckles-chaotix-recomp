@@ -3,8 +3,9 @@
 Facts only. Reasoning, history and rejected approaches are in
 [roadmap.md](roadmap.md).
 
-Generated from the build at commit `edc5301` plus this session's two fixes —
-the dropped delay slot and the 32X priority bit. `make check` passes.
+Generated from the build at commit `edc5301` plus this session's fixes — the
+dropped delay slot, the 32X priority bit, the 32X vertical interrupt and the
+script-dispatch front-end rule. `make check` passes.
 
 ## What this is
 
@@ -32,12 +33,12 @@ code is translated to C at build time and compiled.
 
 | | SH-2 | 68000 |
 |---|---|---|
-| functions | 251 | 4,491 |
-| basic blocks | 1,974 | 7,944 |
-| instructions | 9,398 | 24,579 |
+| functions | 801 | 4,491 |
+| basic blocks | 2,778 | 7,944 |
+| instructions | 11,816 | 24,579 |
 | dispatch tables | 15 | — |
-| unresolved indirect transfers | 11 | 45 |
-| coverage | 56.3% of the SDRAM image | 2.8% of the 3 MB ROM |
+| unresolved indirect transfers | 22 | 45 |
+| coverage | 71.3% of the SDRAM image | 2.8% of the 3 MB ROM |
 
 Both cartridges (JU and E) reassemble byte for byte from the emitted listing.
 
@@ -133,7 +134,8 @@ audio device paces it to the machine's speed.
 | `--rate68k` | 68000 instructions a frame, per frame |
 | `--trace68k FILE`, `--trace-sh2 FILE`, `--trace-z80 FILE`, `--trace-pwm FILE`, `--trace-chips FILE` | traces for the diff tools |
 | `--trace-from N` | start every tracer at frame N |
-| `--progress N` | one liveness line every N frames — commands, PCs, unmapped accesses |
+| `--progress N` | one liveness line every N frames — commands, PCs, bitmap mode, interrupt masks, unmapped accesses |
+| `--hold-from N` | start holding at frame N, so the menus are passed untouched |
 | `--watch ADDR[:LEN]` | log SH-2 writes into that range, with the block they came from |
 | `--trace68k-lines N`, `--trace-sh2-lines N`, `--trace-z80-lines N` | line budgets |
 | `--dump-vdp FILE`, `--dump-32x FILE`, `--dump-z80 FILE`, `--dump-sdram FILE` | memory snapshots |
@@ -163,17 +165,19 @@ extracts the gates read are rebuilt into `build/` on demand.
 
 Ordered as in the roadmap's plan.
 
-1. No gate exists past 1.7 seconds. `--progress` watches liveness and the
-   command rate but nothing fails a build for them, and the third oracle — the
-   two 68000 backends against each other — is not written.
+1. No gate exists past 1.7 seconds. `--progress` watches liveness, and a stall
+   now reports itself without a flag, but nothing fails a build for either, and
+   the third oracle — the two 68000 backends against each other — is not
+   written. All three bugs this session cost a play session each to find.
 2. No frontier is known. 200,000 frames run clean; nothing has been run longer.
 3. `sh2_cpi1000` is one cycles-per-instruction number per SH-2.
 4. The banked window is wholly interpreted — 988,493 hand-overs in 3,600 frames.
 5. The sound mix is chosen, not measured; the chips have no output gate.
 6. The slave diff is bounded at 2,000 reference blocks by trace size.
 
-Also open: the 32X's priority is the bitmap mode register's bit 7 only, with no
-per-pixel priority modelled; `0x0749C2`-`0x0749D0` is 68000 code discovery has
+Also open: a 32X vertical interrupt that arrives while its own handler is
+running is dropped where hardware would hold it pending; the 32X's priority is
+the bitmap mode register's bit 7 only, with no per-pixel priority modelled; `0x0749C2`-`0x0749D0` is 68000 code discovery has
 never found; the recompiled 68000's PC is not masked to 24 bits; the Genesis
 VDP has no window plane, shadow/highlight, interlace or per-line sprite limits;
 Genesis DMA fill and copy are skipped.

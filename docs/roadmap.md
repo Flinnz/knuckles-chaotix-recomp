@@ -2650,6 +2650,110 @@ nothing upstream of it — and frame 3,000 of the attract loop renders
 byte-identically, which is what says the screens with the bit set were not
 touched.
 
+### The special stage, and the interrupt nobody delivered
+
+Three reports from playing it: no HUD, characters missing, and a freeze after
+the end of a level. All three were one bug, and chasing the last of them into
+the special stage found two more.
+
+**A delay slot that is also a branch target was being dropped.** The emitter
+took a delayed branch's slot from the instruction after it *in the same block*.
+Where the slot is also a branch target the front end starts a block on it, so
+there is no next instruction in the block and the transfer came out with no
+delay slot at all. Exactly one site in the image, and it is inside the asset
+group decompressor at `0x06000464`:
+
+    06000482  bf.s  0x06000488     the skip path branches *to* the slot
+    06000486  bsr   0x0600075A
+    06000488  add   #4,r5          the slot, and the bf.s target
+
+That `add` walks the pointer table the loader is filling in, so every entry was
+written over the first one and each decompressed asset group came out with one
+valid pointer and the rest zero. Ten of the thirteen sprite draws a frame
+resolved to null — no HUD, no Metal Sonic, no Eggman — and the freeze was the
+same table one step further along, where a stale pointer handed the blitter a
+run count of `0x7FFC82A4` words from an address past the end of SDRAM.
+
+**Which half of the picture is in front is the game's to say.** The save select
+came out as a screen of brown diamonds and nothing else; `--layers` showed the
+diamonds are the *32X*, a full-screen tiled background, with the whole
+interface on the Mega Drive underneath. Bit 7 of the bitmap mode register is
+the priority bit and `render()` drew as though it were always set. The game
+settles both the bit and its polarity by using both values: `0x0081` on the
+logo, the title and every level, `0x0001` on the save select. With the Mega
+Drive in front the 32X shows through where the Mega Drive left the backdrop,
+which is a different test from "is this pixel the backdrop colour" — so
+`genvdp_render` returns that as a mask rather than having the compositor infer
+it back out of the colours.
+
+**Nothing delivered the 32X's vertical interrupt.** Only levels 8 (command) and
+6 (PWM) were ever delivered; level 12 was not, and the special stage is the
+only thing that asks for it. Command 8 dispatches to `0x06001110`, which zeroes
+a counter at `0x06003824`, clears and enables V — `mov #8,r0` into `0x20004016`
+then `0x20004001` — and spins at `0x06001234` until two have arrived. The only
+thing that increments that counter is `0x0600128C`, inside `0x06001280`, which
+is entry 6 of the master's handler table at `0x060001D8`: level 12. So the
+master spun for ever, never acknowledged the command, and the 68000 waited on
+comm 0 at `0x927A78`. The picture stopped and the stage never ended.
+
+Two things came with it. The enable mask at `0x20004001` is **per SH-2** and
+was one shared field: the slave writes 1 for PWM and the master 8 for V, so
+each would have silently disabled the other. And level 10 is deliberately not
+delivered — this cartridge's H handler at `0x060001A8` is `bra` to itself,
+which is the game saying it never enables it.
+
+**Then 5.6 KB of the master's image turned out to be unreachable.** With the
+interrupt delivered the master got past the spin and died on a transfer to
+`0x06006188` with no block. It is real code, ending `bra 0x06005EF4`, back into
+a byte-code interpreter at `0x06005E9C` that drives the 3D objects:
+
+    06005E9E  mov.w @r12+,r1     a 16-bit offset out of a script stream
+    06005EA0  add   r12,r1       relative to just past itself
+    06005EA4  jmp   @r1
+
+`r12` comes from `mov.l @(44,r13),r12` — a field of a runtime object — so no
+branch, no table and no sweep reaches those handlers. The stream is not static
+but *the arithmetic is*: a word that is not already an instruction targets
+`A + 2 + offset`, and a script entry and its handler are in the same region by
+construction because the offset is only sixteen bits. `scan_self_relative`
+seeds every such target that decodes as real code.
+
+**251 -> 801 functions, 1,974 -> 2,778 blocks, SDRAM coverage 56.3% -> 71.3%**,
+and both cartridges still reassemble byte for byte.
+
+Three things fell out of it, and each was a real hole rather than a nuisance:
+
+* **The emitter could produce `c->r[None]`** — a Python value in a C file.
+  `trapa` decodes as an indirect jump with no register to jump through. It is
+  a recorded note and a clean stop now, like the seven 68000 instructions
+  outside the model.
+* **Ordering.** Run in the same round as the existing rules, the sweep claimed
+  `0x06004A24` as fall-through before `scan_after_returns` could seed it as an
+  *entry* — and an entry is the one thing an indirect transfer to it needs.
+  That cost the attract loop its 200,000 frames and showed up at frame 688. The
+  sweep runs only once the others converge.
+* **A handler can be two instructions long**, which is the same thing the
+  68000's installed-handler sweep had to learn. `0x06006D50` is `mova` then
+  `rts`, and a bound meant for a *blind* sweep turned it away — this one is not
+  blind, the target is named by the interpreter's own arithmetic. Lowering it
+  needed one more veto: a control transfer in a delayed transfer's delay slot,
+  which the SH-2 cannot execute and which is a longword pointer table being
+  read as instructions.
+
+*Gates:* every number in `make check` is unchanged across all of it, both
+round-trips are byte-exact, and the 40,000-frame attract loop is identical to
+the byte — 27,786 commands, 43,063 frame-buffer bytes. None of these three bugs
+could have been caught by a gate, and none was: the reference extract is 1.7
+seconds and reaches none of it.
+
+**What the session left behind is instruments.** `--progress N` for liveness,
+`--watch ADDR[:LEN]` for who wrote a table entry, `--dump-sdram`, `--hold-from`
+and `--press-until` for driving past a menu headlessly, the bitmap modes the
+game has selected, and a `--trace` profile that counts all 2,048 blocks instead
+of the first 1,024 — which had been hiding the whole of the 3D path. And a
+stall report that needs no flag at all: four seconds with no command posted and
+the master not moving prints the state that has decided every one of these.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what
