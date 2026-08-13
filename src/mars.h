@@ -30,6 +30,21 @@ typedef struct {
      * cartridge window back to bank 0, which is where the engine reads its
      * palettes from. */
     uint16_t adapter, intctl, bank, hcount;
+    /* Which 32X interrupt sources each SH-2 has enabled - the byte at
+     * 0x20004001, and *per CPU*, which is why it cannot live in `adapter`:
+     * the slave writes 1 for PWM and the master writes 8 for V, and one shared
+     * field means whichever wrote last silently disables the other.
+     *
+     * bit 0 PWM, bit 1 command, bit 2 H, bit 3 V. The game names two of the
+     * four itself: the slave's driver writes 1 at 0xC0000014 and clears through
+     * 0x2000401C, and the master writes 8 at 0x06001150 having just cleared
+     * through 0x20004016. */
+    uint8_t  int_enable[2];
+    /* Vertical interrupts delivered to each SH-2, and how many were refused
+     * because the CPU's own SR mask was at or above level 12. The two are
+     * different failures and only counting both tells them apart: nothing
+     * delivered because nothing enabled it, against delivered-and-declined. */
+    uint32_t vints[2], vints_declined[2];
     uint16_t comm[8];
 
     /* The 68000 -> SH-2 data path. The 68000 sets a word count, raises the
@@ -155,6 +170,10 @@ void mars_trace_reset(void);
  * has two candidate culprits and only this says which. */
 extern uint32_t mars_watch_lo, mars_watch_hi;
 
+/* A bit per 32X bitmap mode the game has selected: 1 blank, 2 packed
+ * pixel, 4 direct colour, 8 run length. */
+extern uint8_t mars_modes_seen;
+
 /* The two SH-2s live here rather than in main() so that the runtime can enter
  * one from anywhere — specifically from a 68000 register write, which is what
  * raising an interrupt is. */
@@ -179,6 +198,11 @@ void mars_bios_handover(void);
 void mars_deliver_int(int slave, unsigned level);
 #define MARS_INT_CMD 8           /* the 32X command interrupt, on both SH-2s */
 #define MARS_INT_PWM 6           /* the PWM timer, which only the slave takes */
+/* The 32X VDP's vertical interrupt, which the master takes once a frame when it
+ * has enabled it. Level 10, the horizontal one, is deliberately absent: this
+ * cartridge's handler for it is `bra` to itself, so delivering it would hang
+ * the machine - which is the game saying it never enables it. */
+#define MARS_INT_V   12
 
 /* The same, for an interrupt one CPU raises inside another's hand-over.
  *

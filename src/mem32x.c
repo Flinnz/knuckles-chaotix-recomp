@@ -58,6 +58,14 @@ static void trap(const char *what, uint32_t a) {
  * the last address the dispatch loop transferred to, which is the block the
  * write is inside — not the exact PC, and enough to name the routine. */
 uint32_t mars_watch_lo, mars_watch_hi;
+
+/* Every distinct value the game has put in the bitmap mode register, as a bit
+ * per mode. The register decides both what the frame buffer *means* — packed
+ * pixel, direct colour, run length — and which half of the picture is in
+ * front, and only two of the four modes have ever been exercised by anything
+ * this project has run. A screen that draws nothing from the 32X is asking
+ * this question first. */
+uint8_t mars_modes_seen;
 static unsigned watch_n;
 
 static void watch(const char *what, uint32_t a, uint32_t v) {
@@ -311,7 +319,16 @@ static void autofill(void) {
 int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
     if (a >= 0x4000 && a < 0x4100) {          /* system registers */
         switch (a & 0xFE) {
-        case 0x00: mars.adapter = (uint16_t)v; return 1;
+        case 0x00:
+            mars.adapter = (uint16_t)v;
+            /* The low byte is the interrupt enable mask and it belongs to the
+             * SH-2 that wrote it, not to the adapter: the slave enables PWM and
+             * the master enables V, and sharing one field means each turns the
+             * other off. Only an SH-2's own write counts; the 68000 reaches
+             * this block too and has no mask of its own. */
+            if (mars_running)
+                mars.int_enable[mars_running == &mars_cpu[1]] = (uint8_t)v;
+            return 1;
         case 0x02: mars.intctl = (uint16_t)v; return 1;
         /* H Count, not the 68000's bank register — see the note in mars.h. */
         case 0x04: mars.hcount = (uint16_t)v; return 1;
@@ -361,7 +378,8 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
     }
     if (a >= 0x4100 && a < 0x4200) {          /* VDP registers */
         switch (a & 0xFE) {
-        case 0x00: mars.bitmap_mode = (uint16_t)v & ~BITMAP_MODE_SET; return 1;
+        case 0x00: mars.bitmap_mode = (uint16_t)v & ~BITMAP_MODE_SET;
+                   mars_modes_seen |= (uint8_t)(1u << (v & 3)); return 1;
         case 0x02: mars.shift = (uint16_t)v; return 1;
         /* Eight bits, and the other eight are not there to be written. The
          * fill wraps inside a 256-word block — which is what the address
@@ -558,7 +576,10 @@ extern const unsigned sh2_function_count;
  * had stopped being productive; this records what actually ran.
  */
 #define TRACE_RING 8192
-#define TRACE_MAXFN 1024
+/* Every block, not the first 1,024 of them. The cap silently excluded
+ * everything above 0x060039xx — which is the whole of the 3D path, so the one
+ * question "does the polygon renderer run at all" could not be asked. */
+#define TRACE_MAXFN 2048
 static struct { uint32_t addr; uint16_t depth; uint8_t tail; } tring[TRACE_RING];
 static unsigned tring_n;                       /* total entries, may exceed ring */
 static uint32_t tcount[TRACE_MAXFN];
@@ -596,13 +617,18 @@ void mars_trace_dump(const char *why) {
     for (unsigned i = tring_n - shown; i < tring_n; i++)
         fprintf(stderr, "   0x%08X\n", tring[i % TRACE_RING].addr);
 
-    /* Hottest functions, which is usually where a runaway loop lives. */
-    unsigned top[5] = {0}, ntop = 0;
+    /* Hottest functions, which is usually where a runaway loop lives — and,
+     * with enough of them, what says which draw path a screen is using. */
+#define TRACE_TOP 24
+    unsigned top[TRACE_TOP] = {0}, ntop = 0;
     for (unsigned i = 0; i < sh2_function_count && i < TRACE_MAXFN; i++) {
         if (!tcount[i]) continue;
-        unsigned j = ntop < 5 ? ntop++ : 5;
-        while (j > 0 && tcount[top[j - 1]] < tcount[i]) { if (j < 5) top[j] = top[j-1]; j--; }
-        if (j < 5) top[j] = i;
+        unsigned j = ntop < TRACE_TOP ? ntop++ : TRACE_TOP;
+        while (j > 0 && tcount[top[j - 1]] < tcount[i]) {
+            if (j < TRACE_TOP) top[j] = top[j - 1];
+            j--;
+        }
+        if (j < TRACE_TOP) top[j] = i;
     }
     fprintf(stderr, "most-entered:\n");
     for (unsigned i = 0; i < ntop; i++)
@@ -810,7 +836,11 @@ unsigned sh2_run(SH2 *c, int32_t fuel) {
  */
 void mars_deliver_int(int slave, unsigned level) {
     SH2 *c = &mars_cpu[slave & 1];
-    if (level <= c->imask) return;
+    if (level <= c->imask) {
+        if (level == MARS_INT_V) mars.vints_declined[slave & 1]++;
+        return;
+    }
+    if (level == MARS_INT_V) mars.vints[slave & 1]++;
     uint32_t vec = c->vbr + 4u * (64u + ((level + 1u) >> 1));
     const uint8_t *p = resolve(canon(vec), 4);
     if (!p) { trap("vector", vec); return; }

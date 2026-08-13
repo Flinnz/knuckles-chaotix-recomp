@@ -607,6 +607,62 @@ static void render(uint32_t *px) {
     }
 }
 
+/* A stall, reported once, without anyone having to ask for it.
+ *
+ * Every failure this project has had past the reference's 1.7 seconds looks
+ * the same from outside: the picture stops changing and nothing says why. The
+ * machine knows, though — the command rate goes to zero and one CPU stops
+ * moving — so it can say so itself rather than waiting for someone to re-run
+ * with the right flag. Printed once per run, with the state that has decided
+ * every one of these so far.
+ */
+static void stall_check(unsigned frame) {
+    static uint32_t last_cmds, last_shm;
+    static unsigned still, said;
+    /* The slave is not in the test: its idle loop alternates between two
+     * addresses every frame whatever else is true, so including it means the
+     * check never fires. What a stall is, is the 68000 posting nothing and the
+     * master not moving. */
+    if (gen.cmd_posted != last_cmds || mars_cpu[0].pc != last_shm) {
+        last_cmds = gen.cmd_posted;
+        last_shm = mars_cpu[0].pc;
+        still = 0;
+        return;
+    }
+    /* Reported when it starts and not again until progress resumes, so a menu
+     * the player is simply sitting on cannot hide a real one later. A menu
+     * looks the same from outside — no commands, nobody moving — and the state
+     * below is what tells them apart: a healthy wait has the master in its
+     * comm-0 poll and comm 0 at zero. */
+    if (++still != 240) return;                /* four seconds of nothing */
+    if (said++ >= 4) return;
+    fprintf(stderr,
+        "\n== no progress at frame %u: no command posted and the master has "
+        "not moved for %u frames ==\n", frame, still);
+    fprintf(stderr, "  68000 pc %06X   master pc %08X sr %03X   slave pc %08X sr %03X\n",
+            cpu_pc(), mars_cpu[0].pc, sh2_get_sr(&mars_cpu[0]),
+            mars_cpu[1].pc, sh2_get_sr(&mars_cpu[1]));
+    fprintf(stderr, "  comm %04X %04X %04X %04X %04X %04X %04X %04X\n",
+            mars.comm[0], mars.comm[1], mars.comm[2], mars.comm[3],
+            mars.comm[4], mars.comm[5], mars.comm[6], mars.comm[7]);
+    fprintf(stderr, "  int enable master %02X slave %02X   "
+            "vint delivered %u/%u declined %u/%u   intctl %04X\n",
+            mars.int_enable[0], mars.int_enable[1],
+            mars.vints[0], mars.vints[1],
+            mars.vints_declined[0], mars.vints_declined[1], mars.intctl);
+    fprintf(stderr, "  commands posted %u serviced %u, by kind:", gen.cmd_posted,
+            mars.serviced);
+    for (unsigned i = 0; i < 16; i++)
+        if (gen.cmd_hist[i]) fprintf(stderr, " %u:%u", i, gen.cmd_hist[i]);
+    fprintf(stderr, "\n  bitmap mode %04X, missing blocks %u, unmapped sh2 %u\n",
+            mars.bitmap_mode, mars.missing, mars.unknown);
+    /* A screen waiting for the player looks exactly like this from outside, so
+     * say what tells them apart rather than calling it a bug. */
+    fprintf(stderr, "  (a menu waiting for input looks like this too: there the "
+            "master sits in its comm-0 poll at 0x060008F8 with comm 0 zero)\n");
+    if (mars.trace) mars_trace_dump("no progress");
+}
+
 /* One line every N frames, of everything that says the machine is still alive.
  *
  * Every gate in this project reads a trace against the reference, and the
@@ -632,9 +688,13 @@ static void progress(unsigned frame) {
     for (unsigned i = 0; i < MARS_FB; i++) if (mars_fb_shown()[i]) nz++;
     unsigned vram = 0;
     for (unsigned i = 0; i < sizeof gen.vram; i++) if (gen.vram[i]) vram++;
-    printf("  f%-6u cmds %6u (+%4u) c7 %3u  68k %06X  shm %08X shs %08X  "
+    printf("  f%-6u cmds %6u (+%4u) c7 %3u  bm %04X  ie %02X/%02X sr %X "
+           "v %u/%u  68k %06X  shm %08X shs %08X  "
            "fb %6u  vram %5u  unmapped +%u/+%u%s%s\n",
            frame, gen.cmd_posted, gen.cmd_posted - last_cmds, gen.cmd_hist[7],
+           mars.bitmap_mode,
+           mars.int_enable[0], mars.int_enable[1], mars_cpu[0].imask,
+           mars.vints[0], mars.vints_declined[0],
            cpu_pc(), mars_cpu[0].pc, mars_cpu[1].pc, nz, vram,
            mars.unknown - last_unk_sh2, gen.unknown_r - last_unk_68k,
            mars.missing ? "  MISSING-BLOCK" : "",
@@ -715,6 +775,11 @@ int main(int argc, char **argv) {
      * anything. `--press` pulses instead, a third of a second down and
      * two thirds up, which is what a person at the keyboard produces. */
     unsigned press = 0;
+    /* And when to *start* holding. `--hold` from frame zero sits on the pad
+     * through the menus, which is not what a person does and not what the game
+     * expects — held Right on the save select stops it advancing at all. This
+     * is what lets a headless run reach a level and only then take the stick. */
+    unsigned hold_from = 0;
     /* And when to stop pressing. A pulse that never ends walks straight through
      * every menu it reaches, so a screen that is entered *and stayed on* — the
      * save select, say — cannot be looked at with `--press` alone. Zero means
@@ -778,6 +843,8 @@ int main(int argc, char **argv) {
             hold = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--press") && i + 1 < argc)
             press = parse_hold(argv[++i]);
+        else if (!strcmp(argv[i], "--hold-from") && i + 1 < argc)
+            hold_from = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--press-until") && i + 1 < argc)
             press_until = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--recomp"))
@@ -864,6 +931,14 @@ int main(int argc, char **argv) {
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
                                 SDL_TEXTUREACCESS_STREAMING, W, H);
+        /* A pad is not a text field. SDL turns text input on with the window,
+         * which on macOS wires the window up to the Input Method Kit — and the
+         * pad is read straight out of SDL_GetKeyboardState, so nothing here
+         * ever wanted an IME. Turning it off is right on its own terms and is
+         * also what the "error messaging the mach port for
+         * IMKCFRunLoopWakeUpReliable" line in the console is complaining
+         * about; that message is the OS's, not ours, and harmless either way. */
+        SDL_StopTextInput();
         printf("pad: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Enter = Start, "
                "Tab = Mode, Esc quits\n");
     }
@@ -897,14 +972,33 @@ int main(int argc, char **argv) {
         gen68k_frame_start();
         unsigned pulse = press && (!press_until || frames < press_until)
                       && frames % 45 < 15 ? press : 0;
-        gen.pad_buttons = headless_frames ? (hold | pulse)
-                                          : (read_pad() | hold | pulse);
+        unsigned held = frames >= hold_from ? hold : 0;
+        gen.pad_buttons = headless_frames ? (held | pulse)
+                                          : (read_pad() | held | pulse);
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
             /* Raised as the beam reaches the line, before the 68000 runs any of
              * it, which is where the reference's own markers put it —
              * "Vblank SR=3 @ 224,n". It stays raised until acknowledged. */
-            if (line == VBLANK_LINE) gen.vint_pending = gen.vint_irq = 1;
+            if (line == VBLANK_LINE) {
+                gen.vint_pending = gen.vint_irq = 1;
+                /* And the 32X VDP's own vertical interrupt, to whichever SH-2
+                 * has enabled it. Delivered here rather than through
+                 * mars_raise_int because there is no position inside the
+                 * window to carry - the beam reaches the line before any CPU
+                 * runs any of it - and because the one pending slot per CPU
+                 * would drop a command interrupt to make room.
+                 *
+                 * Nothing delivered this before, and the master's special-stage
+                 * setup at 0x06001110 waits on a counter that only its V
+                 * handler increments: clear the count, enable V at 0x06001150,
+                 * then spin at 0x06001234 until two have arrived. With no V the
+                 * spin never ends, the master never acknowledges the command,
+                 * and the 68000 waits on comm 0 for ever - which is the special
+                 * stage drawing nothing and never finishing. */
+                for (int i = 0; i < 2; i++)
+                    if (mars.int_enable[i] & 8) mars_deliver_int(i, MARS_INT_V);
+            }
             /* The Z80 gets the same vertical interrupt, held for the one line
              * the VDP asserts it for. Its driver runs on nothing else. */
             z80.irq = (line == VBLANK_LINE);
@@ -990,6 +1084,7 @@ int main(int argc, char **argv) {
          * one without a window. Without a device this returns at once, which
          * is what leaves a headless run running as fast as it can. */
         sound_pace();
+        stall_check(frames);
         if (progress_every && frames % progress_every == 0) progress(frames);
         if (limit && frames >= limit) running = 0;
     }
@@ -1079,7 +1174,12 @@ int main(int argc, char **argv) {
      * transparent black, which is what the SEGA logo's own palette starts with. */
     unsigned cused = 0;
     for (unsigned i = 0; i < sizeof mars.cram; i++) if (mars.cram[i]) cused++;
-    printf("  32X: bitmap mode 0x%04X  palette %s\n", mars.bitmap_mode,
+    printf("  32X: bitmap mode 0x%04X (modes used:%s%s%s%s)  palette %s\n",
+           mars.bitmap_mode,
+           mars_modes_seen & 1 ? " blank" : "",
+           mars_modes_seen & 2 ? " packed" : "",
+           mars_modes_seen & 4 ? " direct" : "",
+           mars_modes_seen & 8 ? " run-length" : "",
            cused ? "written" : "all zero");
     /* Enough of the video state to tell an empty frame from a black one: the
      * line table says where each row lives, and pixels beyond it are the image.
