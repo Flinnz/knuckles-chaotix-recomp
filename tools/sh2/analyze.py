@@ -472,7 +472,7 @@ class Analyzer:
             a += 2
         return False
 
-    def scan_self_relative(self, lo, hi, min_insns=2):
+    def scan_self_relative(self, lo, hi, min_insns=1):
         """Seed the targets of a script stream of 16-bit self-relative offsets.
 
         `0x06005E9C` is a byte-code interpreter for the 32X's 3D objects:
@@ -494,7 +494,9 @@ class Analyzer:
         streams: a script entry and its handler are in the same region by
         construction, because the offset is only sixteen bits.
 
-        A handler can also be two instructions long, and `min_insns` is 2 here
+        A handler can also be a single instruction — `0x06006B3C` is `rts` and
+        its delay slot, named by three separate script entries — and
+        `min_insns` is 1 here
         for the same reason the installed-handler sweep on the 68000 side had
         to stop inheriting four: that bound exists to keep a *blind* sweep
         honest, and this is not a blind sweep — the target is named by the
@@ -506,7 +508,17 @@ class Analyzer:
             if a in self.code or not self.img.readable(a, 2):
                 continue                      # an instruction, not an offset
             t = a + 2 + self.img.s16(a)
-            if not (lo <= t < hi) or t in self.code:
+            if not (lo <= t < hi):
+                continue
+            # A target that is already code still needs to be an *entry*: an
+            # indirect transfer has nothing to dispatch to unless the address
+            # starts a block. 0x06006F7C is the second instruction of the block
+            # at 0x06006F7A and the interpreter jumps straight at it. This is
+            # the same thing 0x06004A24 taught, from the other direction.
+            if t in self.code:
+                if t not in self.func_entries and self.add_function(
+                        t, "script dispatch target"):
+                    found += 1
                 continue
             if not self.looks_like_code(t, min_insns=min_insns):
                 continue
@@ -589,20 +601,33 @@ class Analyzer:
         point. Seeding only the padding leaves the real entry mid-block, where
         an indirect transfer to it has nothing to dispatch to — which is how
         0x06004A24 went missing while every byte of it was translated.
+
+        Two instructions is a routine. The four `looks_like_code` wants by
+        default is there to keep a *blind* sweep honest, and this is not one:
+        control cannot fall through a `jmp` or an `rts`, so what follows is
+        code that something reaches indirectly. Inheriting four turned away
+        every handler of the 3D byte-code interpreter — `0x06005EA8` is
+        `add #1,r12 / mov.w @r12+,r0 / bra 0x06005E68`, three instructions,
+        and the run of them after `0x06005EA4` is laid end to end so rejecting
+        the first loses all of them. The same bound had to come down on the
+        68000's installed-handler sweep, for the same reason.
         """
         added = 0
         for end, (kind, _) in list(self.block_ends.items()):
             if kind not in (RET, JUMP, JUMP_IND) or end in self.code \
                     or end in self.data:
                 continue
-            if not self.looks_like_code(end):
+            if not self.looks_like_code(end, min_insns=2) \
+                    or self._sweep_rejects(end):
                 continue
             if self.add_function(end, "after " + kind):
                 added += 1
             a = end
             while self.img.readable(a, 2) and self.img.u16(a) == 0x0009:
                 a += 2
-                if self.looks_like_code(a) and self.add_function(a, "after padding"):
+                if self.looks_like_code(a, min_insns=2) \
+                        and not self._sweep_rejects(a) \
+                        and self.add_function(a, "after padding"):
                     added += 1
         return added
 
