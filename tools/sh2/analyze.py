@@ -377,6 +377,8 @@ class Analyzer:
 
         size = {"long": 4, "word": 2, "byte": 1}[load]
         entries = []
+        empty = []           # null slots confirmed by a later real entry
+        pending = []         # ...and ones not confirmed yet
         limit = None
         a = base
         for _ in range(1024):
@@ -390,10 +392,23 @@ class Analyzer:
                 tgt = (ins.addr + 4 + self.img.s16(a)) & MASK32
             else:
                 tgt = (ins.addr + 4 + self.img.u8(a)) & MASK32
+            # A null slot is an empty case, not the end of the table: the case
+            # that does nothing is written as a zero and the entries after it
+            # are still entries. The table at 0x06000560 has one, and the entry
+            # past it — 0x06000584 — is what the special stage transfers to and
+            # what killed the master with no block. Kept only once a real entry
+            # follows, and only a couple in a row, so a table cannot run off
+            # into a region of zeros.
+            if load == "long" and tgt == 0 and entries and len(pending) < 2:
+                pending.append(a)
+                a += size
+                continue
             if not self.is_code_addr(tgt) or not self.img.readable(tgt, 2):
                 break
             if decode(self.img.u16(tgt), tgt).kind == INVALID:
                 break
+            empty.extend(pending)
+            pending.clear()
             entries.append((a, tgt))
             # An offset table cannot run past the first thing it points at.
             if load != "long" and base > ins.addr:
@@ -401,7 +416,7 @@ class Analyzer:
             a += size
         if not entries:
             return None
-        for entry_addr, _ in entries:
+        for entry_addr in [e for e, _ in entries] + empty:
             self._mark_data(entry_addr, {"long": "long", "word": "short",
                                          "byte": "byte"}[load], size)
         return Table(dispatch=ins.addr, base=base, kind=load, entries=entries)
@@ -512,9 +527,19 @@ class Analyzer:
         are invisible to the mova-based idioms, but they are still recognisable
         by shape: a run of aligned words that each point at plausible code.
         Requiring a run of at least `min_run` keeps stray constants out.
+
+        A null slot does not end the run. A table whose nth case is "there is
+        no handler" writes it as a zero, and ending there threw away everything
+        after it: the table at 0x06000560 has four pointers and a zero fourth,
+        and 0x06000584 — the fifth — is what the special stage transfers to and
+        what killed the master with no block. The 68000 side learned the same
+        thing from a table whose empty case is `nop / rts`. A zero contributes
+        nothing to the run's length, so a lone zero between two constants still
+        cannot pass for a table.
         """
         added = 0
         run = []
+        holes = []
 
         def flush():
             nonlocal added
@@ -523,7 +548,10 @@ class Analyzer:
                     self._mark_data(a, "long", 4, firm=False)
                     if v not in self.func_entries and self.add_function(v, "ptr table"):
                         added += 1
+                for a in holes:
+                    self._mark_data(a, "long", 4, firm=False)
             run.clear()
+            holes.clear()
 
         a = lo + (-lo % 4)
         while a + 4 <= hi:
@@ -536,6 +564,8 @@ class Analyzer:
             # short handlers (a bare `rts` stub) are acceptable candidates here.
             if self.looks_like_code(v, min_insns=min_insns):
                 run.append((a, v))
+            elif v == 0 and run:
+                holes.append(a)          # an empty case, not the end of the table
             else:
                 flush()
             a += 4

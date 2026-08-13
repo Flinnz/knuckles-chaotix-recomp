@@ -170,6 +170,11 @@ void mars_trace_reset(void);
  * has two candidate culprits and only this says which. */
 extern uint32_t mars_watch_lo, mars_watch_hi;
 
+/* Carry on at PR when a transfer has no recompiled block, instead of
+ * parking the CPU. The run is wrong from that point; what it buys is
+ * every missing address in one session rather than the first. */
+extern int sh2_survive_missing;
+
 /* A bit per 32X bitmap mode the game has selected: 1 blank, 2 packed
  * pixel, 4 direct colour, 8 run length. */
 extern uint8_t mars_modes_seen;

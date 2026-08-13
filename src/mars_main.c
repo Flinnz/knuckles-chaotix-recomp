@@ -851,6 +851,8 @@ int main(int argc, char **argv) {
             use_recomp = 1;                 /* the default; kept so it still runs */
         else if (!strcmp(argv[i], "--interp"))
             use_recomp = 0;
+        else if (!strcmp(argv[i], "--survive-missing"))
+            sh2_survive_missing = 1;
         else if (!strcmp(argv[i], "--rate68k"))
             rate68k_report = 1;
         else if (!strcmp(argv[i], "--progress") && i + 1 < argc)

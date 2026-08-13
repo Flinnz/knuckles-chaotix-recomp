@@ -778,7 +778,13 @@ static int lookup(uint32_t addr) {
 
 int32_t sh2_fuel;
 
+int sh2_survive_missing;
+#define MISSING_MAX 64
+static uint32_t missing_at[MISSING_MAX];
+static unsigned missing_n;
+
 void sh2_call(SH2 *c, uint32_t addr) {
+    int recovering = 0;
     /* Flat: calls, returns and jumps are all just a new address. Nothing
      * recurses, so a handler that branches away instead of returning - which
      * is ordinary SH-2 practice - costs nothing here either. */
@@ -788,11 +794,30 @@ void sh2_call(SH2 *c, uint32_t addr) {
         if (addr < 0x40000000u) addr &= 0x1FFFFFFFu;
         int i = lookup(addr);
         if (i < 0) {
-            if (mars.missing++ < 16)
+            /* Each of these has been one play session to find, because the
+             * first one parks the CPU and ends the run. Distinct addresses are
+             * reported rather than the first sixteen occurrences of one, and
+             * `--survive-missing` carries on at PR instead of parking: the
+             * handler's work is skipped and the game is wrong from that point,
+             * but a single session surfaces several addresses instead of one.
+             * Two in a row with nothing between them is a loop, so that parks. */
+            int seen = 0;
+            for (unsigned k = 0; k < missing_n; k++)
+                if (missing_at[k] == addr) { seen = 1; break; }
+            if (!seen && missing_n < MISSING_MAX) {
+                missing_at[missing_n++] = addr;
                 fprintf(stderr, "  [call] no recompiled block at 0x%08X\n", addr);
+            }
+            mars.missing++;
+            if (sh2_survive_missing && c->pr && !recovering) {
+                recovering = 1;
+                addr = c->pr;
+                continue;
+            }
             addr = 0;
             break;
         }
+        recovering = 0;
         if (mars.trace) {
             trace_enter(addr, 0, 0);
             if (i < TRACE_MAXFN) tcount[i]++;
