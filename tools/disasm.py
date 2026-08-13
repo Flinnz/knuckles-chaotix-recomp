@@ -101,6 +101,7 @@ def analyse(rom_path, scan_tables=True):
                 if with_self_relative:
                     found += sum(az.scan_self_relative(lo, lo + size)
                                  for lo, size in sweep)
+                    found += az.scan_code_literals()
                 if not found:
                     return
                 az.run()

@@ -480,6 +480,41 @@ class Analyzer:
             a += 2
         return False
 
+    def scan_code_literals(self, min_insns=2):
+        """Seed functions from literal-pool longwords that point at code.
+
+        A handler installed rather than called has no xref a static search can
+        see: the address is a constant the program loads and stores into a
+        table the hardware reads. The 68000 front end already seeds from that
+        pattern — `lea pc@(handler),a0 ; move.l a0,(slot)` — and the SH-2 side
+        had nothing equivalent. `0x06001314` is a second, shorter vertical
+        interrupt handler, the same prologue as `0x06001280` down to clearing
+        0x20004016 and bumping the counter at 0x06003824, written into the
+        level-12 slot at run time; nothing else in the image mentions it.
+
+        The pool is the evidence and it is a strong one, because the value was
+        assembled as a longword constant rather than found by guessing at
+        alignment. It checks out against what is already known: of the 152
+        distinct pool longwords that point at plausible code, 148 are blocks
+        discovery had already reached by other means.
+        """
+        added = 0
+        for a in sorted(self.insns):
+            ins = self.insns[a]
+            if not ins.pool or ins.pool[1] != 4 or ins.mnem != "mov.l":
+                continue
+            v = self.img.u32(ins.pool[0])
+            if v in self.func_entries or not self.is_code_addr(v):
+                continue
+            if not self.img.readable(v, 2) or v in self.data:
+                continue
+            if not self.looks_like_code(v, min_insns=min_insns) \
+                    or self._sweep_rejects(v):
+                continue
+            if self.add_function(v, "code literal"):
+                added += 1
+        return added
+
     def scan_self_relative(self, lo, hi, min_insns=1):
         """Seed the targets of a script stream of 16-bit self-relative offsets.
 
