@@ -83,10 +83,14 @@ they emit does not depend on which — the cycle table comes out byte for byte
 the same from either.
 
 The result is a PE32+ console executable whose only non-system import is
-`SDL2.dll`. **It has been compiled and linked, not run.** Wine under QEMU on
-an ARM Mac dies in its own memory manager on a host/target page-size mismatch,
-long before reaching any of this, so the runtime half of the Windows story is
-still waiting on someone with an actual Windows machine.
+`SDL2.dll`, and it launches. What has *not* been run there is `make check`,
+which needs both the reference logs and a cross-toolchain — so the Windows
+build is known to start rather than known to agree with the macOS one, and
+those are different claims.
+
+Verifying a cross build wants a host that runs x86-64 for real. Wine under
+QEMU on an ARM Mac is not one: it aborts inside its own memory manager on a
+host/target page-size mismatch, before reaching a single instruction of this.
 
 ### Cross-binutils, for `make check` only
 
