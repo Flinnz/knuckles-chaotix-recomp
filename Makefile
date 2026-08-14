@@ -92,10 +92,18 @@ build/mars$(EXE): $(SRC) src/mars.h src/sh2.h src/sound.h src/psg.h src/z80.h sr
             src/m68000.h src/m68kconf.h Makefile $(GEN)/m68kops.c
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(SDLLD) $(LIBM)
 
-build/sh2_recomp.c:
+# The generated C is a function of the front end and the code generator, so
+# editing either must regenerate it — a rule with no prerequisites only ever
+# builds once, and a stale sh2_recomp.c passes every gate while missing the
+# change under test.
+build/sh2_recomp.c: tools/recompile.py tools/disasm.py tools/mars.py \
+            tools/hostcc.py tools/recomp/sh2c.py tools/sh2/analyze.py \
+            tools/sh2/decode.py
 	python3 tools/recompile.py
 
-build/m68k_recomp.c: build/m68k_cycles.bin
+build/m68k_recomp.c: build/m68k_cycles.bin tools/recompile68k.py \
+            tools/disasm68k.py tools/mars.py tools/hostcc.py \
+            tools/recomp/m68kc.py tools/m68k/analyze.py tools/m68k/decode.py
 	python3 tools/recompile68k.py
 
 # What each 68000 instruction costs, taken from Musashi rather than from a
