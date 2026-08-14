@@ -3,7 +3,7 @@
 Facts only. Reasoning, history and rejected approaches are in
 [roadmap.md](roadmap.md).
 
-Generated from the build at commit `c6e1e21`. `make check` passes.
+Generated from the build at commit `a1b9809`. `make check` passes.
 
 ## What this is
 
@@ -31,9 +31,9 @@ code is translated to C at build time and compiled.
 
 | | SH-2 | 68000 |
 |---|---|---|
-| functions | 1,883 | 4,491 |
-| basic blocks | 3,717 | 7,944 |
-| instructions | 11,985 | 24,579 |
+| functions | 1,884 | 4,491 |
+| basic blocks | 3,718 | 7,944 |
+| instructions | 11,992 | 24,579 |
 | dispatch tables | 15 | — |
 | unresolved indirect transfers | 42 | 45 |
 | coverage | 72.3% of the SDRAM image | 2.8% of the 3 MB ROM |
@@ -191,11 +191,14 @@ Ordered as in the roadmap's plan.
 
 Open from play, not from any gate:
 
-* **The special stage freezes near the end.** Twelve missing-block addresses
-  have been found by playing and fixed, each a different front-end mechanism;
-  whether this is a thirteenth or a deadlock is not yet known. The stall report
-  separates them — `missing blocks` with a `[call]` line is the first, a master
-  parked at a real address with comm 0 non-zero is the second.
+* **The special stage's end-of-stage freeze is fixed, pending a play
+  session to confirm.** It was the thirteenth missing block: `0x06001218`, the
+  stage's exit callback, named nowhere in the image but by the `mova` that
+  loads it — it is passed as a value, pushed, and eventually popped into PR
+  and returned through. `scan_mova_code` seeds such targets now; the stall
+  report's `[call]` line is what decided missing-block over deadlock, from one
+  log. No headless run reaches a special stage, so playing one to the end is
+  the confirmation.
 * **The ring pickup sound is missing.** All four sources are live in a level —
   PWM at 366 interrupts a frame with the sample changing, PSG audible, 33,000
   YM2612 register writes, the Z80 running its driver — so this is one effect,

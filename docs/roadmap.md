@@ -2832,6 +2832,69 @@ of the first 1,024 — which had been hiding the whole of the 3D path. And a
 stall report that needs no flag at all: four seconds with no command posted and
 the master not moving prints the state that has decided every one of these.
 
+### The thirteenth missing block is a callback only a `mova` names
+
+The freeze after the chaos ring answered the open question by itself, which is
+what the stall report was built to do. Two reports, 292 frames apart: in the
+first the master sits at `0x06004770` with comm 0 holding `0x006D` — the shape
+of a results screen holding, and the report's own caveat says a screen waiting
+looks like this — and between them the line that decides it:
+
+    [call] no recompiled block at 0x06001218
+
+A missing block, the thirteenth, and the next report shows the consequence:
+master parked at zero, the 68000 waiting on comm 0 at `0x927A80` for an
+acknowledgement that can no longer come.
+
+`0x06001218` is seven instructions and it is the special stage's way *out*:
+clear the command interrupt, put the enable mask back to command-only — the
+level configuration, where the special stage had run on the vertical interrupt
+— pop PR and return. It is reached by no transfer at all. The installer hands
+it around as a value:
+
+    060011B0  mov.w @(36,pc),r1     ! 0x6418
+    060011B2  mova  @(100,pc),r0    r0 = 0x06001218
+    060011B4  bsrf  r1              -> 0x060075D0
+
+and the callee at `0x060075D0` pushes r0 and saves the stack pointer into a
+slot; when the stage is over the engine restores r15, pops the value into PR
+and returns through it. A transfer through a popped PR has no static form —
+not a branch, not a table entry, not a pool longword, not a script offset — so
+every rule the twelve previous addresses taught looks straight past it. The
+one mention of `0x06001218` in the whole image is that `mova`.
+
+So the `mova` is the rule. `scan_mova_code` seeds a `mova` target that decodes
+as plausible code and is claimed by nothing else, exactly as the pool rule
+seeds a longword, and it validates the same way but cleaner: of the 76
+distinct `mova` targets in the image, 18 are already claimed as data —
+dispatch-table bases mostly — 41 are not code, 8 are function entries
+discovery had already reached — and exactly one is unclaimed plausible code,
+and it is `0x06001218`. The eight
+that point into the middle of existing blocks were read by hand and are inline
+data the code *loads* — a parameter block parked behind a `bra` at
+`0x06006C70`, a word table at `0x060035FC` — so anything already claimed is
+left alone.
+
+**1,883 -> 1,884 functions, 3,717 -> 3,718 blocks**, both cartridges still
+round-trip byte for byte, every number in `make check` unchanged, and the
+40,000-frame attract loop identical — which is the expected shape for a fix
+whose only runtime effect is one more row in the dispatch table, at an address
+nothing but the special stage's exit ever asks for.
+
+**The first `make check` after the fix passed with the fix absent.**
+`build/sh2_recomp.c` had no prerequisites in the Makefile, so editing
+discovery rebuilt nothing: the gates measured the previous front end, all of
+them green, and the only tell was the generated file's timestamp. That is the
+"gate that does not need the reference" problem one layer down — a gate is
+only as good as the freshness of what it runs — and it is why both generated
+files now depend on the recompilers, the front ends and the shared tooling
+they import.
+
+What confirmation remains is a play session: no headless run reaches a special
+stage, since entering one takes rings collected and a jump made. If the stage
+end has a fourteenth address hiding behind this one, playing will surface it
+exactly as it surfaced this.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what
