@@ -3,9 +3,7 @@
 Facts only. Reasoning, history and rejected approaches are in
 [roadmap.md](roadmap.md).
 
-Generated from the build at commit `edc5301` plus this session's fixes — the
-dropped delay slot, the 32X priority bit, the 32X vertical interrupt and the
-script-dispatch front-end rule. `make check` passes.
+Generated from the build at commit `c6e1e21`. `make check` passes.
 
 ## What this is
 
@@ -33,12 +31,12 @@ code is translated to C at build time and compiled.
 
 | | SH-2 | 68000 |
 |---|---|---|
-| functions | 801 | 4,491 |
-| basic blocks | 2,778 | 7,944 |
-| instructions | 11,816 | 24,579 |
+| functions | 1,883 | 4,491 |
+| basic blocks | 3,717 | 7,944 |
+| instructions | 11,985 | 24,579 |
 | dispatch tables | 15 | — |
-| unresolved indirect transfers | 22 | 45 |
-| coverage | 71.3% of the SDRAM image | 2.8% of the 3 MB ROM |
+| unresolved indirect transfers | 42 | 45 |
+| coverage | 72.3% of the SDRAM image | 2.8% of the 3 MB ROM |
 
 Both cartridges (JU and E) reassemble byte for byte from the emitted listing.
 
@@ -52,9 +50,9 @@ Both cartridges (JU and E) reassemble byte for byte from the emitted listing.
 | 68000 semantics (`test_recomp68k.py`) | 38 cases pass |
 | PSG arithmetic (`test_psg.py`) | 18 cases pass |
 | 68000 boot (`diff68k.py --ref-lines 20213`) | 20,084 of 20,178, 19 divergences |
-| 68000 whole extract (`diff68k.py`) | 52,525 of 54,081, 344 divergences |
-| master SH-2 (`diffsh2.py --cpu master`) | 197 of 200 blocks, 18 divergences |
-| slave SH-2 (`diffsh2.py --cpu slave`) | 1,344 of 2,000 blocks, 593 divergences |
+| 68000 whole extract (`diff68k.py`) | 52,524 of 54,081, 346 divergences |
+| master SH-2 (`diffsh2.py --cpu master`) | 172 of 200 blocks, 31 divergences |
+| slave SH-2 (`diffsh2.py --cpu slave`) | 1,204 of 2,000 blocks, 409 divergences |
 | PWM output (`diffpwm.py`) | 3,361 of 3,361 samples exact |
 | Z80 (`diffz80.py`) | 32,622 of 33,984, 330 divergences |
 | chip register input (`diffz80.py`) | 164 of 164 bytes, in order |
@@ -62,7 +60,17 @@ Both cartridges (JU and E) reassemble byte for byte from the emitted listing.
 | recompiled 68000, boot only | 2,466 blocks, 23 divergences |
 | front-end coverage (`disasm68k.py coverage`) | clean |
 
-No fatal divergence in any diff. Every diff walks its whole extract.
+No fatal divergence in any diff. Every diff walks its whole extract, and
+`diffsh2.py` still ends on "every instruction the reference ran is inside a
+block we have".
+
+The two SH-2 block gates read lower than they did at 251 SH-2 functions — 197
+and 1,344 — and that is the gate seeing more rather than the runtime doing
+worse. The reference stream is filtered to *our* block addresses, so finer
+blocks make it finer too, and differences that had no row before now have one:
+three of the master's are "control flow parts; N reference blocks we never run",
+at addresses that were not blocks at all. It is an interpretation, not a
+proof.
 
 **All of them stop at 1.7 seconds of game** — that is the length of the
 reference logs. Nothing gates anything after that.
@@ -104,6 +112,11 @@ reference logs. Nothing gates anything after that.
 `--press start --press-until 350` goes through the title and the save select
 into a playable level instead of watching the attract loop.
 
+Played from the keyboard it goes further than any headless run reaches: the
+save select renders, a level plays and can be completed, and the special stage
+draws its tunnel, its HUD and the molecule background and is playable. What is
+known to be wrong there is in Open below.
+
 Commands a frame varies with the scene: about 1.0 in a level and 0.5 on the
 title screen, against the reference's 0.83 over its own 1.7 seconds. Zero
 unmapped accesses on either side across the whole run.
@@ -136,6 +149,7 @@ audio device paces it to the machine's speed.
 | `--trace-from N` | start every tracer at frame N |
 | `--progress N` | one liveness line every N frames — commands, PCs, bitmap mode, interrupt masks, unmapped accesses |
 | `--hold-from N` | start holding at frame N, so the menus are passed untouched |
+| `--survive-missing` | carry on at PR when a transfer has no block, instead of parking — the run is wrong from that point, but one session surfaces several addresses instead of one |
 | `--watch ADDR[:LEN]` | log SH-2 writes into that range, with the block they came from |
 | `--trace68k-lines N`, `--trace-sh2-lines N`, `--trace-z80-lines N` | line budgets |
 | `--dump-vdp FILE`, `--dump-32x FILE`, `--dump-z80 FILE`, `--dump-sdram FILE` | memory snapshots |
@@ -174,6 +188,20 @@ Ordered as in the roadmap's plan.
 4. The banked window is wholly interpreted — 988,493 hand-overs in 3,600 frames.
 5. The sound mix is chosen, not measured; the chips have no output gate.
 6. The slave diff is bounded at 2,000 reference blocks by trace size.
+
+Open from play, not from any gate:
+
+* **The special stage freezes near the end.** Twelve missing-block addresses
+  have been found by playing and fixed, each a different front-end mechanism;
+  whether this is a thirteenth or a deadlock is not yet known. The stall report
+  separates them — `missing blocks` with a `[call]` line is the first, a master
+  parked at a real address with comm 0 non-zero is the second.
+* **The ring pickup sound is missing.** All four sources are live in a level —
+  PWM at 366 interrupts a frame with the sample changing, PSG audible, 33,000
+  YM2612 register writes, the Z80 running its driver — so this is one effect,
+  not a dead path. Nothing here can gate it: the reference logs are the boot and
+  are constant silence, so "never fires" and "fires inaudibly" are not
+  distinguishable without a person listening.
 
 Also open: a 32X vertical interrupt that arrives while its own handler is
 running is dropped where hardware would hold it pending; the 32X's priority is

@@ -2746,6 +2746,84 @@ the byte — 27,786 commands, 43,063 frame-buffer bytes. None of these three bug
 could have been caught by a gate, and none was: the reference extract is 1.7
 seconds and reaches none of it.
 
+### Five more, each a different way of being unreachable
+
+The interrupt fix let the master past its spin and straight into the next wall,
+and then four more. Every one was an address the game transferred to and the
+front end had no block for, and no two had the same cause. They are listed in
+the order playing found them, because that ordering is the point: nothing
+static predicted any of them, and each fix was a rule the front end was missing
+rather than a patch for an address.
+
+| address | why it was unreachable |
+|---|---|
+| `0x06006188` | a handler of the 3D byte-code interpreter, named only by a script stream |
+| `0x06000584` | the entry past a **null slot** in a longword dispatch table, where the walker stopped |
+| `0x06006D50` | a **two-instruction** handler, `mova` then `rts` |
+| `0x06005EA8`.. | a run of **three-instruction** handlers laid end to end after a `jmp` |
+| `0x06006B3C` | a **one-instruction** handler, `rts` and its delay slot |
+| `0x06006F7C` | already code, but not an **entry** — the interpreter jumps into the middle of a block |
+| `0x060068F2` | **119 instructions** before its `rts`, where `looks_like_code` gives up at 64 |
+| `0x06001314` | a handler **installed at run time**, mentioned nowhere but a literal pool |
+
+Four of those are the same lesson from four directions: **a length bound is not
+a confidence bound.** `looks_like_code` wanted four instructions before it would
+believe a sequence, and rejected one-, two- and three-instruction handlers; it
+also gave up at sixty-four and rejected a routine *for being long*. The four
+exists to keep a *blind* sweep honest, and none of these sweeps is blind — the
+target is named by the interpreter's own arithmetic, or by the fact that control
+cannot fall through a `jmp`. Running out of the upper bound is now a pass, for
+the same reason: sixty-four consecutive valid encodings with every branch target
+in range is stronger evidence than the three-instruction sequences already
+accepted without hesitation.
+
+The last one is a mechanism rather than a bound. `0x06001314` is a second,
+shorter vertical interrupt handler — the same prologue as `0x06001280` down to
+clearing `0x20004016` — written into the level-12 slot at run time. The 68000
+front end has seeded from installed handlers for a while; the SH-2 side now does
+the same through the only form it has, a literal-pool longword pointing at
+plausible code. That rule validates against what was already known: of the 152
+distinct pool longwords that point at code, **148 were already blocks**.
+
+**251 -> 1,883 functions, 1,974 -> 3,717 blocks, SDRAM coverage 56.3% ->
+72.3%**, both cartridges byte-exact throughout, and the 40,000-frame attract
+loop identical to the byte at every step.
+
+**What made this affordable was `--survive-missing`.** The first missing block
+parks the CPU and ends the run, so each one cost a play session. Carrying on at
+PR instead — wrong from that point, but running — turned one session into twelve
+addresses, of which eight were real and four were the corruption talking (two at
+odd addresses, which is never an SH-2 instruction address, and two past the end
+of the image). Reading a batch and knowing which half to ignore is a much better
+trade than one address a session.
+
+**And the script sweep has converged**, which bounds what is left rather than
+guessing at it. Of the 3,378 self-relative targets in the master's image that
+are not blocks, every one fails for a real reason: 1,695 are odd or unmapped and
+the rest hit an invalid encoding within a few instructions. None is named by two
+or more entries while decoding cleanly. Whatever stops the game next is not that
+rule being too narrow.
+
+*Gates:* `make check` passes throughout. Two numbers moved and neither is the
+runtime: the master's block gate went 197 -> 172 of 200 and the slave's
+1,344 -> 1,204 of 2,000, because the reference stream is filtered to *our* block
+addresses and finer blocks make it finer too — three of the master's new rows
+are "control flow parts; N reference blocks we never run", at addresses that
+were not blocks at all before. `diffsh2.py` still ends on "every instruction the
+reference ran is inside a block we have". That reading is an interpretation and
+is recorded as one.
+
+### Where the game is now
+
+Played from the keyboard it goes further than any headless run reaches: the save
+select renders, a level plays and can be completed, and **the special stage
+draws its tunnel, its HUD and the molecule background and is playable**. It
+freezes near the end, and whether that is a thirteenth missing block or a
+deadlock of the kind the vertical interrupt was is not yet known — the stall
+report separates them without needing a flag. The ring pickup sound is missing,
+with every source demonstrably live, and nothing here can gate that: the
+reference logs are the boot and are constant silence.
+
 **What the session left behind is instruments.** `--progress N` for liveness,
 `--watch ADDR[:LEN]` for who wrote a table entry, `--dump-sdram`, `--hold-from`
 and `--press-until` for driving past a menu headlessly, the bitmap modes the
@@ -3066,8 +3144,8 @@ replacing the 68000 interpreter with recompiled code, was done earlier and is
 the default; what remains of it is optimisation, and the interpreter stays for
 the code the engine writes at run time.
 
-**M7 — it plays** 🔵 *the attract loop runs indefinitely; the gates still stop
-at 1.7 seconds*
+**M7 — it plays** 🔵 *a level can be finished and the special stage is
+playable; the gates still stop at 1.7 seconds*
 
 `./build/mars` boots, draws the SEGA screen, assembles the title screen — logo,
 `PUSH START`, the five characters and the copyright line — and goes on into the
