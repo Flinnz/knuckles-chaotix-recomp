@@ -515,6 +515,52 @@ class Analyzer:
                 added += 1
         return added
 
+    def scan_mova_code(self, min_insns=2):
+        """Seed functions from `mova` targets that point at code.
+
+        `mova` is how this engine names an address without spending a pool
+        longword on it, and almost always the address is data: a dispatch
+        table base, a parameter block parked after a `bra`, a word table the
+        code steps through. But it is also how the special stage hands its
+        end-of-stage callback around. At 0x060011B2 the installer does
+
+            060011B0  mov.w @(36,pc),r1     ! 0x6418
+            060011B2  mova  @(100,pc),r0    r0 = 0x06001218
+            060011B4  bsrf  r1
+
+        and the callee at 0x060075D0 pushes r0 and saves the stack pointer;
+        when the stage ends the engine pops it into PR and returns through it.
+        A transfer through a popped PR has no static xref of any kind — the
+        one mention of 0x06001218 in the image is that `mova` — so the master
+        parked at zero the moment the chaos ring was collected.
+
+        The same validation as the pool rule: of the 76 distinct mova targets,
+        18 are already claimed as data (dispatch-table bases mostly), 41 are
+        not code, 8 are already function entries, 8 name inline data that an
+        earlier trace ran into, and exactly one — 0x06001218 — is unclaimed
+        plausible code. Targets
+        already claimed as code are left alone: the mid-block ones checked out
+        as data pointers (0x06006C70 is a parameter block behind a `bra`,
+        0x060035FC a word table), not entries anything transfers to.
+        """
+        added = 0
+        for a in sorted(self.insns):
+            ins = self.insns[a]
+            if ins.mnem != "mova" or ins.imm is None:
+                continue
+            v = ins.imm & MASK32
+            if v in self.func_entries or v in self.code or v in self.data:
+                continue
+            if not self.is_code_addr(v) or not self.img.readable(v, 2):
+                continue
+            if not self.looks_like_code(v, min_insns=min_insns) \
+                    or self._sweep_rejects(v):
+                continue
+            self.xrefs[v].add(a)
+            if self.add_function(v, "mova"):
+                added += 1
+        return added
+
     def scan_self_relative(self, lo, hi, min_insns=1):
         """Seed the targets of a script stream of 16-bit self-relative offsets.
 
