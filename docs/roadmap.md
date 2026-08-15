@@ -3009,12 +3009,90 @@ twenty rings and jumps will never provide one. What a clean 31 minutes does buy
 is the negative result on everything else: 1.3 billion 68000 instructions and
 26 billion master SH-2 instructions through five zones with nothing to report.
 
+### A movie in our own frame numbering
+
+Everything above about alignment exists because the `.bk2` counts frames from
+another emulator's power-on. `--record` writes the same text back out — both
+pads, one line per frame, in exactly the format `--movie` parses — and a
+recording made here counts *our* frames by definition. There is no offset to
+find, no plateau, no re-sync: every press lands on the frame it was made on.
+
+Two identities say it works, and both are in `make check` rather than asserted.
+A 4,096-frame synthetic movie sweeping every mask on both ports replays and
+records back identical. A `--press`/`--hold` session recorded, replayed with the
+recorder still on, comes back byte for byte. And recording *during* a replay
+bakes the alignment in: the tuffcracker movie played at `--movie-offset 500` and
+recorded produces a file that replays plain, same picture, same numbers, no
+offset — so a good alignment found once never has to be found again.
+
+The feature was not written here. It was in the parallel session that was stood
+down when two agents built the same movie player, and reading the diff settled
+it: a pure addition, +106 lines and no deletions, on the very code that was
+kept. Both had converged on the same design. Recovering it was one patch.
+
+### The special stage, confirmed by a play session that replays for ever
+
+The thirteenth missing block's fix had been waiting on the one thing no gate
+could supply: somebody playing a special stage to its end. `--record` turns that
+into an artefact. A 27,741-frame session — seven and a half minutes of play —
+replayed headlessly does this:
+
+| frames | what |
+|---|---|
+| 2,000-16,000 | a level, commands at ~1,900 per 2,000 frames, `ie 02/01` |
+| ~17,000 | interrupt enable goes `02` -> `08` and the 32X vertical interrupt starts arriving |
+| 18,000-22,000 | the special stage, 6,000 frames posting **no commands at all** |
+| 24,000 | out of it, `ie 02/01` again, commands resuming; the Combi Catcher |
+
+**6,624 32X vertical interrupts, and zero missing blocks.** Nothing but the
+special stage's own setup at `0x06001110` enables that interrupt, so the counter
+is the proof rather than the screenshots — though the screenshots agree, rings
+counting 111 -> 107 -> 95 down the tube. It also posts command kinds 4, 8 and 9
+(327 times), none of which any other headless run has ever reached.
+
+Two findings fell out, neither a missing block and neither chased. A stall report
+at frame 23,004: 240 frames with no command and the master parked at
+`0x06004770` with comm 0 at `0x006D` — the results-screen shape the roadmap
+already described for that address — which then recovered on its own. And one new
+unmapped 68000 read, `0x8401FE`, in the 32X frame-buffer window.
+
+### The gate that needs no reference, and says when it measured nothing
+
+`tools/test_session.py` replays that session as the last step of `make check`.
+It is **loose by choice**. What fails a build is only what is always a bug
+however the runtime changes: a transfer with no recompiled block, a CPU parked
+at zero, an unmapped SH-2 access, the movie not reaching its end, no commands at
+all, or the special stage no longer being entered. Commands by kind, frame-buffer
+bytes and the three instruction rates are printed against a baseline with the
+delta and never enforced, because a scheduling or timing fix moves them
+legitimately and a gate that broke on those would cost more than it catches.
+Replay being deterministic, every number currently matches exactly, which is
+itself worth knowing: the drift is zero, so a nonzero one means something.
+
+The coverage assertion is the load-bearing one. Without it a replay that died
+quietly in a level would pass every other condition, having simply never got far
+enough to break anything.
+
+**The session is local, in `roms/` with the cartridges and the logs**, because it
+is a large input each machine makes for itself. That leaves the failure mode this
+project has already been bitten by — a gate that passes while measuring nothing,
+which is what `build/sh2_recomp.c` did when its rule had no prerequisites. So a
+missing session **skips loudly**, in as many words, and names the command that
+makes one. A `--movie` named explicitly is a different promise and a missing one
+is fatal.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what
 each would have caught, not by how interesting it is.*
 
-**1. A gate that does not need the reference.** This is the whole of what M7
+**1. A gate that does not need the reference.** *Partly delivered — see "The
+gate that needs no reference" above. `tools/test_session.py` replays a recorded
+play session and covers the third bullet below, liveness, over a run that
+reaches a level, a special stage and the Combi Catcher. The first two bullets
+are still unwritten.*
+
+This is the whole of what M7
 owes. Everything found today was found by running the game and reading a trace;
 `make check` was byte-identical across all three fixes, and would have been
 across all three bugs. The reference cannot help — it is 1.7 seconds and the
