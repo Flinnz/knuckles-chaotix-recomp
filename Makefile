@@ -305,6 +305,7 @@ check: build/mars$(EXE)
 	python3 tools/diff68k.py --blocks --ours build/trace68k_rc.txt \
 	    --window 400000 --rows 0 --detail 0
 	python3 tools/disasm68k.py coverage
+	python3 tools/test_session.py
 	@echo "all gates pass"
 
 clean:

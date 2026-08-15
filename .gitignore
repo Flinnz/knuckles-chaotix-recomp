@@ -5,6 +5,7 @@ roms/*.32x
 roms/*.bin
 roms/*.bk2
 roms/*.log
+roms/*.movie
 roms/*.ram
 __pycache__/
 *.pyc

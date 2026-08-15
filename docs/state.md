@@ -59,6 +59,7 @@ Both cartridges (JU and E) reassemble byte for byte from the emitted listing.
 | recompiled 68000, blocks (`diff68k.py --blocks`) | 3,376 of 9,848 blocks, 599 divergences |
 | recompiled 68000, boot only | 2,466 blocks, 23 divergences |
 | front-end coverage (`disasm68k.py coverage`) | clean |
+| played session (`test_session.py`) | 27,741 frames, special stage entered, no missing block — local input, skips without one |
 
 No fatal divergence in any diff. Every diff walks its whole extract, and
 `diffsh2.py` still ends on "every instruction the reference ran is inside a
@@ -72,8 +73,29 @@ three of the master's are "control flow parts; N reference blocks we never run",
 at addresses that were not blocks at all. It is an interpretation, not a
 proof.
 
-**All of them stop at 1.7 seconds of game** — that is the length of the
-reference logs. Nothing gates anything after that.
+**All the reference diffs stop at 1.7 seconds of game** — that is the length of
+the reference logs. `test_session.py` is the one gate that does not need them: it
+replays `roms/session.movie`, a `--record`ed play session, which for the baseline
+below was 27,741 frames covering a level, a special stage played to its end, and
+the Combi Catcher.
+
+That session is **local, not in the repository** — it lives in `roms/` with the
+cartridges and the reference logs, for the same reason. Make your own by playing
+with `./build/mars --record roms/session.movie`; with none present the gate
+**skips and says it measured nothing**, rather than printing a tick. A
+differently-recorded session still gets the loose conditions; `--rebaseline`
+prints a replacement baseline block for its numbers.
+
+It is **loose on purpose**. What fails a build is only what is always a bug — a
+transfer with no recompiled block, a CPU parked at zero, an unmapped SH-2
+access, the movie not reaching its end, no commands at all, or the special stage
+no longer being entered. Commands by kind, frame-buffer bytes and instruction
+rates are printed against their baseline with the delta and never enforced,
+because a scheduling or timing fix moves them legitimately. Replay is
+deterministic, so today every number matches exactly; a drift is a prompt to
+look, not a break. A recovered stall report — the results screen holds for 240
+frames at frame 23,004 — is printed too; a terminal one fails as a parked CPU or
+as no commands.
 
 ## Clocks
 
