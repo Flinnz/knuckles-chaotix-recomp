@@ -194,6 +194,20 @@ upstream of the phase and would have to be settled first:
   one/two-player mode differs, the physics differ from level frame 1 and no
   alignment can sync.
 
+`--record FILE` writes the same text back out: both pads, one line per frame,
+whatever composed them — keyboard, `--hold`/`--press`, or a replay. It is the
+way out of the offset problem entirely, because a session played in our own
+window is input in our frame numbering: it replays at offset 0 with every
+press on the frame it was made on, and the log is committable text. Two
+`check` gates hold the round trip — a generated movie carrying every 12-bit
+mask on both ports records back identical through a replay, and a recorded
+`--press`/`--hold` run replayed with the recorder still on copies its file
+byte for byte. Recording a replay bakes the alignment in: the tuffcracker
+movie played at `--movie-offset 500` and recorded comes back as a file that
+replays plain. What no offset or re-sync of a foreign movie has reached — the
+special stage — is one played session with `--record` away from being a
+headless replay.
+
 `--shots N` writes `build/shots/fNNNNNN.ppm` through the run, which is how a
 31-minute run gets looked at. `ffmpeg -pattern_type glob -i 'build/shots/*.ppm'
 build/tas.mp4` makes it a video.
@@ -221,6 +235,7 @@ movie frame 691 holds. `make tas` turns it on, so every shot carries it.
 | `--movie FILE` | play a recorded run, one line of input per frame, from `tools/bk2.py` |
 | `--movie-offset N` | which of our frames plays the movie's frame 0; negative skips into it |
 | `--movie-resync OURS:MOVIE` | from our frame OURS, play movie frame MOVIE — re-align part way in; repeatable, last match wins |
+| `--record FILE` | write both pads back out, one line per frame, in the text `--movie` reads — a played session becomes a movie in our own frame numbering, and recording a replay bakes its offset and re-syncs into the file |
 | `--shots N` | a rendered frame every N frames, into `build/shots/` |
 | `--show-input` | draw the pad on the picture — the twelve letters lit as held, our frame `F` and the movie frame `M` it played, so `F` minus the offset is `M`. In the window, in `--shots` and in `build/frame.ppm` |
 | `--layers N` | 1 plane B, 2 plane A, 4 sprites, 8 the 32X bitmap |
@@ -270,6 +285,11 @@ Ordered as in the roadmap's plan.
    now reports itself without a flag, but nothing fails a build for either, and
    the third oracle — the two 68000 backends against each other — is not
    written. All three bugs this session cost a play session each to find.
+   `--record` now turns a play session into replayable input in our own frame
+   numbering, so the input side of such a gate exists; the check that replays
+   a recorded session and fails a build on its end-of-run numbers is still
+   unwritten, and no session that reaches the special stage has been recorded
+   yet.
 2. No frontier is known. 200,000 frames run clean; nothing has been run longer.
 3. `sh2_cpi1000` is one cycles-per-instruction number per SH-2.
 4. The banked window is wholly interpreted — 988,493 hand-overs in 3,600 frames.

@@ -982,6 +982,56 @@ static int movie_open(const char *path) {
     return movie_active;
 }
 
+/* And the same file written instead of read: `--record` logs what both pads
+ * held, one line per frame, in exactly the text movie_open() parses — the
+ * comment header, then two hex masks. tools/bk2.py emits the format; this is
+ * the runtime emitting it about itself.
+ *
+ * What that buys is a movie with no offset problem. Everything above about
+ * alignment — the plateau at 400-700, the re-syncs, the desync inside the
+ * level — exists because the tuffcracker movie counts frames from another
+ * emulator's power-on. A recording made here counts ours by definition:
+ * record a session, replay it at offset 0, and every press lands on the frame
+ * it was made on. So the special stage, which no foreign movie has survived
+ * long enough to enter, becomes reachable headlessly the first time anyone
+ * plays their way in with `--record` on — the log is committable text, and a
+ * gate can replay it for ever after. Recording during a replay works too and
+ * bakes the alignment in: play a foreign movie with its offset and re-syncs
+ * and record it, and the file that comes out replays plain.
+ *
+ * The pads are logged after every source has composed — keyboard, `--hold`,
+ * `--press`, movie — because that sum is what the engine reads, and a replay
+ * of the log has to read the same. Each line is flushed as written: the
+ * session worth keeping is the long one that ends in a crash or a ^C, and a
+ * recording that sits in a buffer until a clean exit dies with it. */
+static FILE *record_out;
+static const char *record_path;
+static unsigned long record_frames;
+
+static int record_open(const char *path) {
+    record_out = fopen(path, "w");
+    if (!record_out) { perror(path); return 0; }
+    record_path = path;
+    fputs("# recorded by --record\n"
+          "# one line per frame: port 1 mask, port 2 mask, hex\n"
+          "# 001 up 002 down 004 left 008 right 010 a 020 b 040 c "
+          "080 start 100 x 200 y 400 z 800 mode\n", record_out);
+    return 1;
+}
+
+static void record_frame(void) {
+    if (!record_out) return;
+    fprintf(record_out, "%03X %03X\n",
+            gen.pad_buttons[0] & 0xFFFu, gen.pad_buttons[1] & 0xFFFu);
+    fflush(record_out);
+    record_frames++;
+}
+
+static void record_close(void) {
+    if (record_out) fclose(record_out);
+    record_out = NULL;
+}
+
 static unsigned read_pad(void) {
     SDL_PumpEvents();
     const Uint8 *k = SDL_GetKeyboardState(NULL);
@@ -1033,6 +1083,9 @@ int main(int argc, char **argv) {
      * run nobody is going to sit through can still be looked at. */
     const char *moviepath = NULL;
     unsigned shots_every = 0;
+    /* Where to write the pads back out — `--movie`'s complement, and the way
+     * input in *our* frame numbering comes to exist at all. */
+    const char *recordpath = NULL;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             /* `--frames movie` is the movie's own length, which is the number
@@ -1103,6 +1156,8 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc)
             shots_every = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--record") && i + 1 < argc)
+            recordpath = argv[++i];
         else if (!strcmp(argv[i], "--show-input"))
             show_input = 1;
         else if (!strcmp(argv[i], "--recomp"))
@@ -1119,6 +1174,10 @@ int main(int argc, char **argv) {
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
     if (moviepath && !movie_open(moviepath)) return 1;
+    /* Opened after the movie is read: movie_open holds the whole file in
+     * memory by the time it returns, so `--movie X --record X` replays X and
+     * rewrites it rather than truncating the file it was about to read. */
+    if (recordpath && !record_open(recordpath)) return 1;
     if (shots_every) shots_dir();
     if (headless_frames < 0) {
         if (!movie) {
@@ -1269,6 +1328,7 @@ int main(int argc, char **argv) {
         gen.pad_buttons[0] = (headless_frames ? 0 : read_pad())
                            | held | pulse | m1;
         gen.pad_buttons[1] = m2;
+        record_frame();
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
             /* Raised as the beam reaches the line, before the 68000 runs any of
@@ -1392,6 +1452,7 @@ int main(int argc, char **argv) {
     trace68k_close();
     sh2_trace_close();
     z80_trace_close();
+    record_close();
     sound_close();
     if (mars.trace) mars_trace_dump("after the frame loop");
 
@@ -1556,6 +1617,8 @@ int main(int argc, char **argv) {
                movie_played, movie_frames,
                movie_played == movie_frames ? " (to the end)" : "",
                movie_offset);
+    if (record_path)
+        printf("  recorded: %lu frame(s) to %s\n", record_frames, record_path);
     printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",
            mars_cpu[0].pc, mars_cpu[1].pc);
     /* The reference figures are steady-frame rates, so a run that includes the

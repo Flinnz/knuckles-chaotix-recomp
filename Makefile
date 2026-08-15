@@ -254,6 +254,16 @@ tas: build/mars$(EXE) $(TASMOVIE)
 # arithmetic — clock / (32 * period) for a tone, two decibels an attenuation
 # step, and the shift rates of the noise register — each computed by the test
 # rather than copied from the implementation.
+#
+# The two `--record` gates behind `diffz80.py` are what make a recorded session
+# trustworthy as future input. The first plays a generated movie holding every
+# 12-bit mask once on each port and requires the recording of that replay to
+# hold the same masks in the same frames — movie in, pads, movie out, the
+# identity, for every word either pad can take. The second records a
+# `--press`/`--hold` run and replays it with the recorder still on: the two
+# files must match byte for byte, or the input a session leaves behind is not
+# the input a replay of it delivers, and every deep-game gate built on a
+# recorded log inherits the drift.
 check: build/mars$(EXE)
 	python3 tools/emit_asm.py --verify
 	python3 tools/emit_asm.py --verify --rom "roms/Knuckles' Chaotix (E) [!] (32X).32x"
@@ -277,6 +287,19 @@ check: build/mars$(EXE)
 	    --rows 0 --detail 0
 	python3 tools/diffpwm.py
 	python3 tools/diffz80.py --rows 0 --detail 0
+	python3 -c "print('\n'.join('%03X %03X' % (i, 4095 - i) for i in range(4096)))" \
+	    > build/rec_seed.movie
+	./build/mars$(EXE) --movie build/rec_seed.movie --frames movie \
+	    --record build/rec_out.movie >/dev/null
+	python3 -c "import sys; \
+	    m = lambda p: [l.split() for l in open(p) if not l.startswith('#')]; \
+	    sys.exit(0 if m('build/rec_seed.movie') == m('build/rec_out.movie') \
+	             else 'record of a replay differs from the movie replayed')"
+	./build/mars$(EXE) --frames 300 --press start --hold down,right \
+	    --record build/rec_once.movie >/dev/null
+	./build/mars$(EXE) --frames 300 --movie build/rec_once.movie \
+	    --record build/rec_again.movie >/dev/null
+	cmp build/rec_once.movie build/rec_again.movie
 	./build/mars$(EXE) --recomp --frames 300 --trace68k build/trace68k_rc.txt \
 	    --trace68k-lines 6000000 >/dev/null
 	python3 tools/diff68k.py --blocks --ours build/trace68k_rc.txt \
