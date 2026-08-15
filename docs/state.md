@@ -298,14 +298,27 @@ Ordered as in the roadmap's plan.
 
 Open from play, not from any gate:
 
-* **The special stage's end-of-stage freeze is fixed, pending a play
-  session to confirm.** It was the thirteenth missing block: `0x06001218`, the
-  stage's exit callback, named nowhere in the image but by the `mova` that
-  loads it — it is passed as a value, pushed, and eventually popped into PR
-  and returned through. `scan_mova_code` seeds such targets now; the stall
-  report's `[call]` line is what decided missing-block over deadlock, from one
-  log. No headless run reaches a special stage, so playing one to the end is
-  the confirmation.
+* **The special stage's end-of-stage freeze is fixed, and confirmed.** It was
+  the thirteenth missing block: `0x06001218`, the stage's exit callback, named
+  nowhere in the image but by the `mova` that loads it — it is passed as a
+  value, pushed, and eventually popped into PR and returned through.
+  `scan_mova_code` seeds such targets now; the stall report's `[call]` line is
+  what decided missing-block over deadlock, from one log.
+
+  The confirmation is a `--record`ed play session, 27,741 frames, replayed
+  headlessly: at frame ~17,000 the master's interrupt enable goes `02` -> `08`
+  and 6,624 32X vertical interrupts are delivered, which is the special stage
+  and nothing else; it runs for some 6,000 frames posting no commands, exits,
+  and commands resume — with **zero missing blocks** across the whole run. It
+  also reaches the Combi Catcher and posts command kinds 4, 8 and 9 (327
+  times), none of which any other headless run has touched. Because a
+  recording counts our own frames, that session replays for ever.
+
+  Two things it turned up, neither a missing block: a stall report at frame
+  23,004 — 240 frames with no command and the master parked at `0x06004770`
+  with comm 0 at `0x006D`, the results-screen shape, which then recovered on
+  its own — and one new unmapped 68000 read, `0x8401FE`. Commands posted
+  19,644 against 19,427 serviced.
 * **The ring pickup sound is missing.** All four sources are live in a level —
   PWM at 366 interrupts a frame with the sample changing, PSG audible, 33,000
   YM2612 register writes, the Z80 running its driver — so this is one effect,
