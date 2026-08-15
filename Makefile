@@ -123,9 +123,42 @@ $(GEN)/m68kops.c: $(MUSASHI)/m68k_in.c
 	$(CC_BUILD) -O2 -o $(GEN)/m68kmake$(BUILD_EXE) $(MUSASHI)/m68kmake.c
 	cd $(GEN) && ./m68kmake$(BUILD_EXE) . ../../$(MUSASHI)/m68k_in.c
 
-.PHONY: run clean check
+.PHONY: run tas clean check
 run: build/mars$(EXE)
 	./build/mars$(EXE)
+
+# A recorded run, as input. `tools/bk2.py` turns a BizHawk .bk2 into one line of
+# input per frame and the runtime plays it back with `--movie`, which is the only
+# thing this project has that reaches deep game time without a person at the
+# keyboard: the reference logs are 1.7 seconds and `--press` can only pulse a
+# button at a menu.
+#
+# TAS names the movie and the default is whatever .bk2 is sitting in roms/,
+# alongside the cartridges and the reference logs — none of which are in the
+# repository. It is not part of `check`: a movie recorded on another emulator
+# against the real 32X firmware cannot be a gate, because this runtime stands in
+# for that firmware and the two do not share a frame zero. What it is, is 31
+# minutes of deliberate input that either runs clean or reports where it did not.
+#
+# Headless with `--progress` for liveness and `--shots` for a rendered frame
+# every thousand, since nobody is going to watch 111,397 of them go by. Drop the
+# `--frames` to play the same movie in a window.
+TAS      ?= $(firstword $(wildcard roms/*.bk2))
+TASMOVIE  = build/$(notdir $(basename $(TAS))).movie
+
+$(TASMOVIE): $(TAS) tools/bk2.py
+	python3 tools/bk2.py "$(TAS)" -o $@
+
+# TASOFFSET is which of our frames plays the movie's frame 0, and it decides
+# whether the run is a game or the attract loop. This movie's whole menu sequence
+# is four single-frame Start presses, and at 0 they land on the SEGA logo instead
+# of the title: the save select is never reached and every level such a run shows
+# is a demo. 400-700 all get through and 500 is the middle of that plateau.
+TASOFFSET ?= 500
+
+tas: build/mars$(EXE) $(TASMOVIE)
+	./build/mars$(EXE) --movie $(TASMOVIE) --movie-offset $(TASOFFSET) \
+	    --frames movie --progress 2000 --shots 1000 --show-input
 
 # Everything that can say "this stopped being true", in the order a break is
 # cheapest to understand: the front end reassembles both cartridges byte for

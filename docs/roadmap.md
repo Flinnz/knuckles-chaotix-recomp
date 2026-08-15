@@ -2895,6 +2895,120 @@ stage, since entering one takes rings collected and a jump made. If the stage
 end has a fourteenth address hiding behind this one, playing will surface it
 exactly as it surfaced this.
 
+### Half an hour of somebody else's input
+
+The gap every note above ends on is game time: the reference is 1.7 seconds,
+`--press` can pulse a button at a menu and nothing more, and each of the
+thirteen missing blocks cost a play session to find. A TAS is the cheapest
+answer to that. `roms/tuffcrackerv3-knuckleschaotix-tuffcracker.bk2` is 111,397
+frames — 31 minutes at 60 Hz, 24,429 re-records — of deliberate input recorded
+against this cartridge, and playing it back costs 3.7 minutes of wall clock.
+
+`tools/bk2.py` reads the archive and writes one line of input per frame; the
+runtime plays it with `--movie`, `--shots N` writes a rendered frame every N so
+a run nobody will watch can be looked at afterwards, and `make tas` is the
+whole thing. The column-to-button mapping is read out of the movie's own
+`LogKey:` line rather than assumed, which is what makes it a movie player and
+not this movie's player.
+
+**A pad per port, because the movie needs two.** `gen.pad_buttons` was one mask
+— player one — and ports 2 and 3 read as pads with nothing pressed, which is
+how all three were identified before there was a pad at all. This movie presses
+port 2's Start on exactly one frame out of 111,397, and a port that can only
+read empty cannot replay it. It is an array now. Nothing else changes: with no
+movie and nothing held, every port still reads exactly what it read before, so
+every trace comparison is untouched.
+
+**The run is clean from end to end.** All 111,397 frames, 76,881 commands posted
+and 76,881 serviced, **no missing block, no stall report, and zero unmapped
+accesses on either side** — one 68000 read of `0xA130F0`, the mapper register,
+which predates this. The rates hold at the reference's own to within 0.15%
+across half an hour: 235,011 master instructions a frame against 235,044,
+380,583 slave against 380,724, 11,748 68000 against 11,611. Sound stayed live
+throughout — 40,896,209 PWM samples delivered, none starved.
+
+**The offset is the whole game, and 0 is wrong.** The movie was recorded on
+PicoDrive with the three real 32X firmware images, and this runtime stands in for
+that firmware rather than running it, so movie frame 0 and our frame 0 are not
+the same moment. At offset 0 the run looked healthy and was not playing at all:
+the movie's entire menu sequence is four single-frame Start presses, at movie
+frames 162, 328, 361 and 459, and they landed on the SEGA logo and the intro
+animation instead of on the title. Everything after movie frame 633 was then
+input to a game that had never been started, and the levels the shots showed were
+**attract-mode demos** — which look exactly like play, with HUD, rings and a
+score, and are why "31 clean minutes across five zones" was the wrong reading of
+that first run.
+
+**The machine says which it is, in one field.** The save select is the one screen
+whose bitmap mode is `0x0001` — its 32X half is a tiled background and its Mega
+Drive half is the whole interface — where every other screen in the game is
+`0x0081`. `--progress` already prints it. All 55 lines of the offset-0 run read
+`0081`, so the save select was never reached, and that is a fact about the run
+rather than an interpretation of its pictures. Reading the pictures is what got
+it wrong the first time.
+
+**Sweeping the offset finds a plateau.** 400 to 700 all reach the save select;
+below that it is patchy — 225, 300 and 375 fail where their neighbours pass,
+which is a single-frame press falling in a window that is a few frames wide. At
+500, the middle of the plateau, the save select is entered once and not returned
+to in 20,000 frames, so the run is in a game rather than cycling through attract.
+`--press start --press-until 350` reaching a level, which the docs already
+recorded, is the same fact from the other side: pulsing 15 frames in 45 cannot
+miss the window, and a TAS's single frame can.
+
+**The level then desyncs, and the offset provably cannot fix it.** At 500 the run
+plays Isolated Island from frame 2,000 to 40,000 with the level clock running
+0'13" to 9'50" and the score at 0 throughout — the character is being driven and
+is not progressing — and the act ends on TIME OVER at 9'59". Every offset in the
+plateau produces the same thing, one asset load in the first 6,000 frames.
+
+That is what the mechanism says has to happen, and measuring it in movie
+coordinates says it exactly. Our menu screen ends at movie frame **420 or 520**
+depending on the offset and at nothing in between — a single-frame press either
+lands in a window a few frames wide or does not — the level card then runs some
+245 frames, and our level's first frame is movie frame **665** where the movie's
+first gameplay input is at **633**. Thirty-two frames, out of a set of achievable
+phases a hundred apart. The offset moves both ends together; it cannot close them.
+
+**So the alignment has to happen at the level, and `--movie-resync OURS:MOVIE`
+does that** — from our frame OURS, play movie frame MOVIE, repeatable so a run can
+be re-aligned again at the next level instead of being asked to hold sync for half
+an hour. `--movie-resync 1160:633` is the one this movie wants. It is verifiable
+rather than hopeful: resyncing to 665, which is what offset 500 already plays
+there, produces a frame byte-identical to no resync at all.
+
+**Phase alone is not enough, and the sweep says so.** From 601 to 673 the run
+changes substantially — 82-86% of pixels differ at frame 6,000 — and the score is
+0 in every one. Two things sit upstream of the phase, and both were found by the
+metric failing rather than by looking for them:
+
+* **The movie pauses the game**, at movie frames 2329 and 5726, which at offset
+  500 is our frames 2,829-6,226. A probe window inside that reads the same clock
+  whatever the input is, which is what made nineteen different runs look
+  identical — `cmds` is insensitive too, the engine posting about 0.93 commands a
+  frame whatever the player does. The picture is the only sensitive metric here.
+* **The menu path is not the movie's.** The `0x0001` screen is SCENARIO QUEST, not
+  a save select, and our run leaves it at movie frame 420 or 520 while the movie's
+  own confirming press is at 459 — so a different press is ending it, and what the
+  game enters the level holding need not be what was recorded. Character pair and
+  player count are chosen there, and either differing means the physics differ
+  from level frame 1, which no alignment can repair.
+
+So what the movie buys today, at the offset that works, is a real game rather than
+a replay: 111,897 frames, 89,478 commands, ten minutes of one act driven by a live
+input stream, and nothing to report from any of it. Making it a replay is next
+about the menu, not about the arithmetic.
+
+**What it does not settle is the one thing it was hoped to.** No special stage
+was entered, and the run says so itself rather than leaving it to be guessed
+from the pictures: `--progress` reports 32X vertical interrupts delivered, the
+special stage's setup at `0x06001110` is the only thing that enables them, and
+all 55 progress lines read `v 0/0`. So the thirteenth missing block's fix is
+still waiting on a play session, and a TAS that desyncs before it collects
+twenty rings and jumps will never provide one. What a clean 31 minutes does buy
+is the negative result on everything else: 1.3 billion 68000 instructions and
+26 billion master SH-2 instructions through five zones with nothing to report.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what

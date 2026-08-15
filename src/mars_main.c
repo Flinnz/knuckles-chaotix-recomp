@@ -16,6 +16,7 @@
  * target's slice there — see mars_slice_pos() below and mars_raise_int() in
  * src/mem32x.c.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -607,6 +608,128 @@ static void render(uint32_t *px) {
     }
 }
 
+/* What the pad is holding, drawn on the picture — `--show-input`.
+ *
+ * Every question about a movie so far has been "is this input reaching the game",
+ * and answering it has meant reading a bitmap-mode field or diffing two
+ * screenshots. On screen it is just visible: the twelve letters light up as the
+ * pad holds them, and the two frame counters say which of our frames is playing
+ * which of the movie's, which is the whole of what an offset does.
+ *
+ * It draws into the rendered frame rather than over the window, so it is in
+ * `--shots` and `build/frame.ppm` too — a run nobody watched can still be read
+ * afterwards. A 3x5 font of the 24 characters this needs is smaller than any
+ * dependency and is exact at this resolution; three bits a row, five rows, packed
+ * into one integer per glyph.
+ */
+#define GLYPH(a,b,c,d,e) (uint16_t)(((a)<<12)|((b)<<9)|((c)<<6)|((d)<<3)|(e))
+static const char font_chars[] = "ABCDFLMRSUXYZ0123456789-";
+static const uint16_t font_rows[] = {
+    GLYPH(2,5,7,5,5), GLYPH(6,5,6,5,6), GLYPH(3,4,4,4,3), GLYPH(6,5,5,5,6),
+    GLYPH(7,4,6,4,4), GLYPH(4,4,4,4,7), GLYPH(5,7,7,5,5), GLYPH(6,5,6,5,5),
+    GLYPH(3,4,2,1,6), GLYPH(5,5,5,5,7), GLYPH(5,5,2,5,5), GLYPH(5,5,2,2,2),
+    GLYPH(7,1,2,4,7),
+    GLYPH(7,5,5,5,7), GLYPH(2,6,2,2,7), GLYPH(7,1,7,4,7), GLYPH(7,1,7,1,7),
+    GLYPH(5,5,7,1,1), GLYPH(7,4,7,1,7), GLYPH(7,4,7,5,7), GLYPH(7,1,1,1,1),
+    GLYPH(7,5,7,5,7), GLYPH(7,5,7,1,7), GLYPH(0,0,7,0,0),
+};
+
+static int show_input;
+/* Set by the movie loader below, which is further down the file than the drawing
+ * — three facts rather than the buffer itself, so the overlay does not need to
+ * know how a movie is stored. */
+static int movie_active, movie_p2;
+/* The frame whose input is on display and the movie frame it played, both set
+ * together where the pad is set, so `F` minus the offset is `M` on screen and the
+ * arithmetic an offset does is readable off the picture. `F` is the frame's own
+ * index; a shot is named for the number of frames run, which is one more. */
+static unsigned frame_now;
+static long movie_now = -1;      /* the movie frame this frame of ours plays */
+
+static void glyph(uint32_t *px, int x, int y, char c, uint32_t col) {
+    const char *p = strchr(font_chars, c);
+    if (!p || !c) return;
+    uint16_t rows = font_rows[p - font_chars];
+    for (int r = 0; r < 5; r++)
+        for (int b = 0; b < 3; b++)
+            if ((rows >> (14 - r * 3 - b)) & 1 &&
+                x + b >= 0 && x + b < W && y + r >= 0 && y + r < H)
+                px[(y + r) * W + x + b] = col;
+}
+
+static void text(uint32_t *px, int x, int y, const char *s, uint32_t col) {
+    for (; *s; s++, x += 4) glyph(px, x, y, *s, col);
+}
+
+static void draw_input(uint32_t *px) {
+    /* PAD_* order, so bit i is letter i and the two cannot drift. */
+    static const char names[] = "UDLRABCSXYZM";
+    const uint32_t lit = 0xFFFFFFFFu, dim = 0xFF383842u, back = 0xFF101014u;
+    int rows = movie_active && movie_p2 ? 2 : 1;
+    int top = H - 2 - rows * 7;
+
+    for (int y = top - 2; y < H; y++)
+        for (int x = 0; x < 120 && x < W; x++)
+            px[y * W + x] = back;
+
+    for (int p = 0; p < rows; p++)
+        for (int i = 0; i < 12; i++)
+            glyph(px, 2 + i * 4, top + p * 7, names[i],
+                  (gen.pad_buttons[p] >> i) & 1 ? lit : dim);
+
+    /* Our frame, and the movie frame it is playing — which is what says whether
+     * an offset is doing what it was asked to. */
+    char buf[32];
+    snprintf(buf, sizeof buf, "F%u", frame_now);
+    text(px, 54, top, buf, lit);
+    if (movie_active) {
+        if (movie_now >= 0) snprintf(buf, sizeof buf, "M%ld", movie_now);
+        else                snprintf(buf, sizeof buf, "M-");
+        text(px, 54, top + (rows > 1 ? 7 : 0), buf, lit);
+    }
+}
+
+/* One rendered frame, as a file. The end of a headless run has always written
+ * one; `--shots` writes them through the run, which is what lets a run far
+ * longer than anyone will watch be looked at afterwards.
+ *
+ * The directory is made rather than assumed, because a flag that silently
+ * writes nothing is worse than one that fails. mkdir is the one thing here
+ * whose spelling differs between the two hosts this builds for. */
+#ifdef _WIN32
+#include <direct.h>
+#define MARS_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define MARS_MKDIR(p) mkdir(p, 0777)
+#endif
+
+static void shots_dir(void) {
+    MARS_MKDIR("build");
+    if (MARS_MKDIR("build/shots") && errno != EEXIST)
+        perror("build/shots");
+}
+
+/* The picture as anything outside this file should get it: rendered, then
+ * whatever is being drawn on top of it. Three places take a frame — the window,
+ * `--shots` and the final PPM — and all three want the same one. */
+static void render_frame(uint32_t *px) {
+    render(px);
+    if (show_input) draw_input(px);
+}
+
+static void write_ppm(const char *path, const uint32_t *px) {
+    FILE *o = fopen(path, "wb");
+    if (!o) { perror(path); return; }
+    fprintf(o, "P6\n%d %d\n255\n", W, H);
+    for (int i = 0; i < W * H; i++) {
+        uint8_t rgb[3] = { (uint8_t)(px[i] >> 16), (uint8_t)(px[i] >> 8),
+                           (uint8_t)px[i] };
+        fwrite(rgb, 1, 3, o);
+    }
+    fclose(o);
+}
+
 /* A stall, reported once, without anyone having to ask for it.
  *
  * Every failure this project has had past the reference's 1.7 seconds looks
@@ -743,6 +866,122 @@ static unsigned parse_hold(const char *s) {
     return held;
 }
 
+/* A recorded run, as input. `tools/bk2.py` turns a BizHawk .bk2 into one line
+ * per frame — two hex masks, port 1 and port 2, in the PAD_* bit order — and
+ * this plays it back a frame at a time.
+ *
+ * What it buys is the one thing no gate in this project has: game time. The
+ * reference logs are 1.7 seconds, `--press` walks menus by pulsing a button
+ * every third of a second, and everything past that has cost a play session per
+ * bug. A TAS is half an hour of deliberate input that reaches places no
+ * scripted press will — a special stage among them, which is exactly what the
+ * front end's newest fix has been waiting for a person to confirm.
+ *
+ * It is not a sync oracle and cannot become one. The movie was recorded on
+ * PicoDrive with the three real 32X firmware images, and this runtime stands in
+ * for that firmware rather than running it: the boot ROM's own frames — the
+ * master spends 9.4 million instructions summing the cartridge before the
+ * handshake completes — do not happen here, so movie frame 0 and our frame 0 are
+ * not the same moment. `--movie-offset` shifts one onto the other.
+ *
+ * Two things make that offset matter less than it looks. The engine reads the
+ * pad once per frame in its vertical interrupt handler, and this loop sets the
+ * pad once per frame, so a frame of movie is a frame of engine either way. And
+ * every menu here is entered by a press rather than by a timeout, so a level
+ * begins a fixed number of frames after the press that started it — the offset
+ * cancels for everything downstream of the first input. What it cannot cancel is
+ * anything the engine derives from an absolute frame count, its random seed
+ * included.
+ */
+static uint16_t *movie;                 /* two masks per frame, port 1 then 2 */
+static unsigned long movie_frames, movie_played;
+static long movie_offset;               /* our frame that plays movie frame 0 */
+
+/* And re-alignment part way through, which one offset cannot do.
+ *
+ * A global offset shifts the movie's presses and, with them, the frame the game
+ * reaches each screen — so the phase between a level's first frame and the
+ * movie's first gameplay frame is set by our own menu latencies, not by the
+ * offset. Measured on this movie: our save select ends at movie frame 420 or 520
+ * depending on the offset and at nothing in between, because a single-frame press
+ * either lands in a window or does not. The level card then runs ~245 frames, so
+ * our level starts at movie frame 665 where the movie's first gameplay input is
+ * at 633. No offset closes 32 frames when the achievable phases are 100 apart.
+ *
+ * `--movie-resync OURS:MOVIE` says "from our frame OURS, play movie frame MOVIE",
+ * which aligns the part that matters and leaves the menus to whatever got there.
+ * Repeatable, applied in the order given, last match winning — so a run can be
+ * re-aligned again at the next level rather than being expected to hold sync for
+ * half an hour.
+ */
+#define MOVIE_SYNCS 8
+static struct { long ours, movie; } movie_sync[MOVIE_SYNCS];
+static unsigned movie_syncs;
+
+static int movie_add_sync(const char *s) {
+    if (movie_syncs == MOVIE_SYNCS) {
+        fprintf(stderr, "at most %d --movie-resync points\n", MOVIE_SYNCS);
+        return 0;
+    }
+    char *end;
+    long ours = strtol(s, &end, 0);
+    if (*end != ':') {
+        fprintf(stderr, "--movie-resync wants OURS:MOVIE, got %s\n", s);
+        return 0;
+    }
+    movie_sync[movie_syncs].ours = ours;
+    movie_sync[movie_syncs].movie = strtol(end + 1, NULL, 0);
+    movie_syncs++;
+    return 1;
+}
+
+/* Which movie frame this frame of ours plays, or -1 for none. */
+static long movie_frame_for(unsigned frame) {
+    long mf = (long)frame - movie_offset;
+    for (unsigned i = 0; i < movie_syncs; i++)
+        if ((long)frame >= movie_sync[i].ours)
+            mf = movie_sync[i].movie + ((long)frame - movie_sync[i].ours);
+    return mf;
+}
+
+static int movie_open(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { perror(path); return 0; }
+    unsigned long cap = 4096, n = 0;
+    movie = malloc(cap * 2 * sizeof *movie);
+    char line[256];
+    while (movie && fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        unsigned p1 = 0, p2 = 0;
+        if (sscanf(line, "%x %x", &p1, &p2) < 1) {
+            fprintf(stderr, "%s: line %lu is not two hex masks: %s",
+                    path, n + 1, line);
+            fclose(f);
+            return 0;
+        }
+        if (n == cap) {
+            cap *= 2;
+            uint16_t *bigger = realloc(movie, cap * 2 * sizeof *movie);
+            if (!bigger) break;
+            movie = bigger;
+        }
+        movie[2 * n] = (uint16_t)(p1 & 0xFFFu);
+        movie[2 * n + 1] = (uint16_t)(p2 & 0xFFFu);
+        n++;
+    }
+    fclose(f);
+    if (!movie) { fprintf(stderr, "%s: out of memory\n", path); return 0; }
+    movie_frames = n;
+    movie_active = n != 0;
+    /* Whether player two is in this recording at all, which decides whether the
+     * input display has a second row. One frame of 111,397 is enough to count. */
+    for (unsigned long i = 0; i < n; i++)
+        if (movie[2 * i + 1]) { movie_p2 = 1; break; }
+    printf("movie: %lu frames from %s%s\n", n, path,
+           movie_p2 ? ", two players" : "");
+    return movie_active;
+}
+
 static unsigned read_pad(void) {
     SDL_PumpEvents();
     const Uint8 *k = SDL_GetKeyboardState(NULL);
@@ -790,9 +1029,16 @@ int main(int argc, char **argv) {
      * the part of the run that has no reference at all. */
     unsigned trace_from = 0;
     unsigned progress_every = 0;
+    /* A recorded run to play back, and one rendered frame every N frames so a
+     * run nobody is going to sit through can still be looked at. */
+    const char *moviepath = NULL;
+    unsigned shots_every = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc)
-            headless_frames = atoi(argv[i + 1]);
+            /* `--frames movie` is the movie's own length, which is the number
+             * this would otherwise be copied out of tools/bk2.py by hand. */
+            headless_frames = !strcmp(argv[i + 1], "movie") ? -1
+                                                            : atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--trace"))
             mars.trace = 1;
         else if (!strcmp(argv[i], "--trace68k") && i + 1 < argc)
@@ -847,6 +1093,18 @@ int main(int argc, char **argv) {
             hold_from = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--press-until") && i + 1 < argc)
             press_until = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--movie") && i + 1 < argc)
+            moviepath = argv[++i];
+        else if (!strcmp(argv[i], "--movie-offset") && i + 1 < argc)
+            /* Signed: positive delays the movie, negative skips into it. */
+            movie_offset = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--movie-resync") && i + 1 < argc) {
+            if (!movie_add_sync(argv[++i])) return 1;
+        }
+        else if (!strcmp(argv[i], "--shots") && i + 1 < argc)
+            shots_every = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--show-input"))
+            show_input = 1;
         else if (!strcmp(argv[i], "--recomp"))
             use_recomp = 1;                 /* the default; kept so it still runs */
         else if (!strcmp(argv[i], "--interp"))
@@ -859,6 +1117,25 @@ int main(int argc, char **argv) {
             progress_every = (unsigned)strtoul(argv[++i], NULL, 0);
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
+
+    if (moviepath && !movie_open(moviepath)) return 1;
+    if (shots_every) shots_dir();
+    if (headless_frames < 0) {
+        if (!movie) {
+            fprintf(stderr, "--frames movie needs a --movie to take its "
+                            "length from\n");
+            return 1;
+        }
+        /* Long enough for the movie to reach its end from every alignment
+         * asked for, so a delay or a re-sync that rewinds still plays out. */
+        long need = (long)movie_frames + (movie_offset > 0 ? movie_offset : 0);
+        for (unsigned i = 0; i < movie_syncs; i++) {
+            long end = movie_sync[i].ours
+                     + ((long)movie_frames - movie_sync[i].movie);
+            if (end > need) need = end;
+        }
+        headless_frames = (int)need;
+    }
 
     FILE *f = fopen(rompath, "rb");
     if (!f) { perror(rompath); return 1; }
@@ -975,8 +1252,23 @@ int main(int argc, char **argv) {
         unsigned pulse = press && (!press_until || frames < press_until)
                       && frames % 45 < 15 ? press : 0;
         unsigned held = frames >= hold_from ? hold : 0;
-        gen.pad_buttons = headless_frames ? (held | pulse)
-                                          : (read_pad() | held | pulse);
+        /* This frame of the movie, if it has one. Composed with the rest rather
+         * than replacing it, the same way `--hold` and `--press` compose: with
+         * nothing else asked for a replay is exactly what was recorded, and a
+         * windowed replay can still be nudged from the keyboard. */
+        unsigned m1 = 0, m2 = 0;
+        long mf = movie_frame_for(frames);
+        frame_now = frames;
+        movie_now = -1;
+        if (movie && mf >= 0 && (unsigned long)mf < movie_frames) {
+            m1 = movie[2 * mf];
+            m2 = movie[2 * mf + 1];
+            movie_played = (unsigned long)mf + 1;
+            movie_now = mf;
+        }
+        gen.pad_buttons[0] = (headless_frames ? 0 : read_pad())
+                           | held | pulse | m1;
+        gen.pad_buttons[1] = m2;
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
             /* Raised as the beam reaches the line, before the 68000 runs any of
@@ -1074,7 +1366,7 @@ int main(int argc, char **argv) {
                 if (ev.type == SDL_QUIT ||
                     (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE))
                     running = 0;
-            render(px);
+            render_frame(px);
             SDL_UpdateTexture(tex, NULL, px, W * 4);
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, NULL, NULL);
@@ -1088,6 +1380,12 @@ int main(int argc, char **argv) {
         sound_pace();
         stall_check(frames);
         if (progress_every && frames % progress_every == 0) progress(frames);
+        if (shots_every && frames % shots_every == 0) {
+            char path[64];
+            snprintf(path, sizeof path, "build/shots/f%06u.ppm", frames);
+            if (headless_frames) render_frame(px);  /* a window has already */
+            write_ppm(path, px);
+        }
         if (limit && frames >= limit) running = 0;
     }
 
@@ -1250,6 +1548,14 @@ int main(int argc, char **argv) {
                / ((double)(frames ? frames : 1) * CYCLES_PER_FRAME * 3));
     printf("  unmapped: 68k r=%u w=%u, sh2=%u\n",
            gen.unknown_r, gen.unknown_w, mars.unknown);
+    /* Whether the movie was played to its end, which a run cut short by
+     * `--frames` or by a crash was not — and the reason the picture at the end
+     * is of wherever the input stopped rather than of the movie's last frame. */
+    if (movie)
+        printf("  movie: %lu of %lu frames played%s, offset %+ld\n",
+               movie_played, movie_frames,
+               movie_played == movie_frames ? " (to the end)" : "",
+               movie_offset);
     printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",
            mars_cpu[0].pc, mars_cpu[1].pc);
     /* The reference figures are steady-frame rates, so a run that includes the
@@ -1290,18 +1596,9 @@ int main(int argc, char **argv) {
     }
 
     if (headless_frames) {
-        render(px);
-        FILE *o = fopen("build/frame.ppm", "wb");
-        if (o) {
-            fprintf(o, "P6\n%d %d\n255\n", W, H);
-            for (int i = 0; i < W * H; i++) {
-                uint8_t rgb[3] = { (uint8_t)(px[i] >> 16), (uint8_t)(px[i] >> 8),
-                                   (uint8_t)px[i] };
-                fwrite(rgb, 1, 3, o);
-            }
-            fclose(o);
-            printf("  wrote build/frame.ppm\n");
-        }
+        render_frame(px);
+        write_ppm("build/frame.ppm", px);
+        printf("  wrote build/frame.ppm\n");
     } else {
         SDL_DestroyTexture(tex); SDL_DestroyRenderer(ren);
         SDL_DestroyWindow(win); SDL_Quit();

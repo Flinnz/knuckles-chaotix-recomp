@@ -3,6 +3,7 @@ toolchain/build/
 toolchain/sh-elf/
 roms/*.32x
 roms/*.bin
+roms/*.bk2
 roms/*.log
 roms/*.ram
 __pycache__/

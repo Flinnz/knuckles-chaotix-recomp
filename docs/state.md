@@ -127,6 +127,83 @@ Sound: all three sources play. At 1,800 frames the PWM is 2,562 RMS, the PSG
 Speed: 1,800 frames headless in 2.4 s, about 12x real time. With a window the
 audio device paces it to the machine's speed.
 
+## Recorded input
+
+`tools/bk2.py` turns a BizHawk `.bk2` into one line of input per frame and
+`--movie` plays it back; `make tas` does both for whatever `.bk2` is in `roms/`.
+
+The one to hand is `tuffcrackerv3-knuckleschaotix-tuffcracker.bk2`: 111,397
+frames, 31 minutes, recorded on PicoDrive against the JU cartridge. It plays to
+the end in 3.7 minutes. **`--movie-offset 500` is the value to use**; 0 does not
+start a game at all.
+
+```
+./build/mars --movie build/tuffcrackerv3-knuckleschaotix-tuffcracker.movie \
+    --movie-offset 500 --frames movie --progress 2000 --shots 1000
+```
+
+At offset 500, over all 111,897 frames:
+
+| | |
+|---|---|
+| frames played | 111,397 of 111,397 |
+| commands | 89,478 posted, 89,479 serviced |
+| missing blocks | none |
+| stall reports | none |
+| unmapped | sh2 0, 68k 1 (the mapper register at `0xA130F0`) |
+| rates a frame | master 235,011 / slave 380,583 / 68000 11,748 — the reference's to within 0.15% |
+| how far it plays | the save select, then Isolated Island for 10 minutes of level clock |
+| special stages | none — all 55 `--progress` lines read `v 0/0`, and only the special stage enables the 32X vertical interrupt |
+
+**Why the offset is load-bearing.** The movie was recorded against the real 32X
+firmware, which this runtime stands in for rather than runs, so movie frame 0 is
+not our frame 0. The movie's whole menu sequence is four single-frame Start
+presses, at movie frames 162, 328, 361 and 459, and at offset 0 they land on the
+SEGA logo and the intro instead of the title. The save select is then never
+reached — bitmap mode is `0081` on all 55 progress lines of a 31-minute run, and
+`0001` is the save select — so nothing the movie does after frame 633 is playing
+the game, and the levels such a run shows are **attract-mode demos**.
+
+Offsets 400-700 all get through, and 500 is the middle of that plateau. Below 400
+it is patchy: 225, 300 and 375 fail where their neighbours pass, a single-frame
+press falling in a window a few frames wide.
+
+**It still desyncs inside the level.** At 500 the menu is entered once and never
+returned to, the level clock runs 0'13" to 9'50" over frames 2,000 to 40,000, and
+the score stays 0 throughout — the character is being driven and is not
+progressing — and Isolated Island ends on TIME OVER at 9'59".
+
+Measured, in movie coordinates: our menu screen ends at movie frame **420 or 520**
+depending on the offset and at nothing in between, and our level's first frame is
+movie frame **665** where the movie's first gameplay input is at **633**. A global
+offset cannot close those 32 frames, because it moves the movie's presses and the
+level start together and the phases it can reach are 100 frames apart.
+
+`--movie-resync 1160:633` is what aligns it, and phase alone is not enough:
+sweeping the movie frame from 601 to 673 changes the run substantially — 82-86% of
+pixels differ at frame 6,000 — and the score stays 0 in every one. Two things sit
+upstream of the phase and would have to be settled first:
+
+* **The movie pauses the game.** Its Start presses at movie frames 2329 and 5726
+  are a pause and an unpause, so at offset 500 our frames 2,829-6,226 are paused.
+  Any probe window has to avoid them.
+* **The menu path is not the movie's.** The `0001` screen is SCENARIO QUEST, and
+  our run leaves it at movie frame 420 or 520 while the movie's own confirming
+  press is at 459 — so different presses are ending it, and what the game enters
+  the level with need not be what was recorded. If the character pair or the
+  one/two-player mode differs, the physics differ from level frame 1 and no
+  alignment can sync.
+
+`--shots N` writes `build/shots/fNNNNNN.ppm` through the run, which is how a
+31-minute run gets looked at. `ffmpeg -pattern_type glob -i 'build/shots/*.ppm'
+build/tas.mp4` makes it a video.
+
+`--show-input` puts the pad on the picture, bottom left: the twelve buttons lit as
+they are held, a second row when the movie has two players, and the two frame
+counters. It is the direct answer to "is this input reaching the game" — at
+`F1191 M691` in Isolated Island the display shows `R` and `C` lit, which is what
+movie frame 691 holds. `make tas` turns it on, so every shot carries it.
+
 ## Command line
 
 ```
@@ -136,10 +213,16 @@ audio device paces it to the machine's speed.
 | Flag | Effect |
 |---|---|
 | `--frames N` | headless, N frames, writes `build/frame.ppm` |
+| `--frames movie` | headless for exactly as long as `--movie` is |
 | `--interp` / `--recomp` | Musashi or recompiled 68000 (recompiled is the default) |
 | `--hold LIST` | hold buttons from frame 0 (`up,down,left,right,a,b,c,start,x,y,z,mode`) |
 | `--press LIST` | pulse buttons, 15 frames in every 45 — what a menu needs |
 | `--press-until N` | stop pulsing at frame N, so a run can sit on the screen it reached |
+| `--movie FILE` | play a recorded run, one line of input per frame, from `tools/bk2.py` |
+| `--movie-offset N` | which of our frames plays the movie's frame 0; negative skips into it |
+| `--movie-resync OURS:MOVIE` | from our frame OURS, play movie frame MOVIE — re-align part way in; repeatable, last match wins |
+| `--shots N` | a rendered frame every N frames, into `build/shots/` |
+| `--show-input` | draw the pad on the picture — the twelve letters lit as held, our frame `F` and the movie frame `M` it played, so `F` minus the offset is `M`. In the window, in `--shots` and in `build/frame.ppm` |
 | `--layers N` | 1 plane B, 2 plane A, 4 sprites, 8 the 32X bitmap |
 | `--sound N` | 1 PWM, 2 PSG, 4 YM2612 |
 | `--audio` / `--mute` | force a device on / off |
@@ -171,9 +254,13 @@ Keyboard, windowed: arrows, `Z`/`X`/`C` = A/B/C, `A`/`S`/`D` = X/Y/Z, `Enter`
 | `tools/refrate.py`, `tools/refpoll.py`, `tools/refframe.py` | measurements taken from the reference logs |
 | `tools/test_recomp.py`, `tools/test_recomp68k.py`, `tools/test_psg.py` | semantics and arithmetic tests |
 | `tools/validate_decoder.py`, `tools/validate_m68k.py` | decoders against objdump |
+| `tools/bk2.py` | a BizHawk `.bk2` movie to one line of input per frame |
 
 Reference logs live in `roms/*.log` (6.5 GB, not in the repository); the
 extracts the gates read are rebuilt into `build/` on demand.
+
+`make tas` plays whatever `.bk2` is in `roms/` — headless, with `--progress` and
+`--shots`. It is not part of `check`; see Recorded input below.
 
 ## Open
 

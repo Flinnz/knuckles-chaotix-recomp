@@ -122,16 +122,22 @@ typedef struct {
     uint8_t  vint_pending;   /* VDP status bit 7, until the 68000 acknowledges */
     uint8_t  vint_irq;       /* the request line, until the acknowledge cycle */
     uint8_t  pad_cycle[3], pad_th[3];   /* six-button pad sequencing */
-    unsigned pad_buttons;    /* what player one is holding; see PAD_* below */
+    /* What each port is holding; see PAD_* below. One per port rather than one
+     * for player one, because a movie has two players in it: the .bk2 this was
+     * built for presses port 2's Start on exactly one frame, and a port that
+     * can only ever read empty is a port that cannot replay it. Port 3 is the
+     * EXT connector and nothing ever fills it. */
+    unsigned pad_buttons[3];
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
 } Gen;
 
 extern Mars mars;
 extern Gen gen;
 
-/* The twelve lines of a six-button pad, as `gen.pad_buttons` holds them. Set
- * from the keyboard once a frame in src/mars_main.c; nothing sets it in a
- * headless run, so every trace comparison still sees an untouched pad. */
+/* The twelve lines of a six-button pad, as `gen.pad_buttons[port]` holds them.
+ * Set from the keyboard, from `--hold`/`--press`, or from a movie once a frame in
+ * src/mars_main.c; nothing sets it in a headless run that asked for none of
+ * those, so every trace comparison still sees an untouched pad. */
 #define PAD_U 0x001u
 #define PAD_D 0x002u
 #define PAD_L 0x004u

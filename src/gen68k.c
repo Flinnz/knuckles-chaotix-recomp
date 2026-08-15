@@ -199,7 +199,8 @@ static uint8_t pad_lines(unsigned port, int th) {
     if (!th && gen.pad_cycle[port] == 3) drives = 0x30;          /* S A 0 0 0 0 */
     if (!th && gen.pad_cycle[port] == 4) drives = 0x30, forced = 0x0F;
 
-    unsigned held = port == 0 ? gen.pad_buttons : 0;
+    unsigned held = port < sizeof gen.pad_buttons / sizeof *gen.pad_buttons
+                  ? gen.pad_buttons[port] : 0;
     uint8_t v = (uint8_t)(0x40 | forced);       /* TH; the caller masks it out */
     for (unsigned i = 0; i < 6; i++) {
         uint8_t line = (uint8_t)(0x20u >> i);
