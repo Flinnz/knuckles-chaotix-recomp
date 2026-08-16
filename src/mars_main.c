@@ -565,16 +565,31 @@ static void handoff(SH2 *c, int slave) {
  * Drive half is the whole interface, has it at 0x0001. Composited the one way
  * for both, the save select is a screen of brown diamonds and nothing else.
  *
- * With the Mega Drive in front the 32X shows through where the Mega Drive left
- * the backdrop, which is what `opaque` records — not "is this pixel the
- * backdrop colour" but "did any plane or sprite put something here".
+ * **And it is per dot, not per screen.** A 32X colour is fifteen bits; the top
+ * bit is that dot's priority, and the register's bit 7 *inverts* it — so the
+ * one register picks which way round the bit reads rather than settling the
+ * whole picture. The game needs both on one screen and says so: in a level the
+ * sky and sea it draws carry bit 15 set and the HUD over them does not, and on
+ * the player select — where the register has the Mega Drive in front — the
+ * brick background does not and the character sprites do. Taking the register
+ * alone the sky covered the whole level layout, which the Mega Drive planes
+ * were holding all along, and the name plate covered the character.
+ *
+ * Where the 32X dot is behind it shows through where the Mega Drive left the
+ * backdrop, which is what `opaque` records — not "is this pixel the backdrop
+ * colour" but "did any plane or sprite put something here". Hardware compares
+ * the colour, having only the Mega Drive's own output to look at; the two
+ * readings agree here, because a drawn pixel's index is `palette * 16 + value`
+ * with a nonzero value and this game's backdrop is 0x00 or 0x30.
  */
 static void render(uint32_t *px) {
     static uint8_t md_opaque[W * H];
     genvdp_render(px, W, H, md_opaque);
 
     unsigned mode = mars.bitmap_mode & 3;
-    int mars_front = (mars.bitmap_mode & 0x0080u) != 0;
+    /* The dot is in front when its priority bit, inverted by the register's,
+     * comes out set. */
+    uint16_t pri_inv = (mars.bitmap_mode & 0x0080u) ? 0x8000u : 0u;
     if (!(gen.layers & 8)) return;              /* 32X layer switched off */
     if (mode != 1 && mode != 2) return;         /* blank: Mega Drive only */
     const uint8_t *fb = mars_fb_shown();
@@ -591,7 +606,6 @@ static void render(uint32_t *px) {
         uint32_t base = (entry * 2u) & 0x1FFFFu;
         for (int x = 0; x < W; x++) {
             uint16_t col;
-            if (!mars_front && md_opaque[y * W + x]) continue;
             if (mode == 1) {
                 uint8_t idx = fb[(base + (uint32_t)x) & 0x1FFFFu];
                 if (!idx) continue;
@@ -601,6 +615,7 @@ static void render(uint32_t *px) {
                 col = (uint16_t)((fb[o] << 8) | fb[o + 1]);
                 if (!col) continue;
             }
+            if (!((col ^ pri_inv) & 0x8000u) && md_opaque[y * W + x]) continue;
             unsigned r = col & 0x1F, g = (col >> 5) & 0x1F, b = (col >> 10) & 0x1F;
             px[y * W + x] = 0xFF000000u | ((r * 255 / 31) << 16)
                           | ((g * 255 / 31) << 8) | (b * 255 / 31);
