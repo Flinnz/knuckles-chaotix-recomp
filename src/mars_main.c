@@ -24,6 +24,7 @@
 #include "mars.h"
 #include "sound.h"
 #include "genz80.h"
+#include "xcheck.h"
 #include "m68k.h"
 #include "m68000.h"
 
@@ -431,12 +432,17 @@ static void cpu_run(unsigned cycles) {
      * is the credit carried to the next hand-over. */
     uint32_t insns0 = m68k_insns;
     int known = 1;
+    xchk_running(1);
     rc_pc = m68k_run(&rcpu, rc_pc, (unsigned)cpu_credit, &known);
+    xchk_running(0);
     cpu_credit = m68k_fuel;
     cpu_insns += m68k_insns - insns0;
     if (known) return;
     if (!rc_missing++) rc_missing_at = rc_pc;
     rc_count(rc_pc);
+    /* The interpreter is about to run instructions of its own, so the block
+     * still armed is not followed by the block that would have followed it. */
+    xchk_break();
     to_musashi();
     /* Run the interpreter to the end of the *gap*, not to the end of the slice.
      *
@@ -470,6 +476,10 @@ static void cpu_poll_irq(void) {
     if (!gen.vint_irq) return;
     if (!use_recomp) { m68k_set_irq(6); return; }
     if (!m68k_interrupt(&rcpu, &rc_pc, 6)) return;
+    /* The exception frame is pushed between two blocks, so the next block is
+     * the handler's rather than the armed one's successor, and its registers
+     * carry a stack the armed block never touched. */
+    xchk_break();
     gen.vint_pending = gen.vint_irq = 0;
     /* Taking it costs 44 cycles on a 68000 — the stacking and the vector fetch
      * — which Musashi charges out of its exception table and this did not. It
@@ -1080,6 +1090,7 @@ int main(int argc, char **argv) {
     const char *tracez80 = NULL, *dump_z80 = NULL, *tracechips = NULL;
     unsigned long tracez80_lines = 400000;
     int mute = 0, audio = 0;
+    int xcheck = 0, xcheck_stop = 0;
     unsigned long trace68k_lines = 400000, tracesh2_lines = 400000;
     unsigned hold = 0;
     /* `--hold` is a button held down from the first frame, which is what the
@@ -1199,6 +1210,10 @@ int main(int argc, char **argv) {
             savepath = argv[++i];
         else if (!strcmp(argv[i], "--no-save"))
             no_save = 1;
+        else if (!strcmp(argv[i], "--xcheck"))
+            xcheck = 1;
+        else if (!strcmp(argv[i], "--xcheck-stop"))
+            xcheck = xcheck_stop = 1;
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -1306,6 +1321,18 @@ int main(int argc, char **argv) {
     gen.vint_pending = 1;
     printf("68000 reset: PC=0x%06X  (%s)\n", cpu_pc(),
            use_recomp ? "recompiled" : "Musashi");
+    if (xcheck && !use_recomp) {
+        fprintf(stderr, "--xcheck needs the recompiled 68000: it re-runs each "
+                        "recompiled block on Musashi, and --interp has no "
+                        "blocks to re-run.\n");
+        return 1;
+    }
+    if (xcheck) {
+        xchk_start(xcheck_stop);
+        printf("xcheck: every recompiled block re-run on Musashi from the same "
+               "registers%s\n", xcheck_stop ? ", stopping on the first "
+                                              "divergence" : "");
+    }
     if (trace68k && !trace68k_open(trace68k, trace68k_lines, use_recomp))
         return 1;
 
@@ -1360,6 +1387,7 @@ int main(int argc, char **argv) {
          * post-boot comparison out by however far into its wait loop the engine
          * had got. */
         trace_armed = frames >= trace_from;
+        xchk_set_frame(frames);
         gen68k_frame_start();
         unsigned pulse = press && (!press_until || frames < press_until)
                       && frames % 45 < 15 ? press : 0;
@@ -1718,6 +1746,8 @@ int main(int argc, char **argv) {
         if (rc_missing) rc_report();
     }
 
+    xchk_report();
+
     if (headless_frames) {
         render_frame(px);
         write_ppm("build/frame.ppm", px);
@@ -1726,5 +1756,7 @@ int main(int argc, char **argv) {
         SDL_DestroyTexture(tex); SDL_DestroyRenderer(ren);
         SDL_DestroyWindow(win); SDL_Quit();
     }
-    return 0;
+    /* A divergence is a failed run, not a remark, so that `--xcheck` is a gate
+     * on its own without a tool around it to read the output. */
+    return xchk_failed();
 }

@@ -89,8 +89,17 @@
  * and m68k_read_pcrelative_xx() for PC-relative addressing.
  * If off, all read requests from the CPU will be redirected to m68k_read_xx()
  */
+/* ON here, and the two paths land in the same place in src/gen68k.c during an
+ * ordinary run — so this changes nothing about how the game plays. It is on for
+ * `--xcheck`, which re-runs a recompiled block on Musashi and must be able to
+ * tell an opcode fetch from a data access: the block's data accesses are served
+ * from what the recompiled code already did, because a read on this machine has
+ * side effects and doing it twice is not the same as doing it once, while the
+ * fetches have to reach the real bytes at the real address. That distinction is
+ * the whole gate — the banked window is a case of the two disagreeing about
+ * which bytes an address holds. */
 #ifndef M68K_SEPARATE_READS
-#define M68K_SEPARATE_READS         M68K_OPT_OFF
+#define M68K_SEPARATE_READS         M68K_OPT_ON
 #endif
 
 /* If ON, the CPU will call m68k_write_32_pd() when it executes move.l with a
@@ -259,8 +268,17 @@ int gen68k_int_ack(int level);
  * chip has some enabled PMMU added to every memory access, so enable this only
  * if it's useful.
  */
+/* OFF. There is no PMMU on a 68000 — it is the 68851 and the 030's on-chip
+ * version — so `PMMU_ENABLED` is false here on every access and this only ever
+ * added the test. It has to go off for another reason too: with it on, Musashi's
+ * separate-reads path does not compile. `m68ki_read_imm_16` takes no argument
+ * and the PMMU block inside it translates one called `address`, which exists
+ * only in the ordinary read path it was copied from — a combination upstream
+ * has evidently never built. Turning off a unit this CPU does not have is the
+ * honest fix rather than the workaround; the reference diffs are byte-identical
+ * across the change, which is what says nothing else moved. */
 #ifndef M68K_EMULATE_PMMU
-#define M68K_EMULATE_PMMU           M68K_OPT_ON
+#define M68K_EMULATE_PMMU           M68K_OPT_OFF
 #endif
 
 /* ----------------------------- COMPATIBILITY ---------------------------- */

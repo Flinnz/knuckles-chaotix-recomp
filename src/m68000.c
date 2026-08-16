@@ -18,7 +18,7 @@
  * interpreter names an address. Below 0x400000 the two are the same number,
  * which is why the boot ran either way and hid this until the engine proper
  * was reached through the 0x880000 window. */
-static uint32_t canon68k(uint32_t a) {
+uint32_t canon68k(uint32_t a) {
     /* The first 256 bytes are the adapter's, not the cartridge's: the vectors
      * plus the BIOS helper the game calls at 0x0000C0, which src/gen68k.c
      * assembles. Recompiled code holds the cartridge image of that region — a
@@ -54,6 +54,7 @@ static int lookup(uint32_t addr) {
 int32_t m68k_fuel;
 uint32_t m68k_insns;
 
+
 /* `budget` is cycles, and it is spent inside the blocks rather than counted
  * here — see M68K_BLOCK in m68000.h. It was transfers once, which could not
  * bound a poll loop at all, because an intra-function loop is a `goto` in the
@@ -75,6 +76,10 @@ uint32_t m68k_run(M68K *c, uint32_t addr, unsigned budget, int *known) {
             if (known) *known = 0;
             return addr;
         }
+        /* The one place an address and an offset are both in hand. Everything
+         * past here is offsets, so this is where `--xcheck` gets to ask whether
+         * the fold was right about which bytes that address holds. */
+        if (xchk_dispatch && addr != off) xchk_dispatch(addr, off);
         addr = m68k_functions[i].fn(c, off);
         if (addr == M68K_YIELD) {
             if (known) *known = 1;

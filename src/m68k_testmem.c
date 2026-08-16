@@ -36,6 +36,13 @@ int gen68k_int_ack(int level) {
 int m68k_trace;
 void m68k_block(const M68K *c, uint32_t addr) { (void)c; (void)addr; }
 
+/* And the same for `--xcheck`'s two hooks, which src/xcheck.c fills in for the
+ * runtime. Nothing here needs them: these tests already are the comparison the
+ * gate makes, one instruction at a time against the same interpreter, so they
+ * stay null and the generated code's branch never taken. */
+void (*xchk_hook)(const M68K *, uint32_t, unsigned);
+void (*xchk_dispatch)(uint32_t, uint32_t);
+
 unsigned int m68k_read_memory_8(unsigned int a) {
     return a < MEM_SIZE ? mem[a] : 0;
 }
@@ -57,6 +64,15 @@ void m68k_write_memory_32(unsigned int a, unsigned int v) {
     m68k_write_memory_16(a, v >> 16);
     m68k_write_memory_16(a + 2, v & 0xFFFF);
 }
+
+/* M68K_SEPARATE_READS is on in src/m68kconf.h so that `--xcheck` can tell an
+ * opcode fetch from a data access. There is one flat array here and no reason
+ * to tell them apart, so both doors lead to the same room. */
+unsigned int m68k_read_immediate_16(unsigned int a) { return m68k_read_memory_16(a); }
+unsigned int m68k_read_immediate_32(unsigned int a) { return m68k_read_memory_32(a); }
+unsigned int m68k_read_pcrelative_8(unsigned int a) { return m68k_read_memory_8(a); }
+unsigned int m68k_read_pcrelative_16(unsigned int a) { return m68k_read_memory_16(a); }
+unsigned int m68k_read_pcrelative_32(unsigned int a) { return m68k_read_memory_32(a); }
 
 static void load(const char *path, uint32_t base) {
     memset(mem, 0, sizeof mem);

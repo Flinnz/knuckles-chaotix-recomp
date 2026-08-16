@@ -16,11 +16,20 @@
 #include "mars.h"
 #include "sound.h"
 #include "genz80.h"
+#include "xcheck.h"
 #include "m68k.h"
 
 Gen gen;
 
 #define IN(a, lo, hi) ((a) >= (lo) && (a) < (hi))
+
+/* The address space proper. The `m68k_*` entry points at the bottom of this
+ * file are a skin over these; everything in here calls these, so that what the
+ * machine does on its own account stays out of the `--xcheck` record. */
+static unsigned gen_read_8(unsigned int a);
+static unsigned gen_read_16(unsigned int a);
+static unsigned gen_read_32(unsigned int a);
+static void gen_write_16(unsigned int a, unsigned int v);
 
 /* The adapter's 68000-side vector RAM: 256 bytes at 0x000000 that the 32X
  * supplies in place of the cartridge, holding the exception vectors plus a
@@ -328,7 +337,7 @@ static void vdp_dma(void) {
     if (gen.vdpreg[23] & 0x80) return;      /* fill / copy: not needed yet */
     gen.dma_lines1000 += dma_lines1000(len);
     for (uint32_t i = 0; i < len; i++) {
-        uint16_t v = (uint16_t)m68k_read_memory_16(src);
+        uint16_t v = (uint16_t)gen_read_16(src);
         uint32_t a = gen.vdp_addr & 0xFFFFu;
         if ((gen.vdp_code & 7) == 1) {      /* to VRAM */
             gen.vram[a & 0xFFFEu] = (uint8_t)(v >> 8);
@@ -415,7 +424,7 @@ static uint16_t vdp_status(void) {
     if (gen.line >= 224 || !(gen.vdpreg[1] & 0x40)) s |= 0x0008;
     if ((gen.ticks++ % 20) >= 16) s |= 0x0004;
     if (gen.vint_pending) s |= 0x0080;
-    s |= (uint16_t)m68k_read_memory_16(m68k_get_reg(NULL, M68K_REG_PC)) & 0xFC00u;
+    s |= (uint16_t)gen_read_16(m68k_get_reg(NULL, M68K_REG_PC)) & 0xFC00u;
     return s;
 }
 
@@ -549,7 +558,19 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
 }
 
 /* ------------------------------------------------------------ callbacks --- */
-unsigned int m68k_read_memory_8(unsigned int a) {
+/* The address space itself, below the recording layer.
+ *
+ * `--xcheck` re-runs a recompiled block on Musashi and has to serve that run's
+ * data accesses from what the recompiled code already did rather than let it
+ * touch the machine a second time — a read here is not idempotent (the comm
+ * registers hand the cartridge its checksum on one, the VDP's data port and HV
+ * counter both move), so doing it twice is not the same as doing it once. So
+ * the six public entry points are a thin skin over these, and everything
+ * *inside* this file calls these directly: a DMA the write to 0xC00004 starts,
+ * or the open-bus word `vdp_status` reads at the PC, are the machine's own
+ * business and not accesses the 68000 made.
+ */
+static unsigned gen_read_8(unsigned int a) {
     a &= 0xFFFFFFu;
     if (a < sizeof gen.vecram) return gen.vecram[a];
     unsigned si;
@@ -562,10 +583,10 @@ unsigned int m68k_read_memory_8(unsigned int a) {
     if (IN(a, 0xFF0000u, 0x1000000u)) return gen.ram[a & 0xFFFFu];
     uint8_t b;
     if (genz80_read(a, &b)) return b;
-    return (unsigned)(m68k_read_memory_16(a & ~1u) >> ((a & 1) ? 0 : 8)) & 0xFF;
+    return (unsigned)(gen_read_16(a & ~1u) >> ((a & 1) ? 0 : 8)) & 0xFF;
 }
 
-unsigned int m68k_read_memory_16(unsigned int a) {
+static unsigned gen_read_16(unsigned int a) {
     a &= 0xFFFFFEu;
     if (a < sizeof gen.vecram)
         return ((unsigned)gen.vecram[a] << 8) | gen.vecram[a + 1];
@@ -599,11 +620,11 @@ unsigned int m68k_read_memory_16(unsigned int a) {
     return 0;
 }
 
-unsigned int m68k_read_memory_32(unsigned int a) {
-    return (m68k_read_memory_16(a) << 16) | m68k_read_memory_16(a + 2);
+static unsigned gen_read_32(unsigned int a) {
+    return (gen_read_16(a) << 16) | gen_read_16(a + 2);
 }
 
-void m68k_write_memory_8(unsigned int a, unsigned int v) {
+static void gen_write_8(unsigned int a, unsigned int v) {
     a &= 0xFFFFFFu;
     if (a < sizeof gen.vecram) { gen.vecram[a] = (uint8_t)v; return; }
     unsigned si;
@@ -634,13 +655,13 @@ void m68k_write_memory_8(unsigned int a, unsigned int v) {
         if (!(v & 1)) gen68k_sram_commit();
         return;
     }
-    uint16_t cur = (uint16_t)m68k_read_memory_16(a & ~1u);
+    uint16_t cur = (uint16_t)gen_read_16(a & ~1u);
     uint16_t nv = (a & 1) ? (uint16_t)((cur & 0xFF00) | (v & 0xFF))
                           : (uint16_t)((cur & 0x00FF) | ((v & 0xFF) << 8));
-    m68k_write_memory_16(a & ~1u, nv);
+    gen_write_16(a & ~1u, nv);
 }
 
-void m68k_write_memory_16(unsigned int a, unsigned int v) {
+static void gen_write_16(unsigned int a, unsigned int v) {
     a &= 0xFFFFFEu;
     uint16_t w = (uint16_t)v;
     if (a < sizeof gen.vecram) {
@@ -680,7 +701,85 @@ void m68k_write_memory_16(unsigned int a, unsigned int v) {
     if (gen.unknown_w++ < 12) fprintf(stderr, "  [68k] write 0x%06X = %04X\n", a, w);
 }
 
-void m68k_write_memory_32(unsigned int a, unsigned int v) {
-    m68k_write_memory_16(a, v >> 16);
-    m68k_write_memory_16(a + 2, v & 0xFFFF);
+static void gen_write_32(unsigned int a, unsigned int v) {
+    gen_write_16(a, v >> 16);
+    gen_write_16(a + 2, v & 0xFFFF);
 }
+
+/* --- the public entry points, and the recording layer ---------------------
+ *
+ * One log entry per call the 68000 made, at exactly the size it made it: the
+ * recompiled code's `M68K_R32` and Musashi's `move.l` both arrive here as one
+ * 32-bit read, so record and replay see the same sequence even though the
+ * implementation below splits it in two.
+ *
+ * A replay never reaches `gen_*` at all. That is the point — it is being served
+ * what the block already did, and any access it makes that the block did not,
+ * or makes at a different address or size or with a different value, is the
+ * divergence the gate is looking for.
+ */
+unsigned int m68k_read_memory_8(unsigned int a) {
+    if (xchk_mode == XCHK_REPLAY) return xchk_read(1, a);
+    unsigned v = gen_read_8(a);
+    if (xchk_mode == XCHK_RECORD) xchk_saw_read(1, a, v);
+    return v;
+}
+
+unsigned int m68k_read_memory_16(unsigned int a) {
+    if (xchk_mode == XCHK_REPLAY) return xchk_read(2, a);
+    unsigned v = gen_read_16(a);
+    if (xchk_mode == XCHK_RECORD) xchk_saw_read(2, a, v);
+    return v;
+}
+
+unsigned int m68k_read_memory_32(unsigned int a) {
+    if (xchk_mode == XCHK_REPLAY) return xchk_read(4, a);
+    unsigned v = gen_read_32(a);
+    if (xchk_mode == XCHK_RECORD) xchk_saw_read(4, a, v);
+    return v;
+}
+
+void m68k_write_memory_8(unsigned int a, unsigned int v) {
+    if (xchk_mode == XCHK_REPLAY) { xchk_write(1, a, v); return; }
+    if (xchk_mode == XCHK_RECORD) xchk_saw_write(1, a, v);
+    gen_write_8(a, v);
+}
+
+void m68k_write_memory_16(unsigned int a, unsigned int v) {
+    if (xchk_mode == XCHK_REPLAY) { xchk_write(2, a, v); return; }
+    if (xchk_mode == XCHK_RECORD) xchk_saw_write(2, a, v);
+    gen_write_16(a, v);
+}
+
+void m68k_write_memory_32(unsigned int a, unsigned int v) {
+    if (xchk_mode == XCHK_REPLAY) { xchk_write(4, a, v); return; }
+    if (xchk_mode == XCHK_RECORD) xchk_saw_write(4, a, v);
+    gen_write_32(a, v);
+}
+
+/* --- what the 68000 fetches, as opposed to what it reads ------------------
+ *
+ * M68K_SEPARATE_READS in src/m68kconf.h routes Musashi's opcode words, its
+ * immediates and its PC-relative operands here instead of through
+ * `m68k_read_memory_*`. In an ordinary run the two are the same thing and this
+ * costs a jump; under `--xcheck` it is the distinction the gate rests on. A
+ * shadow run is re-executing bytes that the recompiler translated statically,
+ * and the question being asked is whether those are the bytes actually at that
+ * address *now* — so a fetch has to reach the real machine, through the bank
+ * register and the mapper and everything else `rom_at` knows about, where a
+ * data access must not.
+ *
+ * The recompiled side has no fetches to record: its instructions are C.
+ *
+ * Only the *fetches* bypass, though. A PC-relative operand — `move.b (d16,pc)`,
+ * which this cartridge's tables are full of — is data the instruction went and
+ * got, and the recompiler asks for it by the absolute address it worked out at
+ * build time. Musashi reaches it through a different door for its own reasons,
+ * and it has to arrive in the same record or the shadow looks like it read
+ * nothing where the block read a byte.
+ */
+unsigned int m68k_read_immediate_16(unsigned int a) { return gen_read_16(a); }
+unsigned int m68k_read_immediate_32(unsigned int a) { return gen_read_32(a); }
+unsigned int m68k_read_pcrelative_8(unsigned int a) { return m68k_read_memory_8(a); }
+unsigned int m68k_read_pcrelative_16(unsigned int a) { return m68k_read_memory_16(a); }
+unsigned int m68k_read_pcrelative_32(unsigned int a) { return m68k_read_memory_32(a); }

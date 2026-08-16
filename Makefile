@@ -85,11 +85,12 @@ CFLAGS  = $(BASECF) $(SDLCF)
 # a bare 68000, so softfloat.c is part of the build regardless of CPU type.
 SRC = build/sh2_recomp.c build/m68k_recomp.c src/m68000.c \
       src/mem32x.c src/gen68k.c src/genvdp.c src/z80.c src/genz80.c \
-      src/psg.c src/sound.c $(NUKED)/ym3438.c src/trace68k.c src/mars_main.c \
+      src/psg.c src/sound.c $(NUKED)/ym3438.c src/trace68k.c src/xcheck.c \
+      src/mars_main.c \
       $(MUSASHI)/m68kcpu.c $(GEN)/m68kops.c $(MUSASHI)/softfloat/softfloat.c
 
 build/mars$(EXE): $(SRC) src/mars.h src/sh2.h src/sound.h src/psg.h src/z80.h src/genz80.h \
-            src/m68000.h src/m68kconf.h Makefile $(GEN)/m68kops.c
+            src/m68000.h src/m68kconf.h src/xcheck.h Makefile $(GEN)/m68kops.c
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(SDLLD) $(LIBM)
 
 # The generated C is a function of the front end and the code generator, so
@@ -304,6 +305,14 @@ check: build/mars$(EXE)
 	    --trace68k-lines 6000000 >/dev/null
 	python3 tools/diff68k.py --blocks --ours build/trace68k_rc.txt \
 	    --window 400000 --rows 0 --detail 0
+# The two 68000 backends against each other, which is the one oracle here that
+# does not need the reference logs and therefore does not stop at 1.7 seconds.
+# 2,400 frames is ten seconds and reaches a level through the save select; it
+# needs nothing but the cartridge, so unlike the session gate below it cannot
+# skip. The run exits non-zero on a divergence, so no tool is needed around it.
+	./build/mars$(EXE) --xcheck --frames 2400 --press start --press-until 350 \
+	    --no-save > build/xcheck.log
+	@grep '  xcheck:' build/xcheck.log
 	python3 tools/disasm68k.py coverage
 	python3 tools/test_session.py
 	@echo "all gates pass"

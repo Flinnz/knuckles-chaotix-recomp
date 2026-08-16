@@ -203,9 +203,33 @@ void m68k_block(const M68K *c, uint32_t addr);
  * on is charged on its own edge instead — Musashi's table holds the *taken*
  * cost of a `bcc` and adjusts on the other side, and the generated code emits
  * both sides, so it can do the same. */
+/* `xchk_hook` is null unless `--xcheck` is on, where it settles the block before
+ * this one against Musashi and arms this one. It is a pointer rather than a call
+ * so that a build nobody asked to check pays one predictable not-taken branch in
+ * the hottest macro in the program, the same as the trace above.
+ *
+ * It is given the offset, because that is the coordinate this whole side of the
+ * machine works in: a block returns an offset, a `bsr` pushes one, and an
+ * address only exists where the interpreter hands one over. Whether the offset
+ * was the *right* offset for the address it came from is a separate question,
+ * and `xchk_dispatch` below is where it is asked.
+ */
+extern void (*xchk_hook)(const M68K *, uint32_t off, unsigned n);
+
+/* Called from m68k_run for a transfer whose address is not its own offset —
+ * which is to say, one that crosses a window. See src/xcheck.c. */
+extern void (*xchk_dispatch)(uint32_t addr, uint32_t off);
+
+/* An address as the front end names it: a cartridge offset, or 0xFFFFFFFF for
+ * the regions no static translation can name. `--xcheck` needs it to read the
+ * shadow's absolute jump targets in the coordinate the generated code emits
+ * them in — and separately checks that the fold itself is true. */
+uint32_t canon68k(uint32_t a);
+
 #define M68K_BLOCK(c, a, n, cyc) do {                           \
     if (m68k_fuel <= 0) { (c)->pc = (a); return M68K_YIELD; }   \
     if (m68k_trace) m68k_block((c), (a));                       \
+    if (xchk_hook) xchk_hook((c), (a), (n));                    \
     m68k_fuel -= (cyc);                                         \
     m68k_insns += (n);                                          \
 } while (0)
