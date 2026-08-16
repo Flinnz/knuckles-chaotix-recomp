@@ -353,11 +353,21 @@ def decode(fetch, addr, emit=False):
                 return bad()
             sz = (1, 2, 4)[szf]
             # ORI/ANDI/EORI to CCR (#imm,%ccr) and to SR (#imm,%sr)
+            # The immediate is in the extension word, and it has to be *kept*:
+            # these two forms are the only ones here that carried theirs in the
+            # operand text alone, so the recompiler had nothing to read and took
+            # the low byte of the opcode word instead — 0x3C, the "to CCR"
+            # selector, in place of whatever was written. `ori #1,ccr` before an
+            # `rts` returns a flag in C, and what ran set X, N and Z and cleared
+            # C, which is the opposite answer. The listing round-trip could not
+            # see it because the text was right all along.
             if w & 0xFF == 0x3C and name in ("ori", "andi", "eori"):
                 raw = cur.word() & 0xFF
+                cur.imm = _s8(raw)
                 return done(name + "b", f"#{raw if emit else _s8(raw)},%ccr")
             if w & 0xFF == 0x7C and name in ("ori", "andi", "eori"):
-                return done(name + "w", f"#{_s16(cur.word())},%sr")
+                cur.imm = _s16(cur.word())
+                return done(name + "w", f"#{cur.imm},%sr")
             if not is_data_alt(mode, reg):
                 return bad()
             # Same rule as an immediate EA: the byte form uses only the low

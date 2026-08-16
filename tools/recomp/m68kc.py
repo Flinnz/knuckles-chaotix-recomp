@@ -541,8 +541,11 @@ class Codegen:
             return out
         if m in ("orib", "andib", "eorib") and ins.ops.endswith(",%ccr"):
             op = {"orib": "|", "andib": "&", "eorib": "^"}[m]
+            # The instruction's own immediate, not the low byte of its opcode.
+            # The cast to uint8_t is what makes reading the whole SR right: its
+            # low half is the CCR, which is all these three touch.
             out.append(f"    m68k_set_ccr(c, (uint8_t)(m68k_get_sr(c) {op} "
-                       f"0x{(w >> 0) & 0xFF:02X}u));")
+                       f"0x{ins.imm & 0xFF:02X}u));")
             return out
         if m in ("oriw", "andiw", "eoriw") and ins.ops.endswith(",%sr"):
             op = {"oriw": "|", "andiw": "&", "eoriw": "^"}[m]
