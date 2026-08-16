@@ -297,6 +297,25 @@ class Codegen:
         return [f"{pad}c->pr = 0x{ret:08X}u;",
                 f"{pad}return 0x{target:08X}u;"]
 
+    def _pr_write(self, ret, indent):
+        """PR is written by the call itself, *before* its delay slot runs.
+
+        The manual puts the write in the branch instruction and the delay slot
+        after it, so a delay slot that reads PR reads the return address — which
+        is a call idiom rather than a curiosity: `bsr foo` / `sts.l pr,@-r15`
+        saves where to come back to, and the callee eventually pops it. Emitting
+        the delay slot first pushed whatever PR held from the *previous* call, so
+        the return went somewhere else entirely.
+
+        Two sites in this game do it, 0x060062D2 and 0x060071DE, and the first is
+        the special stage's character once it has passed the goal: its state
+        routine at 0x06006282 calls 0x0600631A that way and the `bra 0x06006448`
+        it should come back to is the jump to the object's own draw handler. With
+        the wrong address pushed it never arrived, and the character was invisible
+        from the goal until it reappears entering the Chaos Ring.
+        """
+        return [" " * indent + f"c->pr = 0x{ret:08X}u;"]
+
     def transfer(self, ins, ds, fn):
         """Emit a control transfer plus its delay slot, in the right order."""
         out = []
@@ -326,8 +345,9 @@ class Codegen:
             return out
 
         if ins.kind == CALL:
+            out += self._pr_write(ret, 4)      # before the delay slot: see _pr_write
             out += ds_stmts
-            out += self._call(ins.target, ret, 4)
+            out.append(f"    return 0x{ins.target:08X}u;")
             return out
 
         if ins.kind in (CALL_IND, JUMP_IND):
@@ -349,9 +369,9 @@ class Codegen:
                 expr = R(ins.rn)
             out.append("    {")
             out.append(f"        uint32_t _t = {expr};")
+            if ins.kind == CALL_IND:
+                out += self._pr_write(ret, 8)  # before the delay slot too
             out += ["    " + s for s in ds_stmts]
-            out.append(f"        c->pr = 0x{ret:08X}u;" if ins.kind == CALL_IND
-                       else "        /* jump */")
             out.append("        return _t;")
             out.append("    }")
             return out
