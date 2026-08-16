@@ -219,6 +219,7 @@ static uint8_t pad_lines(unsigned port, int th) {
 }
 
 static uint16_t pad_read(unsigned port) {
+    if (port < sizeof gen.pad_reads / sizeof *gen.pad_reads) gen.pad_reads[port]++;
     uint8_t ctrl = (uint8_t)gen.io[4 + port];
     uint8_t out = (uint8_t)gen.io[1 + port];
     uint8_t pad = pad_lines(port, out & 0x40);

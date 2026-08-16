@@ -690,7 +690,9 @@ static void draw_input(uint32_t *px) {
     /* PAD_* order, so bit i is letter i and the two cannot drift. */
     static const char names[] = "UDLRABCSXYZM";
     const uint32_t lit = 0xFFFFFFFFu, dim = 0xFF383842u, back = 0xFF101014u;
-    int rows = movie_active && movie_p2 ? 2 : 1;
+    /* Two rows whenever there is a second player to show, whoever is being it —
+     * a movie with two ports, a second keyboard, a second pad, or `--hold2`. */
+    int rows = (movie_active && movie_p2) || gen.pad_buttons[1] ? 2 : 1;
     int top = H - 2 - rows * 7;
 
     for (int y = top - 2; y < H; y++)
@@ -853,14 +855,24 @@ static void progress(unsigned frame) {
     last_unk_68k = gen.unknown_r;
 }
 
-/* The keyboard, as a pad. Held once a frame into gen.pad_buttons and read out
+/* The keyboard, as two pads. Held once a frame into gen.pad_buttons and read out
  * of it by src/gen68k.c whenever the game strobes TH.
  *
- * The layout is the one every Mega Drive emulator uses: the three face buttons
- * on the row under the fingers, the three extras above them, and Enter for
- * Start. Mode is on Tab because nothing in this game is known to use it.
+ * Port 1's layout is the one every Mega Drive emulator uses: the three face
+ * buttons on the row under the fingers, the three extras above them, and Enter
+ * for Start. Mode is on Tab because nothing in this game is known to use it.
+ *
+ * Port 2 is why this is a table per port rather than one table. The pad hardware
+ * in src/gen68k.c has always been written over three ports and `--record` has
+ * always written both, but nothing on this side could *drive* the second one, so
+ * a recorded session could only ever be one player at the keyboard — and this is
+ * a game whose two characters are tied together by a ring. Its keys are the
+ * right-hand cluster, chosen only for not colliding with port 1's: `I K J L` is
+ * the d-pad the way `W A S D` would be if `A` and `S` were not already taken.
  */
-static const struct { int key; unsigned bit; } pad_keys[] = {
+typedef struct { int key; unsigned bit; } PadKey;
+
+static const PadKey pad_keys1[] = {
     { SDL_SCANCODE_UP,     PAD_U }, { SDL_SCANCODE_DOWN,  PAD_D },
     { SDL_SCANCODE_LEFT,   PAD_L }, { SDL_SCANCODE_RIGHT, PAD_R },
     { SDL_SCANCODE_Z,      PAD_A }, { SDL_SCANCODE_X,     PAD_B },
@@ -868,6 +880,16 @@ static const struct { int key; unsigned bit; } pad_keys[] = {
     { SDL_SCANCODE_A,      PAD_X }, { SDL_SCANCODE_S,     PAD_Y },
     { SDL_SCANCODE_D,      PAD_Z },
     { SDL_SCANCODE_RETURN, PAD_S }, { SDL_SCANCODE_TAB,   PAD_M },
+};
+
+static const PadKey pad_keys2[] = {
+    { SDL_SCANCODE_I,      PAD_U }, { SDL_SCANCODE_K,      PAD_D },
+    { SDL_SCANCODE_J,      PAD_L }, { SDL_SCANCODE_L,      PAD_R },
+    { SDL_SCANCODE_V,      PAD_A }, { SDL_SCANCODE_B,      PAD_B },
+    { SDL_SCANCODE_N,      PAD_C },
+    { SDL_SCANCODE_F,      PAD_X }, { SDL_SCANCODE_G,      PAD_Y },
+    { SDL_SCANCODE_H,      PAD_Z },
+    { SDL_SCANCODE_RSHIFT, PAD_S }, { SDL_SCANCODE_RCTRL,  PAD_M },
 };
 
 /* The same twelve by name, for `--hold up,start` — which is how a headless run
@@ -1057,14 +1079,118 @@ static void record_close(void) {
     record_out = NULL;
 }
 
-static unsigned read_pad(void) {
+/* And a game controller each, which is what a second player actually wants.
+ *
+ * SDL's game-controller layer is the whole of the platform work here: it sits on
+ * DirectInput and XInput on Windows, on IOKit and GameController on macOS, and
+ * on evdev on Linux, and hands back the same named buttons from all of them. So
+ * there is nothing per-platform to write and nothing to configure — a pad that
+ * SDL knows is a pad works, and one it does not know is not made to work by
+ * anything this file could do about it.
+ *
+ * Controllers fill the ports in the order they arrive: the first is player one,
+ * the second player two. The keyboard stays live on both either way, so a pad
+ * and a keyboard is a perfectly good two players.
+ *
+ * The face buttons are the conventional reading of a six-button pad onto a
+ * modern one — A B C along the bottom in the order the hands expect, X Y Z on
+ * the north face and the two shoulders.
+ */
+#define PADS_MAX 2
+static SDL_GameController *pads[PADS_MAX];
+
+static const struct { SDL_GameControllerButton btn; unsigned bit; } pad_buttons_map[] = {
+    { SDL_CONTROLLER_BUTTON_DPAD_UP,        PAD_U },
+    { SDL_CONTROLLER_BUTTON_DPAD_DOWN,      PAD_D },
+    { SDL_CONTROLLER_BUTTON_DPAD_LEFT,      PAD_L },
+    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT,     PAD_R },
+    { SDL_CONTROLLER_BUTTON_X,              PAD_A },
+    { SDL_CONTROLLER_BUTTON_A,              PAD_B },
+    { SDL_CONTROLLER_BUTTON_B,              PAD_C },
+    { SDL_CONTROLLER_BUTTON_Y,              PAD_X },
+    { SDL_CONTROLLER_BUTTON_LEFTSHOULDER,   PAD_Y },
+    { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,  PAD_Z },
+    { SDL_CONTROLLER_BUTTON_START,          PAD_S },
+    { SDL_CONTROLLER_BUTTON_BACK,           PAD_M },
+};
+
+/* A stick is not a d-pad, and the game is being told it is one, so the threshold
+ * has to be well past the middle: half deflection, where a pad that rests a
+ * little off centre still reads as nothing held. */
+#define PAD_STICK_ON 16384
+
+static void pads_open(void) {
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        printf("pads: none (%s)\n", SDL_GetError());
+        return;
+    }
+    unsigned n = 0;
+    for (int i = 0; i < SDL_NumJoysticks() && n < PADS_MAX; i++) {
+        if (!SDL_IsGameController(i)) continue;
+        SDL_GameController *c = SDL_GameControllerOpen(i);
+        if (!c) continue;
+        printf("  pad %u: %s\n", n + 1, SDL_GameControllerName(c));
+        pads[n++] = c;
+    }
+    if (!n) printf("pads: none attached; the keyboard drives both ports\n");
+}
+
+/* Hot-plug, because a second player arriving is exactly when a second pad does.
+ * Removal is what matters most: the handle goes stale and reading it is a
+ * crash. */
+static void pads_event(const SDL_Event *e) {
+    if (e->type == SDL_CONTROLLERDEVICEADDED) {
+        for (unsigned i = 0; i < PADS_MAX; i++)
+            if (!pads[i]) {
+                pads[i] = SDL_GameControllerOpen(e->cdevice.which);
+                if (pads[i])
+                    printf("  pad %u attached: %s\n", i + 1,
+                           SDL_GameControllerName(pads[i]));
+                return;
+            }
+    } else if (e->type == SDL_CONTROLLERDEVICEREMOVED) {
+        for (unsigned i = 0; i < PADS_MAX; i++)
+            if (pads[i] && SDL_GameControllerFromInstanceID(
+                               e->cdevice.which) == pads[i]) {
+                SDL_GameControllerClose(pads[i]);
+                pads[i] = NULL;
+                printf("  pad %u detached\n", i + 1);
+                return;
+            }
+    }
+}
+
+static void pads_close(void) {
+    for (unsigned i = 0; i < PADS_MAX; i++)
+        if (pads[i]) { SDL_GameControllerClose(pads[i]); pads[i] = NULL; }
+}
+
+static unsigned read_pad(unsigned port) {
     SDL_PumpEvents();
     const Uint8 *k = SDL_GetKeyboardState(NULL);
+    const PadKey *keys = port ? pad_keys2 : pad_keys1;
+    unsigned n = port ? sizeof pad_keys2 / sizeof *pad_keys2
+                      : sizeof pad_keys1 / sizeof *pad_keys1;
     unsigned held = 0;
-    for (unsigned i = 0; i < sizeof pad_keys / sizeof *pad_keys; i++)
-        if (k[pad_keys[i].key]) held |= pad_keys[i].bit;
+    for (unsigned i = 0; i < n; i++)
+        if (k[keys[i].key]) held |= keys[i].bit;
+
+    SDL_GameController *c = port < PADS_MAX ? pads[port] : NULL;
+    if (c) {
+        for (unsigned i = 0; i < sizeof pad_buttons_map / sizeof *pad_buttons_map; i++)
+            if (SDL_GameControllerGetButton(c, pad_buttons_map[i].btn))
+                held |= pad_buttons_map[i].bit;
+        int x = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
+        int y = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
+        if (x < -PAD_STICK_ON) held |= PAD_L;
+        if (x >  PAD_STICK_ON) held |= PAD_R;
+        if (y < -PAD_STICK_ON) held |= PAD_U;
+        if (y >  PAD_STICK_ON) held |= PAD_D;
+    }
+
     /* Opposite directions at once is something a real d-pad cannot do and some
-     * engines handle badly; drop both rather than pick one. */
+     * engines handle badly; drop both rather than pick one. It matters more now
+     * that a stick and a d-pad and the keyboard all feed the same twelve bits. */
     if ((held & (PAD_L | PAD_R)) == (PAD_L | PAD_R)) held &= ~(PAD_L | PAD_R);
     if ((held & (PAD_U | PAD_D)) == (PAD_U | PAD_D)) held &= ~(PAD_U | PAD_D);
     return held;
@@ -1110,6 +1236,12 @@ int main(int argc, char **argv) {
      * save select, say — cannot be looked at with `--press` alone. Zero means
      * press for the whole run, which is what it did before. */
     unsigned press_until = 0;
+    /* The same two for the second pad, and they exist for a reason beyond
+     * symmetry: without them the second port can only be driven by a person at
+     * a keyboard, so there is no way to *check* that it is driven at all. These
+     * are what let a headless run press player two's Start and show that the
+     * game saw it. `--press-until` bounds both. */
+    unsigned hold2 = 0, press2 = 0;
     /* Which frame the tracers start at. Everything gated reads a trace from
      * the reset, because that is where the reference logs begin; this is for
      * the part of the run that has no reference at all. */
@@ -1178,6 +1310,10 @@ int main(int argc, char **argv) {
             hold = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--press") && i + 1 < argc)
             press = parse_hold(argv[++i]);
+        else if (!strcmp(argv[i], "--hold2") && i + 1 < argc)
+            hold2 = parse_hold(argv[++i]);
+        else if (!strcmp(argv[i], "--press2") && i + 1 < argc)
+            press2 = parse_hold(argv[++i]);
         else if (!strcmp(argv[i], "--hold-from") && i + 1 < argc)
             hold_from = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--press-until") && i + 1 < argc)
@@ -1357,8 +1493,11 @@ int main(int argc, char **argv) {
          * IMKCFRunLoopWakeUpReliable" line in the console is complaining
          * about; that message is the OS's, not ours, and harmless either way. */
         SDL_StopTextInput();
-        printf("pad: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Enter = Start, "
+        printf("pad 1: arrows, Z/X/C = A/B/C, A/S/D = X/Y/Z, Enter = Start, "
                "Tab = Mode, Esc quits\n");
+        printf("pad 2: I/K/J/L, V/B/N = A/B/C, F/G/H = X/Y/Z, "
+               "RShift = Start, RCtrl = Mode\n");
+        pads_open();
     }
 
     int running = 1;
@@ -1389,9 +1528,11 @@ int main(int argc, char **argv) {
         trace_armed = frames >= trace_from;
         xchk_set_frame(frames);
         gen68k_frame_start();
-        unsigned pulse = press && (!press_until || frames < press_until)
-                      && frames % 45 < 15 ? press : 0;
+        int pulsing = (!press_until || frames < press_until) && frames % 45 < 15;
+        unsigned pulse = press && pulsing ? press : 0;
+        unsigned pulse2 = press2 && pulsing ? press2 : 0;
         unsigned held = frames >= hold_from ? hold : 0;
+        unsigned held2 = frames >= hold_from ? hold2 : 0;
         /* This frame of the movie, if it has one. Composed with the rest rather
          * than replacing it, the same way `--hold` and `--press` compose: with
          * nothing else asked for a replay is exactly what was recorded, and a
@@ -1406,9 +1547,10 @@ int main(int argc, char **argv) {
             movie_played = (unsigned long)mf + 1;
             movie_now = mf;
         }
-        gen.pad_buttons[0] = (headless_frames ? 0 : read_pad())
+        gen.pad_buttons[0] = (headless_frames ? 0 : read_pad(0))
                            | held | pulse | m1;
-        gen.pad_buttons[1] = m2;
+        gen.pad_buttons[1] = (headless_frames ? 0 : read_pad(1))
+                           | held2 | pulse2 | m2;
         record_frame();
         for (unsigned line = 0; line < LINES_PER_FRAME; line++) {
             gen.line = line;
@@ -1503,10 +1645,12 @@ int main(int argc, char **argv) {
         frames++;
         if (!headless_frames) {
             SDL_Event ev;
-            while (SDL_PollEvent(&ev))
+            while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT ||
                     (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE))
                     running = 0;
+                pads_event(&ev);
+            }
             render_frame(px);
             SDL_UpdateTexture(tex, NULL, px, W * 4);
             SDL_RenderClear(ren);
@@ -1698,6 +1842,8 @@ int main(int argc, char **argv) {
                movie_played, movie_frames,
                movie_played == movie_frames ? " (to the end)" : "",
                movie_offset);
+    printf("  pads polled: port 1 %lu, port 2 %lu, port 3 %lu\n",
+           gen.pad_reads[0], gen.pad_reads[1], gen.pad_reads[2]);
     if (record_path)
         printf("  recorded: %lu frame(s) to %s\n", record_frames, record_path);
     /* The battery. A run that never reached a save point writes nothing, which
@@ -1753,6 +1899,7 @@ int main(int argc, char **argv) {
         write_ppm("build/frame.ppm", px);
         printf("  wrote build/frame.ppm\n");
     } else {
+        pads_close();
         SDL_DestroyTexture(tex); SDL_DestroyRenderer(ren);
         SDL_DestroyWindow(win); SDL_Quit();
     }

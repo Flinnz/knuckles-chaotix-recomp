@@ -128,6 +128,12 @@ typedef struct {
      * can only ever read empty is a port that cannot replay it. Port 3 is the
      * EXT connector and nothing ever fills it. */
     unsigned pad_buttons[3];
+    /* How often the game has asked each port for its lines. It is the one
+     * question a person wiring up a second player has and cannot otherwise
+     * answer: a port nothing polls reads the same whatever is held on it, so
+     * "the second pad does nothing" and "the game is not in two-player mode"
+     * look identical from the outside. */
+    unsigned long pad_reads[3];
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
 
     /* The cartridge's battery-backed 512 bytes. The header declares them at
