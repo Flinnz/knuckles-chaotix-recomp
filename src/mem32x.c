@@ -318,6 +318,39 @@ static void autofill(void) {
  */
 int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
     if (a >= 0x4000 && a < 0x4100) {          /* system registers */
+        /* The comm registers are sixteen bits and this game writes them a byte
+         * at a time, so the half not addressed has to survive.
+         *
+         * It is the special stage's sound. The master posts a sound id into the
+         * *high* byte of comm 0 with `mov.b`, and the 68000's poll at 0x9279E2
+         * reads the whole word, takes the high byte as the id and the low byte
+         * as "there is something here" — the low byte being whatever command
+         * was last posted, 0x02 for the duration of a special stage. Storing the
+         * byte as the whole word cleared that flag, so the poll saw nothing and
+         * returned -1, and every one of those sounds was dropped: 30 of them in
+         * the 2,500 frames measured, which is a special stage with no effects at
+         * all and only the music the Z80 keeps playing on its own.
+         *
+         * Reads have always taken the addressed half (`sh2_r8`); this is the
+         * write side of the same thing. The rest of the block is left alone —
+         * a byte write to the FIFO port or an interrupt clear is not something
+         * this game does, and merging one would mean inventing what it means. */
+        if ((a & 0xFE) >= 0x20 && (a & 0xFE) < 0x30) {
+            unsigned ci = (unsigned)(((a & 0xFE) - 0x20) / 2);
+            uint16_t old = mars.comm[ci];
+            uint16_t nv = size == 1
+                ? (uint16_t)((a & 1) ? (old & 0xFF00) | (v & 0xFF)
+                                     : (old & 0x00FF) | ((v & 0xFF) << 8))
+                : (uint16_t)v;
+            /* The master zeroing comm 0 is the acknowledgement the 68000 waits
+             * for, so it is the one honest count of commands actually run —
+             * `serviced` used to be incremented by the 68000's own post, which
+             * only measured that a command had been asked for. */
+            if (!ci && !nv && old && mars_running == &mars_cpu[0])
+                mars.serviced++;
+            mars.comm[ci] = nv;
+            return 1;
+        }
         switch (a & 0xFE) {
         case 0x00:
             mars.adapter = (uint16_t)v;
@@ -352,27 +385,14 @@ int mars_reg_write_sh2(uint32_t a, uint32_t v, int size) {
             sound_pwm_write(((a & 0xFE) - 0x34) / 2, (uint16_t)v,
                             mars_running == &mars_cpu[1] ? 'S' : 'M');
             return 1;
-        case 0x20:                            /* comm 0: the 68000 rendezvous */
-            /* Plain storage now. The SH-2 zeroing this is how it tells the
-             * 68000 it is ready, and the 68000 waits for exactly that — at
-             * 0x8845CE among other places. It used to be intercepted, because
-             * commands arrived a whole frame before the SH-2 ran and would have
-             * been wiped by the zero the dispatch loop writes on entry; the
-             * 68000 now drives the SH-2 at the moment it posts, so there is
-             * nothing left to paper over. */
-            /* The master zeroing this is the acknowledgement the 68000 waits
-             * for, so it is the one honest count of commands actually run —
-             * `serviced` used to be incremented by the 68000's own post, which
-             * only measured that a command had been asked for. */
-            if (!v && mars.comm[0] && mars_running == &mars_cpu[0])
-                mars.serviced++;
-            mars.comm[0] = (uint16_t)v;
-            return 1;
+        /* Comm 0, the 68000 rendezvous, is plain storage now: the SH-2 zeroing
+         * it is how it tells the 68000 it is ready, and the 68000 waits for
+         * exactly that — at 0x8845CE among other places. It used to be
+         * intercepted, because commands arrived a whole frame before the SH-2
+         * ran and would have been wiped by the zero the dispatch loop writes on
+         * entry; the 68000 now drives the SH-2 at the moment it posts, so there
+         * is nothing left to paper over. See the merge above. */
         default:
-            if ((a & 0xFE) >= 0x20 && (a & 0xFE) < 0x30) {
-                mars.comm[((a & 0xFE) - 0x20) / 2] = (uint16_t)v;
-                return 1;
-            }
             return 1;
         }
     }
