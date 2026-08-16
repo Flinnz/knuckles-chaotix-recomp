@@ -3,7 +3,8 @@
 Facts only. Reasoning, history and rejected approaches are in
 [roadmap.md](roadmap.md).
 
-Generated from the build at commit `a1b9809`. `make check` passes.
+Generated from the build at commit `0ea28bb` plus the five fixes under "Five
+things a person saw and no gate could" in the roadmap. `make check` passes.
 
 ## What this is
 
@@ -23,6 +24,7 @@ code is translated to C at build time and compiled.
 | 32X VDP, SDRAM, DREQ, PWM | `src/mem32x.c` |
 | YM2612 | Nuked-OPN2 (`third_party/`, not in the repository) |
 | PSG | `src/psg.c` |
+| Cartridge SRAM | `src/gen68k.c`, saved to `<cartridge>.sav` |
 | Frame loop, scheduling, clocks | `src/mars_main.c` |
 
 `--interp` swaps the whole 68000 to Musashi.
@@ -135,16 +137,25 @@ as no commands.
 into a playable level instead of watching the attract loop.
 
 Played from the keyboard it goes further than any headless run reaches: the
-save select renders, a level plays and can be completed, and the special stage
-draws its tunnel, its HUD and the molecule background and is playable. What is
-known to be wrong there is in Open below.
+save select and the player select render, a level plays and can be completed,
+the special stage draws its tunnel, its HUD and the molecule background and is
+playable to its Chaos Ring, and the Newtrogic High Zone hub, the Combi Catcher
+and the attraction select all draw. What is known to be wrong there is in Open
+below.
 
 Commands a frame varies with the scene: about 1.0 in a level and 0.5 on the
 title screen, against the reference's 0.83 over its own 1.7 seconds. Zero
 unmapped accesses on either side across the whole run.
 
 Sound: all three sources play. At 1,800 frames the PWM is 2,562 RMS, the PSG
-816, the YM2612 1,642, all of it 3,162, nothing clipped.
+816, the YM2612 1,642, all of it 3,162, nothing clipped. Effects reach the Z80's
+SMPS queue at 0xA01C0A, including the ones the master posts through comm 0 —
+60 of them in the special stage, which used to get none.
+
+Save data: the cartridge's 512 battery-backed bytes at 0x200001-0x2003FF, odd
+addresses, mapped over the ROM by 0xA130F1. Written to `<cartridge>.sav` when
+the game commits, and the file the game writes from an empty battery is byte for
+byte the one the reference emulator wrote.
 
 Speed: 1,800 frames headless in 2.4 s, about 12x real time. With a window the
 audio device paces it to the machine's speed.
@@ -258,6 +269,8 @@ movie frame 691 holds. `make tas` turns it on, so every shot carries it.
 | `--movie-offset N` | which of our frames plays the movie's frame 0; negative skips into it |
 | `--movie-resync OURS:MOVIE` | from our frame OURS, play movie frame MOVIE — re-align part way in; repeatable, last match wins |
 | `--record FILE` | write both pads back out, one line per frame, in the text `--movie` reads — a played session becomes a movie in our own frame numbering, and recording a replay bakes its offset and re-syncs into the file |
+| `--save FILE` | where the cartridge's battery lives; the default is `<cartridge>.sav`, and a `--movie` replay uses no battery at all unless this names one |
+| `--no-save` | run on a battery that outlives nothing |
 | `--shots N` | a rendered frame every N frames, into `build/shots/` |
 | `--show-input` | draw the pad on the picture — the twelve letters lit as held, our frame `F` and the movie frame `M` it played, so `F` minus the offset is `M`. In the window, in `--shots` and in `build/frame.ppm` |
 | `--layers N` | 1 plane B, 2 plane A, 4 sprites, 8 the 32X bitmap |
@@ -336,21 +349,24 @@ Open from play, not from any gate:
   times), none of which any other headless run has touched. Because a
   recording counts our own frames, that session replays for ever.
 
-  Two things it turned up, neither a missing block: a stall report at frame
+  ~~Two things it turned up, neither a missing block: a stall report at frame
   23,004 — 240 frames with no command and the master parked at `0x06004770`
   with comm 0 at `0x006D`, the results-screen shape, which then recovered on
-  its own — and one new unmapped 68000 read, `0x8401FE`. Commands posted
-  19,644 against 19,427 serviced.
+  its own~~ — *that was the comm-register byte write, and `0x006D` is the shape
+  of it: a sound id stored as the whole word instead of its high half. There is
+  no stall report in the run now* — and one new unmapped 68000 read,
+  `0x8401FE`. Commands posted 19,727 against 19,427 serviced.
 * **The ring pickup sound is missing.** All four sources are live in a level —
   PWM at 366 interrupts a frame with the sample changing, PSG audible, 33,000
   YM2612 register writes, the Z80 running its driver — so this is one effect,
   not a dead path. Nothing here can gate it: the reference logs are the boot and
   are constant silence, so "never fires" and "fires inaudibly" are not
-  distinguishable without a person listening.
+  distinguishable without a person listening. Not the comm-register fix either:
+  that recovered 19 sounds in a level, where a ring is picked up far more often
+  than that.
 
 Also open: a 32X vertical interrupt that arrives while its own handler is
-running is dropped where hardware would hold it pending; the 32X's priority is
-the bitmap mode register's bit 7 only, with no per-pixel priority modelled; `0x0749C2`-`0x0749D0` is 68000 code discovery has
-never found; the recompiled 68000's PC is not masked to 24 bits; the Genesis
-VDP has no window plane, shadow/highlight, interlace or per-line sprite limits;
-Genesis DMA fill and copy are skipped.
+running is dropped where hardware would hold it pending; `0x0749C2`-`0x0749D0`
+is 68000 code discovery has never found; the recompiled 68000's PC is not masked
+to 24 bits; the Genesis VDP has no window plane, interlace or per-line sprite
+limits; Genesis DMA fill and copy are skipped.

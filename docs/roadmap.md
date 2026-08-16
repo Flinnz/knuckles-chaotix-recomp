@@ -3081,6 +3081,116 @@ missing session **skips loudly**, in as many words, and names the command that
 makes one. A `--movie` named explicitly is a different promise and a missing one
 is fatal.
 
+### Five things a person saw and no gate could
+
+Playing the recorded session and looking at it turned up five faults, and every
+gate in `make check` is byte-identical across all five fixes — the same shape as
+the three that stood between the SEGA logo and a playable game. Three of them are
+one hardware fact each that the runtime had wrong, one is an access size, and the
+last is the recompiler getting a delay slot in the wrong order.
+
+**The 32X's priority is per dot, not per screen.** A 32X colour is fifteen bits
+and the top bit is that dot's priority; bit 7 of the bitmap mode register
+*inverts* it rather than settling the picture. Reading the register alone, the
+sky and sea a level draws covered the whole Mega Drive layout — the platforms,
+the palm trees, the machinery, all of it sitting in plane A the entire time — and
+on the player select the name plate covered the character it names.
+
+The game says which way round it is, on four screens with no room left over. In a
+level the background carries bit 15 set and the HUD over it does not, with the
+register at 0x0081; on the player select the register is 0x0001 and it is the
+brick background that is clear and the character sprites that are set. One
+register cannot express that and the game needs both on one screen, so the bit
+has to be the dot's. PicoDrive's `32x/memory.c` says the same in four words —
+*priority inversion is handled in palette* — which is the same XOR arrived at
+from the other side.
+
+**A byte write to a comm register is a byte.** `mars_reg_write_sh2` takes a size
+and the comm registers ignored it, so the master's `mov.b` into the *high* half
+of comm 0 stored the byte as the whole word. That is the special stage's sound:
+the master posts a sound id there and the 68000's poll at 0x9279E2 reads the word,
+takes the high byte as the id and the low byte — whatever command was posted
+last, 0x02 for the duration of a special stage — as "there is something here".
+Clearing that flag made the poll return -1 and the id was dropped.
+
+The measurement is the whole finding: 290 sound effects reached the Z80's SMPS
+queue at 0xA01C0A by frame 17,500 and **still 290 at 22,500**, across six
+thousand frames of special stage. With the halves kept apart it is 60 in that
+window, the YM2612's own output goes from 1,418 RMS to 1,610 with its variance up
+by half, and 19 more sounds arrive before the special stage as well — the same
+bug was quietly eating those. Reads had always taken the addressed half; this was
+the write side of the same thing.
+
+Finding it meant following the whole path rather than guessing at it: the Z80
+runs an SMPS driver and sound effects are queued to it at 0xA01C0A by 0x8F6E76,
+the PWM channels are the *driver's* — it leaves four channel words at 0xA01BF7
+and the 68000 relays them to comm 4-7 every frame at 0x8F6EFA — and the slave's
+mixer at 0xC000012C reads exactly those four registers. So nothing on the 32X
+side can play a sound by itself, and the one thing the master can do is hand the
+68000 a byte.
+
+**Shadow and highlight.** The Combi Catcher enables it — register 12 at 0x89 for
+some 300 frames, and this is the only room in the session that does — and with it
+two sprite colours stop being colours: palette 3 index 15 shadows what is under
+it and index 14 highlights it. Drawn as though they were colours, and those two
+entries being black in a game that uses them as operators, the room's light beams
+were solid black bars and every character stood on a black ellipse. That is
+"the lights in the hub are black", and it is 20 lines in `src/genvdp.c`.
+
+**The battery was never wired up.** The header declares it — "RA", 0xF8 0x20,
+0x200001-0x2003FF — 512 bytes on the odd half of the bus, sharing their window
+with the ROM, and the mapper register at 0xA130F1 saying which is there. Nothing
+implemented it, so the game's save read the ROM underneath, failed its own
+checksum and was written to nowhere.
+
+Both routines are in the cartridge and say what the register means better than a
+document: 0x03E392 reads with 3, mapped and write-protected, and 0x03E420 writes
+with 1, mapped and writable, and both put 2 back. They also run from work RAM —
+0x03E3D6 copies the writer to 0xFF0200 — because the cartridge is exactly what
+stops being visible while the battery is mapped, which is one more of the
+routines that make an interpreter beside the recompiler necessary.
+
+*The check is that we did not have to invent the format.* Played from an empty
+battery the game writes 512 bytes that are **byte-identical to the .ram file the
+reference emulator wrote for this cartridge**, and started again with that file
+in place it reads 256 bytes, accepts the checksum and writes nothing. Its
+contents are the same block 0x03E4BA seeds at 0xFFFFFA00 when there is no save —
+`9EFB 0000 0001`, twenty-four times, and a four-byte checksum in front.
+
+The save is `<cartridge>.sav`, its own file rather than the other emulator's, and
+a `--movie` replay runs with an empty battery unless `--save` says otherwise: a
+battery is machine state, and a recorded session that depended on whatever was
+last played would stop being a test.
+
+**PR is written before the delay slot, not after.** `bsr`, `bsrf` and `jsr` write
+PR as part of themselves and the delay slot runs afterwards, so a delay slot that
+reads PR reads the *return address* — which is a call idiom rather than a
+curiosity: `bsr foo` / `sts.l pr,@-r15` saves where to come back to and the
+callee pops it much later. The recompiler emitted the delay slot first, so the
+value pushed was whatever PR held from the previous call and the return went
+somewhere else entirely.
+
+Two sites in this game do it, `0x060062D2` and `0x060071DE`, and the first is the
+special stage's character once it has passed the goal: its state routine at
+`0x06006282` calls `0x0600631A` that way, and the `bra 0x06006448` it should come
+back to is the jump to the object's own draw handler. So from "GOOOL!" until it
+reappears entering the Chaos Ring the character was simply not drawn — the object
+was alive and updating the whole time, which is why nothing looked wrong from the
+runtime's side.
+
+Finding it was worth the walk, because every intuition along the way was wrong.
+It is not the clipper: the drawer's four early-outs are entered zero times either
+side. It is not the recompiled 68000: `--interp` draws the same picture. It is
+not the object being deleted: slot `0x06008360` steps its script every frame
+before and after. And it is not the sprites that visibly stop — those are the
+`COOOOL!` letters, asset group `0x4D`, which the goal banner is supposed to
+replace. What said it in the end was the *caller*: `pr` at every entry to the
+sprite drawer names its call site, so a trace of one frame either side of the
+goal says which caller stopped without any reading of the game's code at all.
+The second delay-slot bug in this project, and the same lesson as the first —
+a delay slot is a separate instruction that runs *after* the branch has had its
+effect.
+
 ### Next
 
 *Written after the session that got the game playing. The ordering is by what

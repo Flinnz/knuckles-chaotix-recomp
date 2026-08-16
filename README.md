@@ -216,10 +216,22 @@ picture from each half of the machine.
   set up — but past it there is music from every part of the machine at once:
   32X PWM samples, PSG squares, and six channels of FM through Nuked-OPN2.
   `--sound` separates them
-- The game runs: SEGA logo, title screen, and the attract mode through two
-  levels, for about four and a half minutes before it stops
-- Next: a gate that does not need the reference logs, which end 1.7 seconds in
-  while the game now runs for two hundred and fifty
+- The game runs: SEGA logo, title screen, attract mode, and — played — the save
+  and player selects, a level that can be finished, a special stage played to
+  its end, the Newtrogic High Zone hub and the Combi Catcher. 200,000 frames
+  headless with no stall
+- **A recorded play session is a gate.** `--record` writes the pad back out in
+  our own frame numbering, so a session played once replays for ever;
+  `tools/test_session.py` is the last step of `make check` and the only gate
+  that reaches past the reference logs' 1.7 seconds
+- Five faults that only playing could find are fixed: the 32X's priority is per
+  dot rather than per screen, a byte write to a comm register is a byte (which
+  is the special stage's sound effects), the Mega Drive's shadow/highlight mode
+  is modelled, the cartridge's battery is saved to `<cartridge>.sav`, and the
+  SH-2 recompiler writes PR before a call's delay slot rather than after (which
+  is the special stage's character on its run to the Chaos Ring)
+- Next: the two 68000 backends against each other, which is the one oracle in
+  hand that the reference logs cannot be
 
 See [docs/state.md](docs/state.md) for where things stand — numbers, flags and
 open items, no prose — [docs/architecture.md](docs/architecture.md) for
