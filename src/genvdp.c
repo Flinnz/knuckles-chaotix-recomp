@@ -8,10 +8,10 @@
  *
  * Scanline at a time, and only what this game actually selects is exercised —
  * H40, two 64x32 planes, per-line horizontal scroll, whole-screen vertical
- * scroll, sprites — but the register decoding is general so the other modes
- * behave rather than being silently ignored. Not modelled: the window plane,
- * shadow/highlight, interlace, and the per-line sprite and pixel limits that
- * real hardware runs out of.
+ * scroll, sprites, shadow/highlight — but the register decoding is general so
+ * the other modes behave rather than being silently ignored. Not modelled: the
+ * window plane, interlace, and the per-line sprite and pixel limits that real
+ * hardware runs out of.
  */
 #include <string.h>
 #include "mars.h"
@@ -32,6 +32,31 @@ static uint32_t colour(unsigned entry) {
 }
 
 typedef struct { uint8_t idx, pal, pri; } Px;
+
+/* --- shadow and highlight ---------------------------------------------------
+ *
+ * With bit 3 of register 12 set the picture has three intensities instead of
+ * one, and two sprite colours stop being colours: palette 3 index 15 shadows
+ * what is under it and index 14 highlights it, drawing nothing themselves. The
+ * background is at low intensity wherever neither plane put a priority pixel,
+ * and a sprite with priority is always normal.
+ *
+ * This game turns it on for one room — the Combi Catcher, at 0x89 for some 300
+ * frames — and drawing the operators as though they were colours is what put
+ * solid black bars where its light beams are and black ellipses under every
+ * character and lamp. Palette 3's entries 14 and 15 are not written by a game
+ * that uses them as operators, so they were black.
+ *
+ * Shadow halves the channel and highlight is the top half of the range, which
+ * is the hardware's own arithmetic: three bits become four, 0-7 and 8-15.
+ */
+static uint32_t shade(uint32_t c, int shadow, int hilite) {
+    if (shadow == hilite) return c;              /* both, or neither, is normal */
+    uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+    if (shadow) { r >>= 1; g >>= 1; b >>= 1; }
+    else { r = (r >> 1) + 128; g = (g >> 1) + 128; b = (b >> 1) + 128; }
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
 
 /* One pixel of a scrolling plane. `hs` scrolls the picture right, `vs` down. */
 static Px plane_pixel(unsigned base, unsigned cw, unsigned ch,
@@ -114,6 +139,7 @@ void genvdp_render(uint32_t *px, unsigned w, unsigned h, uint8_t *opaque) {
     unsigned ch = PLANE_CELLS[(gen.vdpreg[16] >> 4) & 3];
     unsigned hmode = gen.vdpreg[11] & 3;        /* 0 whole, 2 per cell, 3 per line */
     int vcol = (gen.vdpreg[11] >> 2) & 1;       /* vertical scroll per 2 cells */
+    int sh = (gen.vdpreg[12] >> 3) & 1;         /* shadow/highlight */
 
     /* One scanline of sprite pixels. 320 is the widest the Mega Drive shows. */
     Px sprites[320];
@@ -147,6 +173,19 @@ void genvdp_render(uint32_t *px, unsigned w, unsigned h, uint8_t *opaque) {
                                     : zero;
             Px s = sprites[x];
 
+            int shadow = 0, hilite = 0;
+            if (sh) {
+                /* Low intensity wherever no plane claimed priority — the
+                 * backdrop included. */
+                shadow = !((a.idx && a.pri) || (b.idx && b.pri));
+                if (s.idx && s.pal == 3 && s.idx >= 14) {
+                    if (s.idx == 14) hilite = 1; else shadow = 1;
+                    s.idx = 0;                  /* an operator draws nothing */
+                } else if (s.idx && s.pri) {
+                    shadow = 0;                 /* a sprite with priority is normal */
+                }
+            }
+
             /* Back to front: backdrop, then each layer's low-priority pixels,
              * then the same three again for the ones marked high. */
             unsigned e = gen.vdpreg[7] & 0x3F;
@@ -156,7 +195,7 @@ void genvdp_render(uint32_t *px, unsigned w, unsigned h, uint8_t *opaque) {
             if (b.idx && b.pri)  e = b.pal * 16 + b.idx;
             if (a.idx && a.pri)  e = a.pal * 16 + a.idx;
             if (s.idx && s.pri)  e = s.pal * 16 + s.idx;
-            px[y * w + x] = colour(e);
+            px[y * w + x] = shade(colour(e), shadow, hilite);
             /* Whether anything at all was drawn here, which is a different
              * question from what colour came out: a plane pixel may resolve to
              * the same colour as the backdrop and is still not the backdrop.
