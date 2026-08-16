@@ -1,7 +1,7 @@
 # State
 
-Facts only. Reasoning, history and rejected approaches are in
-[roadmap.md](roadmap.md).
+Facts only. What is left to do, and what was tried and rejected, is in
+[roadmap.md](roadmap.md); how each of it was arrived at is in [done.md](done.md).
 
 Generated from the build at commit `0ea28bb` plus the five fixes under "Five
 things a person saw and no gate could" in the roadmap. `make check` passes.
@@ -237,9 +237,9 @@ mask on both ports records back identical through a replay, and a recorded
 `--press`/`--hold` run replayed with the recorder still on copies its file
 byte for byte. Recording a replay bakes the alignment in: the tuffcracker
 movie played at `--movie-offset 500` and recorded comes back as a file that
-replays plain. What no offset or re-sync of a foreign movie has reached — the
-special stage — is one played session with `--record` away from being a
-headless replay.
+replays plain. What no offset or re-sync of a foreign movie ever reached — the
+special stage — one played session reached in a single recording, and that
+recording is what `test_session.py` replays.
 
 `--shots N` writes `build/shots/fNNNNNN.ppm` through the run, which is how a
 31-minute run gets looked at. `ffmpeg -pattern_type glob -i 'build/shots/*.ppm'
@@ -316,15 +316,13 @@ extracts the gates read are rebuilt into `build/` on demand.
 
 Ordered as in the roadmap's plan.
 
-1. No gate exists past 1.7 seconds. `--progress` watches liveness, and a stall
-   now reports itself without a flag, but nothing fails a build for either, and
-   the third oracle — the two 68000 backends against each other — is not
-   written. All three bugs this session cost a play session each to find.
-   `--record` now turns a play session into replayable input in our own frame
-   numbering, so the input side of such a gate exists; the check that replays
-   a recorded session and fails a build on its end-of-run numbers is still
-   unwritten, and no session that reaches the special stage has been recorded
-   yet.
+1. Past 1.7 seconds the only gate is `test_session.py`, over one recorded
+   session, and it enforces liveness rather than end-of-run numbers. The third
+   oracle — the two 68000 backends against each other — is not written; it is
+   the one that would have caught the banked window on the frame it happened.
+   Scenes outside that session — the save select, the player select, the
+   attraction select, the rest of the hub — are covered by nothing, and only
+   playing produces the coverage.
 2. No frontier is known. 200,000 frames run clean; nothing has been run longer.
 3. `sh2_cpi1000` is one cycles-per-instruction number per SH-2.
 4. The banked window is wholly interpreted — 988,493 hand-overs in 3,600 frames.
@@ -333,29 +331,6 @@ Ordered as in the roadmap's plan.
 
 Open from play, not from any gate:
 
-* **The special stage's end-of-stage freeze is fixed, and confirmed.** It was
-  the thirteenth missing block: `0x06001218`, the stage's exit callback, named
-  nowhere in the image but by the `mova` that loads it — it is passed as a
-  value, pushed, and eventually popped into PR and returned through.
-  `scan_mova_code` seeds such targets now; the stall report's `[call]` line is
-  what decided missing-block over deadlock, from one log.
-
-  The confirmation is a `--record`ed play session, 27,741 frames, replayed
-  headlessly: at frame ~17,000 the master's interrupt enable goes `02` -> `08`
-  and 6,624 32X vertical interrupts are delivered, which is the special stage
-  and nothing else; it runs for some 6,000 frames posting no commands, exits,
-  and commands resume — with **zero missing blocks** across the whole run. It
-  also reaches the Combi Catcher and posts command kinds 4, 8 and 9 (327
-  times), none of which any other headless run has touched. Because a
-  recording counts our own frames, that session replays for ever.
-
-  ~~Two things it turned up, neither a missing block: a stall report at frame
-  23,004 — 240 frames with no command and the master parked at `0x06004770`
-  with comm 0 at `0x006D`, the results-screen shape, which then recovered on
-  its own~~ — *that was the comm-register byte write, and `0x006D` is the shape
-  of it: a sound id stored as the whole word instead of its high half. There is
-  no stall report in the run now* — and one new unmapped 68000 read,
-  `0x8401FE`. Commands posted 19,727 against 19,427 serviced.
 * **The ring pickup sound is missing.** All four sources are live in a level —
   PWM at 366 interrupts a frame with the sample changing, PSG audible, 33,000
   YM2612 register writes, the Z80 running its driver — so this is one effect,
@@ -366,7 +341,8 @@ Open from play, not from any gate:
   than that.
 
 Also open: a 32X vertical interrupt that arrives while its own handler is
-running is dropped where hardware would hold it pending; `0x0749C2`-`0x0749D0`
-is 68000 code discovery has never found; the recompiled 68000's PC is not masked
-to 24 bits; the Genesis VDP has no window plane, interlace or per-line sprite
-limits; Genesis DMA fill and copy are skipped.
+running is dropped where hardware would hold it pending; the recorded session
+makes one unmapped 68000 read, `0x8401FE`, in the 32X frame-buffer window;
+`0x0749C2`-`0x0749D0` is 68000 code discovery has never found; the recompiled
+68000's PC is not masked to 24 bits; the Genesis VDP has no window plane,
+interlace or per-line sprite limits; Genesis DMA fill and copy are skipped.

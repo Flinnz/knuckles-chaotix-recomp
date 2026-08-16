@@ -20,7 +20,8 @@ tools/            analysis pipeline (Python, no dependencies)
   disasm.py       CLI front end
   validate_decoder.py
 toolchain/        locally built sh-elf binutils
-docs/             state.md (current numbers), architecture findings, roadmap
+docs/             state.md (current numbers), architecture findings,
+                  roadmap (what is left), done (how it got here)
 ```
 
 ## Setup
@@ -234,9 +235,10 @@ picture from each half of the machine.
   hand that the reference logs cannot be
 
 See [docs/state.md](docs/state.md) for where things stand — numbers, flags and
-open items, no prose — [docs/architecture.md](docs/architecture.md) for
-findings, and [docs/roadmap.md](docs/roadmap.md) for how each of them was
-arrived at and what was tried and rejected.
+open items, no prose — [docs/architecture.md](docs/architecture.md) for hardware
+and ROM findings, [docs/roadmap.md](docs/roadmap.md) for what is left and what
+was tried and rejected, and [docs/done.md](docs/done.md) for how each of it was
+arrived at.
 
 The headline finding: the SH-2 program is only 36 KB. This is a 68000
 Sonic-engine game that uses the 32X as a video co-processor, so the 68000 is the
