@@ -61,7 +61,13 @@ What the milestone still owes is not more emulation. It is that **every fault
 found since the SEGA logo was found by a person playing the game** — thirteen
 missing blocks, an eight-bit register taken for sixteen, a divide unit that was
 plain storage, a banked window folded to bank 0, two delay slots — and
-`make check` was byte-identical across every one of them. The reference logs are
+`make check` was byte-identical across every one of them.
+
+That is no longer quite true, which is the first movement on this in the
+project's history: `--xcheck` found a wrong CCR immediate that nobody had seen
+and nothing could have seen. One gate, one fault, and it is the 68000 only —
+but the sentence above was the whole of what M7 owed, and it now has an
+exception. The reference logs are
 1.7 seconds; the game runs for two hundred and fifty.
 
 The ordering below is by what each would have caught, not by how interesting it
@@ -78,14 +84,40 @@ made that possible — a session played here is input in our own frame numbering
 so it replays for ever, where a foreign `.bk2` needs an alignment that provably
 cannot be made to hold.
 
-Two pieces are still missing.
+*The two 68000 backends against each other is delivered too*, as `--xcheck`, and
+the design written here for it was wrong in a way worth keeping visible:
 
-* **The two 68000 backends against each other.** `--interp` reads memory through
-  `src/gen68k.c` and `--recomp` through `canon68k`, so they disagree exactly
-  where a translation is wrong about what an address *is*. The banked window
-  would have been caught outright, on the frame it happened. Compare commands
-  posted, the frame buffer, VRAM, CRAM and the palette at checkpoints across a
-  long headless run.
+> ~~Compare commands posted, the frame buffer, VRAM, CRAM and the palette at
+> checkpoints across a long headless run.~~
+
+That would have been noise. The two backends do not stay in step and are not
+meant to: the recompiler charges a block's cycles in its prologue where Musashi
+charges each instruction as it retires, so a block straddling one of the sixteen
+hand-overs in a scanline overshoots and the SH-2s get a slightly different slice.
+Measured, they leave byte-identical VDP and 32X state at 300 frames and then
+wander — 1,388 bytes of the 32X dump differ at frame 500 of a session, 128 at
+1,000, 5,561 at 2,000. Wandering rather than growing is what says it is phase and
+not a fault.
+
+So it is lock-step instead: every recompiled block is re-run on Musashi from the
+same registers, and what is compared is the registers it leaves, the address it
+goes to and every byte it touched. Timing cannot enter into it. The banked window
+put back is caught at frame 314 of the session, on the transfer itself — the
+claim this list made, now tested. Zero divergences over 117,045,848 blocks of the
+recorded session and 509,601,542 of the tuffcracker TAS; the 2,400-frame headless
+run in `check` needs nothing but the cartridge, so unlike the session gate it
+cannot skip. [done.md](done.md) has the
+four things that had to be understood first, of which the load-bearing one is
+that the recompiled 68000 works in cartridge offsets end to end and an address
+exists only where `m68k_run` is handed one.
+
+It found one fault of its own: the immediate of `ori`/`andi`/`eori` to CCR was
+being read from the wrong word, so twenty sites ran `| 0x3C` where the cartridge
+says `| 0x01`. No gate could have seen it — the listing round-trip passes because
+the operand *text* was right, and only the recompiler's reading of it was wrong.
+
+One piece is still missing.
+
 * **More sessions.** The one baseline session covers a level, a special stage
   played to its end and the Combi Catcher. The save select, the player select,
   the attraction select and the rest of the hub are covered by nothing, and only
@@ -94,6 +126,15 @@ Two pieces are still missing.
   printing a tick — the failure this project has already been bitten by once,
   when `build/sh2_recomp.c` had no prerequisites and every gate passed while
   measuring the previous front end.
+
+  **Two-player sessions are now recordable and none exists.** Until this session
+  nothing on the host could drive the second port — the pad hardware in
+  `src/gen68k.c` has always been written over three ports and `--record` has
+  always written both, but the keyboard only ever reached port 1, so every
+  session ever recorded here is one player. That is a real hole in a game whose
+  two characters are tied together by a ring, and it is the whole of the
+  two-player engine: the partner's physics, the tether, and whatever the
+  character-select does differently. See [state.md](state.md) for the keys.
 
 *Deliberately not gated:* commands by kind, frame-buffer bytes and the three
 instruction rates are printed against a baseline with their delta and never
@@ -110,6 +151,44 @@ it desyncs inside the first level and never enters a special stage, and the
 reason is upstream of any alignment: the movie's menu path is not ours, so what
 the game enters the level holding need not be what was recorded. [done.md](done.md)
 has the measurements.
+
+It is still worth running under `--xcheck`, and that is not a contradiction: the
+desync makes it useless as a statement about *playing* the game and changes
+nothing about it as a supply of 68000 blocks to check translations against. Half
+a billion of them agree, through five zones.
+
+**And the reason it desyncs is now measured rather than suspected.** The
+hypothesis above — that what the game enters the level holding need not be what
+was recorded — has a mechanism, and it is the one-player/two-player half of it.
+
+*The TAS is a two-player recording.* Its entire port-2 content is a single Start
+at movie frame 366, between the port-1 presses at 361 and 459, which is how a
+second player joins this game. In our run that press **does nothing at all**:
+zeroing it produces a byte-identical run — same commands, same frame buffer, same
+VRAM. Sweeping a synthetic port-2 Start across the whole menu phase, our run
+accepts one in two narrow windows, movie frames **320-324** and **452-456**, and
+366 is in neither. The screen sequence says the same thing from the other side:
+our bitmap mode is `0001` over movie frames 340-430 and again 450-470, which is
+not where the real machine's menu screens were.
+
+So the game enters the level in one-player mode where the movie recorded two, and
+from level frame 1 there is a second character being simulated in one run and not
+the other. Moving the press to 456 changes the outcome completely — the run ends
+up in Training rather than Isolated Island — which is the confirmation that the
+press is load-bearing, not the fix.
+
+*What the fix would have to be, and why no flag here is it.* Neither
+`--movie-offset` nor `--movie-resync` can help, because both move the movie's
+menu presses and its level start together, and the problem is that our menu is a
+different menu at a different time. It would have to be **our own** presses
+driving the menu into two-player Scenario Quest with the right character pair,
+and the movie handed control only at its first gameplay input at frame 633 —
+which the existing flags can already express (an offset far enough out that no
+movie input plays early, `--press`/`--hold2` to navigate, then
+`--movie-resync <our level frame>:633`). What is not known is the press sequence
+that gets our menu there, and the character pair and the movie's two pause
+presses are still upstream of it. It is an afternoon of screenshots, and the
+prize is one foreign recording that still could not be a gate.
 
 ### 3. The SH-2s keep time with one number each
 
@@ -213,7 +292,19 @@ here.*
 * **The recompiled 68000's PC is not masked to 24 bits.** At the frontier it
   holds `0xFFFFDD32`, which `canon68k` passes through unchanged; it works only
   because the lookup then fails and the interpreter masks it on the way in.
-  Accidental rather than designed.
+  Accidental rather than designed. Its data-side twin is that address arithmetic
+  reaches `src/gen68k.c` unmasked as well — a `movem.l (a6)` with a6 holding a
+  sign-extended `0xFFFFFFC0` arrives as exactly that, and the mask at the door is
+  what makes it work. `--xcheck` records in bus addresses for this reason.
+* **The recompiled 68000 works in cartridge offsets, including on the game's own
+  stack.** A `bsr` pushes an offset where Musashi pushes an address, and after a
+  fuel yield `m68k_interrupt` pushes one too. It is self-consistent — an `rts`
+  dispatches it back through `canon68k` — and it works across a hand-over only
+  because the cartridge is aliased at `0x000000` and `0x880000`, so the
+  interpreter resuming at an offset reads the same bytes. The same family as the
+  unmasked PC above: it has never been wrong, and nothing makes it right. What
+  would settle it is the offset-keyed banked window in §4, which has to decide
+  what a translated address *is* anyway.
 * **`0x0749C2`-`0x0749D0` is 68000 code discovery has never found.** Not a
   block, not in `az.code`, between known blocks at `0x749AA` and `0x749E4`, and
   entered 4,163 times in 3,600 frames. `coverage` is clean because it is only
@@ -287,6 +378,17 @@ does not spend the same day finding the same thing.
   divergences, and returns *exactly that* with the divide unit in and with it
   out. It walks the whole extract and cannot tell the two apart, so it is not
   the instrument for anything past the boot as configured.
+* **Comparing the two 68000 backends by running the game twice.** They leave
+  byte-identical state at 300 frames and then wander, because the recompiler
+  charges a block's cycles in its prologue and Musashi charges each instruction
+  as it retires. It is phase, not fault, and no checkpoint scheme gets around
+  it — see the measurements in §1. Lock-step per block is what works.
+* **Deriving the address a recompiled block was reached through.** The window it
+  came in by can be carried from the dispatch, but it collapses on the first
+  `bsr`: the generated code returns offsets and pushes offsets, so an address
+  exists only where `m68k_run` is handed one. A shadow run at a reconstructed
+  address reports every subroutine call in the game. The fold gets asked about
+  separately, at the dispatch, where both numbers are real.
 * **A VDP bus-contention model** — the first attempt at the 68000's clock. It
   changed the instruction count by nothing at all, which is what said the budget
   was not what governed. See the note above `cpu_credit` in `src/mars_main.c`.
@@ -309,7 +411,15 @@ Its one structural limit is the whole of what M7 owes: **the reference logs are
 the SEGA logo has been outside them. So the second half of the strategy is
 oracles that need no reference at all — the runtime's own invariants, a replayed
 session that carries the game where no headless run reaches, and the two 68000
-backends checked against each other. The first two exist. The third does not.
+backends checked against each other. All three now exist, and the third has
+already found something none of the others could see.
+
+What the third does *not* cover is worth being exact about, because it is easy to
+read `--xcheck` as more than it is. It holds the recompiled 68000 to Musashi and
+nothing else: an SH-2 translation, the Z80, either VDP, the scheduling between
+them and every sound path are outside it entirely, and so is anything both
+backends get wrong the same way. It is one CPU checked against one other reading
+of the same instruction set.
 
 ## Honest scope note
 

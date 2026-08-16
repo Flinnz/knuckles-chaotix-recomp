@@ -132,6 +132,10 @@ python3 tools/test_recomp68k.py               # recompiled 68000 vs Musashi
 
 make run                                      # play it; recompiled 68000
 ./build/mars --interp --frames 300            # the same, on the interpreter
+./build/mars --xcheck --frames 2400 \
+    --press start --press-until 350           # and the two held to each other,
+                                              # block by block, for a run that
+                                              # reaches a level
 ./build/mars --frames 600 --wav build/a.wav   # capture what the 32X played
 python3 tools/diffpwm.py                      # and hold it to what it played
 python3 tools/diffz80.py                      # the sound driver, instruction by
@@ -146,7 +150,7 @@ python3 tools/refrate.py                      # what an instruction costs, per C
 
 ## How correctness is established
 
-Three independent checks, all of which must pass:
+Four independent checks, all of which must pass:
 
 **The decoder** is validated exhaustively. A blob containing all 65,536
 instruction words is disassembled with `sh-elf-objdump` and compared word for
@@ -176,6 +180,16 @@ gap. The SH-2 has answered this since its diff existed; the 68000 was first
 asked in 2026-08 and came back with 44 addresses, the vertical interrupt handler
 among them — reached only through a pointer the engine writes into work RAM at
 run time. Both sides are now clean, and `make check` runs all of it.
+
+**A fourth asks the two 68000 backends about each other.** Musashi and the
+recompiler are independent readings of the same instruction set, so `--xcheck`
+re-runs every recompiled block on the interpreter from the same registers and
+holds the two to the same answer — the registers the block leaves, the address it
+goes to, and every byte it touched. It is the only check here that neither stops
+where the reference logs stop nor waits for somebody to have played the game, and
+it is what found `ori #imm,ccr` reading its immediate from the wrong word. The
+round-trip above cannot see that one: the listing's text was right all along and
+only the recompiler's reading of it was wrong.
 
 ## Status
 
@@ -223,16 +237,30 @@ picture from each half of the machine.
   headless with no stall
 - **A recorded play session is a gate.** `--record` writes the pad back out in
   our own frame numbering, so a session played once replays for ever;
-  `tools/test_session.py` is the last step of `make check` and the only gate
-  that reaches past the reference logs' 1.7 seconds
+  `tools/test_session.py` is the last step of `make check` and reaches past the
+  reference logs' 1.7 seconds
 - Five faults that only playing could find are fixed: the 32X's priority is per
   dot rather than per screen, a byte write to a comm register is a byte (which
   is the special stage's sound effects), the Mega Drive's shadow/highlight mode
   is modelled, the cartridge's battery is saved to `<cartridge>.sav`, and the
   SH-2 recompiler writes PR before a call's delay slot rather than after (which
   is the special stage's character on its run to the Chaos Ring)
-- Next: the two 68000 backends against each other, which is the one oracle in
-  hand that the reference logs cannot be
+- **The two 68000 backends now check each other.** `--xcheck` re-runs every
+  recompiled block on Musashi from the same registers and compares the registers
+  it leaves, the address it goes to and every byte it touched — lock-step, so
+  the two backends' different timing cannot enter into it. Clean over
+  117,045,848 blocks of the recorded session; the banked-window bug put back is
+  caught on the transfer that does it. It found a wrong CCR immediate that
+  nothing else here could see, the first fault in this project's history found
+  by a gate rather than by playing
+- **Two players.** The pad hardware was always written over three ports and
+  `--record` always wrote both, but nothing on the host could drive the second
+  one, so every session ever recorded here is one player — in a game whose two
+  characters are tied together by a ring. Port 2 now has its own keys and both
+  ports take a game controller through SDL, so a two-player session can be played
+  and recorded
+- Next: more recorded sessions, for the scenes the one we have never visits —
+  and the first two-player one
 
 See [docs/state.md](docs/state.md) for where things stand — numbers, flags and
 open items, no prose — [docs/architecture.md](docs/architecture.md) for hardware

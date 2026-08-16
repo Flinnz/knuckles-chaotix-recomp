@@ -3,8 +3,8 @@
 Facts only. What is left to do, and what was tried and rejected, is in
 [roadmap.md](roadmap.md); how each of it was arrived at is in [done.md](done.md).
 
-Generated from the build at commit `0ea28bb` plus the five fixes under "Five
-things a person saw and no gate could" in the roadmap. `make check` passes.
+Generated from the build at commit `ab57699` plus `--xcheck` and the one thing
+it found. `make check` passes.
 
 ## What this is
 
@@ -60,12 +60,31 @@ Both cartridges (JU and E) reassemble byte for byte from the emitted listing.
 | chip register input (`diffz80.py`) | 164 of 164 bytes, in order |
 | recompiled 68000, blocks (`diff68k.py --blocks`) | 3,376 of 9,848 blocks, 599 divergences |
 | recompiled 68000, boot only | 2,466 blocks, 23 divergences |
+| the two 68000 backends (`--xcheck`) | 12,811,820 blocks re-run on Musashi, 13,271 windowed transfers, 0 divergences |
 | front-end coverage (`disasm68k.py coverage`) | clean |
 | played session (`test_session.py`) | 27,741 frames, special stage entered, no missing block — local input, skips without one |
 
 No fatal divergence in any diff. Every diff walks its whole extract, and
 `diffsh2.py` still ends on "every instruction the reference ran is inside a
 block we have".
+
+**Two of those gates do not stop at 1.7 seconds.** `--xcheck` re-runs every
+recompiled block on Musashi from the same registers and compares the registers
+it leaves, the address it goes to and every byte it touched; `test_session.py`
+replays a recorded play session. The 2,400 frames in `check` are the headless
+version, which needs nothing but the cartridge and so cannot skip. It costs about
+three times the run time, so the long runs are worth doing by hand:
+
+| `--xcheck` over | blocks re-run | windowed transfers | divergences |
+|---|---|---|---|
+| `check`, 2,400 frames headless | 12,811,820 | 13,271 | 0 |
+| the recorded session, 27,741 frames | 117,045,848 | 913,455 | 0 |
+| the tuffcracker TAS, 111,397 frames at offset 500 | 509,601,542 | 3,153,331 | 0 |
+
+The TAS is worth its eight minutes even though it desyncs and never reaches a
+special stage: it is half a billion blocks through five zones, and what it is
+being asked is whether a translation is right, which does not care that the
+character is being driven badly.
 
 The two SH-2 block gates read lower than they did at 251 SH-2 functions — 197
 and 1,344 — and that is the gate seeing more rather than the runtime doing
@@ -264,7 +283,8 @@ movie frame 691 holds. `make tas` turns it on, so every shot carries it.
 | `--interp` / `--recomp` | Musashi or recompiled 68000 (recompiled is the default) |
 | `--hold LIST` | hold buttons from frame 0 (`up,down,left,right,a,b,c,start,x,y,z,mode`) |
 | `--press LIST` | pulse buttons, 15 frames in every 45 — what a menu needs |
-| `--press-until N` | stop pulsing at frame N, so a run can sit on the screen it reached |
+| `--hold2 LIST`, `--press2 LIST` | the same for the second pad, which is also the only way to exercise port 2 without a person at a keyboard |
+| `--press-until N` | stop pulsing at frame N, so a run can sit on the screen it reached; bounds both pads |
 | `--movie FILE` | play a recorded run, one line of input per frame, from `tools/bk2.py` |
 | `--movie-offset N` | which of our frames plays the movie's frame 0; negative skips into it |
 | `--movie-resync OURS:MOVIE` | from our frame OURS, play movie frame MOVIE — re-align part way in; repeatable, last match wins |
@@ -282,14 +302,40 @@ movie frame 691 holds. `make tas` turns it on, so every shot carries it.
 | `--trace-from N` | start every tracer at frame N |
 | `--progress N` | one liveness line every N frames — commands, PCs, bitmap mode, interrupt masks, unmapped accesses |
 | `--hold-from N` | start holding at frame N, so the menus are passed untouched |
+| `--xcheck` | re-run every recompiled block on Musashi from the same registers and compare — the oracle that needs no reference. Exits non-zero on a divergence, and costs about 3x |
+| `--xcheck-stop` | the same, stopping at the first one |
 | `--survive-missing` | carry on at PR when a transfer has no block, instead of parking — the run is wrong from that point, but one session surfaces several addresses instead of one |
 | `--watch ADDR[:LEN]` | log SH-2 writes into that range, with the block they came from |
 | `--trace68k-lines N`, `--trace-sh2-lines N`, `--trace-z80-lines N` | line budgets |
 | `--dump-vdp FILE`, `--dump-32x FILE`, `--dump-z80 FILE`, `--dump-sdram FILE` | memory snapshots |
 | `--trace` | SH-2 function-entry counts and the last block ring |
 
-Keyboard, windowed: arrows, `Z`/`X`/`C` = A/B/C, `A`/`S`/`D` = X/Y/Z, `Enter`
-= Start, `Tab` = Mode, `Esc` quits.
+Keyboard, windowed — two players, because this game's two characters are tied
+together by a ring:
+
+| | player 1 | player 2 |
+|---|---|---|
+| d-pad | arrows | `I`/`K`/`J`/`L` |
+| A B C | `Z`/`X`/`C` | `V`/`B`/`N` |
+| X Y Z | `A`/`S`/`D` | `F`/`G`/`H` |
+| Start | `Enter` | `RShift` |
+| Mode | `Tab` | `RCtrl` |
+
+`Esc` quits. Game controllers are opened through SDL's controller layer — which
+is what covers XInput and DirectInput on Windows, IOKit on macOS and evdev on
+Linux, with nothing per-platform here — and fill the ports in the order they
+arrive, hot-plug included. The left stick works as a d-pad past half deflection.
+The keyboard stays live on both ports whatever is plugged in, so a pad and a
+keyboard is two players.
+
+On a modern pad: `X`/`A`/`B` are A/B/C, `Y` and the two shoulders are X/Y/Z,
+Start is Start and Back is Mode.
+
+The summary line `pads polled: port 1 N, port 2 M` says how often the game asked
+each port for its lines, which is the only way to tell "the second pad does
+nothing" apart from "the game is not in two-player mode". In a level both read
+17,600 in 2,400 frames, and across the recorded session both read 212,072: the
+game polls the second port exactly as often as the first, always.
 
 ## Tools
 
@@ -316,13 +362,13 @@ extracts the gates read are rebuilt into `build/` on demand.
 
 Ordered as in the roadmap's plan.
 
-1. Past 1.7 seconds the only gate is `test_session.py`, over one recorded
-   session, and it enforces liveness rather than end-of-run numbers. The third
-   oracle — the two 68000 backends against each other — is not written; it is
-   the one that would have caught the banked window on the frame it happened.
-   Scenes outside that session — the save select, the player select, the
-   attraction select, the rest of the hub — are covered by nothing, and only
-   playing produces the coverage.
+1. Past 1.7 seconds there are two gates. `--xcheck` holds the recompiled 68000
+   to Musashi block by block and needs no session at all, but it says nothing
+   about the SH-2s, the Z80, either VDP or the sound. `test_session.py` reaches
+   all of those and enforces liveness rather than end-of-run numbers, over one
+   recorded session. Scenes outside that session — the save select, the player
+   select, the attraction select, the rest of the hub — are covered by nothing
+   but `--xcheck`'s 68000 half, and only playing produces the rest.
 2. No frontier is known. 200,000 frames run clean; nothing has been run longer.
 3. `sh2_cpi1000` is one cycles-per-instruction number per SH-2.
 4. The banked window is wholly interpreted — 988,493 hand-overs in 3,600 frames.

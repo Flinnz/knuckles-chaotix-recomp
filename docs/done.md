@@ -60,6 +60,9 @@ kind of bug a project like this actually has:
   names](#the-thirteenth-missing-block-is-a-callback-only-a-mova-names).
 * [Five things a person saw and no gate
   could](#five-things-a-person-saw-and-no-gate-could).
+* [The two backends against each other, and what four wrong answers
+  taught](#the-two-backends-against-each-other-and-what-four-wrong-answers-taught)
+  — the first gate here that does not stop at 1.7 seconds.
 
 ## M0 — foundation
 
@@ -3298,6 +3301,212 @@ goal says which caller stopped without any reading of the game's code at all.
 The second delay-slot bug in this project, and the same lesson as the first —
 a delay slot is a separate instruction that runs *after* the branch has had its
 effect.
+
+### The two backends against each other, and what four wrong answers taught
+
+The oracle this project has wanted since the SEGA logo: Musashi and the
+recompiler are two independent readings of the same cartridge, they do not stop
+at 1.7 seconds the way the reference logs do, and where a translation is wrong
+they disagree. `--xcheck` is it. Every recompiled block is re-run on Musashi
+from the same registers, and the registers it leaves, the address it goes to and
+every byte it touched are compared.
+
+**The design the roadmap had written down does not work, and one afternoon's
+measurement is why.** The plan was to run the game twice, once on each backend,
+and compare commands posted, the frame buffer, VRAM, CRAM and the palette at
+checkpoints. At 300 frames the two leave *byte-identical* VDP and 32X state, so
+it looks sound. Over a played session it falls apart: they part company by frame
+500 and then wander, differing on 1,388 bytes of the 262,660-byte 32X dump at
+frame 500, 128 at 1,000, 1,044 at 1,500, 5,561 at 2,000 and 3,169 at 2,500. The
+wandering — not growing — is the tell. Nothing is wrong. The recompiler charges
+a block's cycles in its prologue where Musashi charges each instruction as it
+retires, so a block that straddles one of the sixteen hand-overs in a scanline
+overshoots, the SH-2s get a slightly different slice, and a rendezvous resolves
+an instruction earlier or later. At 3,000 frames the two runs differ by 0.016%
+of their 68000 instructions and are the same game at a slightly different point
+in it. A gate built on comparing them would have reported that for ever.
+
+So it is **lock-step**: the shadow re-runs one block from the primary's own
+state, and timing cannot enter into it.
+
+That much was the easy half. Four things had to be understood before the gate
+said anything true, and each of them is a fact about the machine rather than a
+detail of the harness.
+
+**A read here is not idempotent, so the shadow must never touch memory.**
+Reading comm 4 is what hands the cartridge its checksum, the VDP's data port
+advances its own address, and the HV counter moves every time it is looked at. A
+shadow that read the machine a second time would change what it was measuring.
+So the block's data accesses are recorded as it makes them and the shadow is
+served from the record — which needs Musashi's opcode fetches told apart from
+its data reads, because the fetches *do* have to reach the real bytes.
+`M68K_SEPARATE_READS` does that, and turning it on meant turning `M68K_EMULATE_PMMU`
+off: a 68000 has no PMMU, and with one configured Musashi's separate-reads path
+does not compile — its `m68ki_read_imm_16` translates an `address` that only
+exists in the ordinary read path it was copied from. PC-relative operands go
+through the record and not around it, which took one more run to find: they are
+data the instruction went and got, and the recompiler asks for them by the
+absolute address it worked out at build time.
+
+**Musashi banks the 68000's reset cycles and spends them on whatever calls it
+next.** The first `m68k_execute(1)` of every shadow run therefore retired
+nothing, and every comparison ended one instruction short of the block's
+branch — which reads exactly like a control-flow divergence and is not one. It
+is spent once, at the start, with a call that has no cycle budget to run on.
+
+**Access width and order are not something the two owe each other.**
+`movem.l -(a7)` is one 32-bit write per register in the generated code and two
+16-bit writes going the other way in Musashi: the same six bytes at the same six
+addresses, arrived at differently. Holding them to the shape of their accesses
+reported every stack frame the engine builds. What they *do* both owe is the
+bytes — so an access is broken into its bytes as it is recorded, and the writes
+are compared sorted by address. Sorted **stably**: this engine writes the VDP's
+control port nine times in one block, so nine bytes share an address, and an
+unstable sort permutes them differently on the two sides and reports a rotation
+of the same nine values as nine divergences.
+
+**The recompiled 68000 works in cartridge offsets from end to end**, and that is
+the one that changed the design. A block returns an offset, a `bsr` pushes an
+offset, and an address exists only at the moment `m68k_run` is handed one.
+Running the shadow at the real address — which is what catching the banked
+window seemed to require — reported every subroutine call in the game. So the
+shadow runs in offset space, where the two agree by construction, and the fold
+from address to offset gets a check of its own at the one point both numbers are
+in hand: `canon68k` claims the bytes at this address are the bytes at that
+offset, and the machine can simply be asked, because a read at the address goes
+through `rom_at` and honours the bank register. Two questions, two instruments,
+neither assuming the other.
+
+**And the Z80 shares the 68000's address space.** A block that runs out of fuel
+yields at the *next* block's first line, so it stays armed across the rest of the
+hand-over — and the machine does not stop there. `src/genz80.c` reads the Z80's
+bank window through `m68k_read_memory_8`, so the sound driver fetching its next
+byte out of the cartridge was landing in whichever block happened to be armed,
+and the shadow was then asked why it had not read an address in the middle of the
+music. Recording only while `m68k_run` is on the stack is what makes the record
+mean "what this block did".
+
+*The proof is a bug put back.* Re-folding 0x900000-0x9FFFFF to bank 0 — the
+fault that stood between the SEGA logo and a playable game — is caught at frame
+314 of the recorded session, on the transfer itself:
+
+```
+frame 314, transfer to 0x9297AC
+  the front end runs offset 0x0297AC here, which holds 0x4A2E, and 0x9297AC holds 0x46FC
+```
+
+That is the claim the roadmap made for this oracle, tested rather than asserted.
+It also took a second attempt to test honestly: the first injection ran headless
+into a level, never called through the window at all, and reported 9,442
+divergences that the *clean* build reported too — they were the Z80 pollution
+above, and the injected bug had added nothing. A bug-injection test that fails
+for the wrong reason looks exactly like one that works.
+
+**What it found on its own: `ori #1,ccr` was emitting `| 0x3C`.** The immediate
+of `ori`/`andi`/`eori` to CCR lives in the extension word, and these two forms
+were the only ones in the decoder that carried theirs in the operand text alone —
+`cur.imm` was never set. So `tools/recomp/m68kc.py` took the low byte of the
+opcode word instead, which is `0x3C`, the "to CCR" selector. Twenty sites in the
+cartridge across nine blocks, every one of them wrong: `| 0x01` (set C) ran as
+`| 0x3C`, which sets X, N and Z and leaves C alone, and `& 0xFE` (clear C) ran as
+`& 0x3C`, which clears V as well. `ori #1,ccr` before an `rts` is a routine
+returning a flag in the carry, and what ran returned the opposite.
+
+The listing round-trip could never have seen it, and that is worth stating
+plainly: `disasm68k.py emit --verify` reassembles all 3,145,728 bytes because the
+operand *text* was right the whole time. Only the recompiler's reading of it was
+wrong, and nothing else in `make check` reads that.
+
+Its effect on the game is, so far, nothing. It fired 2,354 times across the
+27,741-frame session and the run either side of the fix is identical — same
+commands, same frame buffer, same instruction counts to the digit. The flags were
+computed wrongly and never acted upon. That is not a reason to shrug at it; it is
+the same shape the banked window had, which was also invisible until the day the
+engine happened to call through the window. The same missing `cur.imm` left
+`ori/andi/eori #imm,sr` as a latent crash in the recompiler rather than a wrong
+answer — `None & 0xFFFF` — and this cartridge has no site that would reach it.
+
+Where it stands: **zero divergences over 117,045,848 blocks** of the recorded
+session, with 913,455 windowed transfers checked against the fold, and zero over
+the 12,811,820 blocks of the headless run that is now the gate. It costs about
+three times the run time, so 2,400 frames — through the save select and into a
+level — is ten seconds, and unlike the session gate it needs nothing but the
+cartridge and therefore cannot skip.
+
+*And the foreign TAS turns out to be worth running after all.* The 31-minute
+tuffcracker movie was written off for gating because it desyncs inside the first
+level and never enters a special stage — but that is a judgement about whether it
+plays the game, and this gate is not asking that. It asks whether a translation
+is right, which does not care that the character is being driven badly. All
+111,397 frames at offset 500: **509,601,542 blocks re-run, 3,153,331 windowed
+transfers, zero divergences**, through five zones, in about eight minutes. Half a
+billion blocks of coverage from an input that had been shelved.
+
+### The second port had nobody to answer it
+
+Every session ever recorded here is one player, and not because anybody decided
+that. The pad hardware in `src/gen68k.c` has been written over three ports since
+it was written, `gen.pad_buttons[]` has three entries, `--record` has always
+written both, and a movie has always fed port 2 — but the keyboard only ever
+reached port 1. So the one thing that could not be recorded was the half of this
+game that gives it its name: two characters tied together by a ring.
+
+The measurement that says the rest of the path was fine: **the game polls port 2
+exactly as often as port 1.** 17,600 reads each over 2,400 frames into a level,
+212,072 each across the recorded session, never once fewer. That number is now in
+the summary, because without it "the second pad does nothing" and "the game is
+not in two-player mode" look identical from outside, and the whole afternoon
+below turned on being able to tell them apart.
+
+Port 2 gets a second key set — `I K J L` for the d-pad, which is `W A S D` moved
+to the hand that is free — and both ports get a game controller through SDL's
+controller layer. That layer is the entire platform story: it sits on XInput and
+DirectInput on Windows, IOKit on macOS and evdev on Linux and hands back the same
+named buttons from all of them, so there is nothing per-platform in this
+repository and nothing to configure. Pads fill the ports in the order they
+arrive, hot-plug included, and the keyboard stays live on both either way.
+
+`--hold2` and `--press2` exist for a reason beyond symmetry: without them the
+second port could only be driven by a person at a keyboard, so there was no way
+to *check* it. `--hold2 right,a` records `018` on port 2 with port 1 clean, which
+is what says the whole path works end to end without anybody playing.
+
+### Why the TAS desyncs, which is not the offset
+
+The 31-minute tuffcracker movie has never synced, and [roadmap.md](roadmap.md)
+carried the reason as a hypothesis: what the game enters the level holding need
+not be what was recorded, and if the character pair or the one/two-player mode
+differs then no alignment can help. Wiring up the second port made it testable,
+and it is the mode.
+
+**The TAS is a two-player recording.** Its entire port-2 content is one Start at
+movie frame 366, sitting between the port-1 presses at 361 and 459 — which is how
+a second player joins this game. And in our run that press does *nothing*: zero
+it out and the run is byte-identical, same commands, same frame buffer, same
+VRAM. Sweeping a synthetic port-2 Start across the whole menu phase, our run
+accepts one in two narrow windows — movie frames **320-324** and **452-456** —
+and 366 is in neither. The screen sequence agrees from the other side: our bitmap
+mode is `0001` across movie frames 340-430 and again 450-470, which is not where
+the real machine's menu screens were.
+
+So the game enters the level in one-player mode where the movie recorded two, and
+from level frame 1 one run is simulating a second character and the other is not.
+Moving the press to 456 is not the fix and is the proof: the run ends up in
+Training rather than Isolated Island, and at frame 21,000 shows "STEP 1/4 — Hold
+B button" where the unmodified run is still stuck in Isolated Island with the
+score at 0 and the clock running out. The press is load-bearing; it is simply
+being aimed at a menu that is no longer there.
+
+*This was left here.* The fix cannot be an offset or a re-sync — both move the
+movie's menu presses and its level start together, and the complaint is that our
+menu is a different menu at a different time. It would have to be our own presses
+driving the menu into two-player Scenario Quest with the right pair and the movie
+taking over only at its first gameplay input at frame 633, which the existing
+flags can already express. What is not known is the sequence that gets our menu
+there, and the character pair and the movie's two pause presses are still
+upstream of it. The prize is one foreign recording that could never be a gate
+anyway, where the same afternoon spent playing produces a session that replays
+for ever.
 
 ## Settled debts, and findings kept
 
