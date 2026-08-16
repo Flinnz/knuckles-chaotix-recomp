@@ -7,6 +7,7 @@ roms/*.bk2
 roms/*.log
 roms/*.movie
 roms/*.ram
+roms/*.sav
 __pycache__/
 *.pyc
 .DS_Store

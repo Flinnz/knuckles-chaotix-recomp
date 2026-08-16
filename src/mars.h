@@ -129,6 +129,16 @@ typedef struct {
      * EXT connector and nothing ever fills it. */
     unsigned pad_buttons[3];
     unsigned layers;         /* 1 plane B, 2 plane A, 4 sprites */
+
+    /* The cartridge's battery-backed 512 bytes. The header declares them at
+     * 0x200001-0x2003FF, odd addresses only — an 8-bit chip on the low half of
+     * the bus — and the mapper register at 0xA130F1 says whether that window
+     * shows them or the ROM underneath. See src/gen68k.c. */
+    uint8_t  sram[512];
+    uint8_t  sram_ctl;       /* bit 0 mapped, bit 1 write-protected */
+    uint32_t sram_reads;     /* bytes the game has read back */
+    uint32_t sram_writes;    /* bytes the game has stored */
+    int      sram_dirty;     /* stored since the file was last written */
 } Gen;
 
 extern Mars mars;
@@ -267,6 +277,13 @@ void gen68k_init_vectors(void);
 /* Let the controller ports forget their TH pulse count, which the real pads do
  * after an idle gap shorter than a frame. */
 void gen68k_frame_start(void);
+
+/* The save file behind `gen.sram`. `open` reads it if it is there and remembers
+ * where to put it back; `commit` writes it if the game has stored anything since
+ * the last one. Passing NULL to `open` runs the cartridge with a battery that
+ * nothing outlives, which is what a trace comparison wants. */
+void gen68k_sram_open(const char *path);
+void gen68k_sram_commit(void);
 
 /* What the 68000 got through, which is the question `sh2_insns` already asks of
  * the SH-2s and for the same reason: the reference retires 11,611 instructions

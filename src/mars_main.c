@@ -1064,6 +1064,16 @@ int main(int argc, char **argv) {
     const char *rompath = argc > 1 && argv[1][0] != '-' ? argv[1]
         : "roms/Knuckles' Chaotix (JU) (32X) [!].32x";
     int headless_frames = 0;
+    /* The battery lives beside the cartridge, under the same name with `.sav`
+     * for an extension — its own file, so that nothing here writes over the
+     * save another emulator made. The format is the chip's 512 bytes and
+     * nothing else, which is what the reference emulator's `.ram` for this
+     * cartridge holds too: `--save "roms/....ram"` shares one save between the
+     * two, and the file this writes with no save to start from is byte for byte
+     * the file that emulator wrote. */
+    const char *savepath = NULL;
+    int no_save = 0;
+    char savebuf[1024];
     const char *trace68k = NULL, *dump_vdp = NULL, *tracesh2 = NULL;
     const char *dump_32x = NULL, *wav = NULL, *tracepwm = NULL;
     const char *dump_sdram = NULL;
@@ -1185,6 +1195,10 @@ int main(int argc, char **argv) {
             rate68k_report = 1;
         else if (!strcmp(argv[i], "--progress") && i + 1 < argc)
             progress_every = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--save") && i + 1 < argc)
+            savepath = argv[++i];
+        else if (!strcmp(argv[i], "--no-save"))
+            no_save = 1;
 
     if (!gen.layers) gen.layers = 15;   /* planes, sprites, 32X bitmap */
 
@@ -1215,6 +1229,30 @@ int main(int argc, char **argv) {
     if (!f) { perror(rompath); return 1; }
     mars.rom_size = (uint32_t)fread(mars.rom, 1, MARS_ROM_MAX, f);
     fclose(f);
+
+    /* A replay has to meet the same machine every time, and a battery is machine
+     * state: loading one would make a recorded session depend on whatever was
+     * last played, and `tools/test_session.py` is the gate that would find out.
+     * So a movie runs on an empty battery and writes nothing, which is also the
+     * machine the sessions in `roms/` were recorded on — unless a save file is
+     * named outright, which says the caller means it. */
+    if (moviepath && !savepath) no_save = 1;
+    if (!no_save) {
+        if (!savepath) {
+            const char *dot = strrchr(rompath, '.');
+            const char *slash = strrchr(rompath, '/');
+            size_t stem = dot && (!slash || dot > slash) ? (size_t)(dot - rompath)
+                                                         : strlen(rompath);
+            if (stem < sizeof savebuf - 5) {
+                memcpy(savebuf, rompath, stem);
+                memcpy(savebuf + stem, ".sav", 5);
+                savepath = savebuf;
+            }
+        }
+        gen68k_sram_open(savepath);
+    } else {
+        savepath = NULL;
+    }
 
     /* What the 32X boot ROM stages before either CPU starts. */
     uint32_t src = be32(&mars.rom[H_SRC]), dst = be32(&mars.rom[H_DST]);
@@ -1634,6 +1672,13 @@ int main(int argc, char **argv) {
                movie_offset);
     if (record_path)
         printf("  recorded: %lu frame(s) to %s\n", record_frames, record_path);
+    /* The battery. A run that never reached a save point writes nothing, which
+     * is a different thing from one that had nowhere to write to. */
+    gen68k_sram_commit();
+    if (savepath)
+        printf("  save: %u byte(s) read, %u stored%s%s\n",
+               gen.sram_reads, gen.sram_writes,
+               gen.sram_writes ? " to " : ", nothing written to ", savepath);
     printf("  SH-2 parked at: master 0x%08X, slave 0x%08X\n",
            mars_cpu[0].pc, mars_cpu[1].pc);
     /* The reference figures are steady-frame rates, so a run that includes the

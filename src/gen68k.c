@@ -236,6 +236,63 @@ static uint32_t rom_at(uint32_t a) {
     return 0xFFFFFFFFu;
 }
 
+/* --- the cartridge's battery ------------------------------------------------
+ *
+ * The header declares it: "RA", 0xF8 0x20, 0x200001-0x2003FF. An 8-bit chip on
+ * the odd half of the bus, 512 bytes, sharing its window with the ROM — and the
+ * mapper register at 0xA130F1 says which of the two is there. The game drives
+ * both bits of it, and the two routines say what they mean better than any
+ * document: 0x03E392 reads with 3, mapped and write-protected, and 0x03E420
+ * writes with 1, mapped and writable, and both put 2 back when they are done.
+ *
+ * They also run from work RAM — 0x03E3D6 copies the writer to 0xFF0200 and
+ * calls it there — because the cartridge is exactly what the window stops
+ * showing while the battery is mapped. That is one of the routines that made
+ * an interpreter beside the recompiler necessary, and it is why both backends
+ * reach this through `m68k_read_memory_*` rather than through an image.
+ *
+ * What the game keeps here is two copies of a 256-byte block, at 0x200001 and
+ * 0x200201, each a four-byte checksum and 252 bytes seeded with `9EFB 0000
+ * 0001` twenty-four times — which is what 0x03E4BA writes into 0xFFFFFA00 when
+ * there is no save to load, and what the reference emulator's own .ram file for
+ * this cartridge holds.
+ *
+ * Byte access only, because that is the whole of what the chip is wired for and
+ * all the game ever does; a word access reads 0xFF in the half no chip drives.
+ */
+#define SRAM_LO 0x200001u
+#define SRAM_HI 0x200400u
+static const char *sram_path;
+
+static int sram_index(uint32_t a, unsigned *i) {
+    if (!(gen.sram_ctl & 1) || !(a & 1) || a < SRAM_LO || a >= SRAM_HI) return 0;
+    *i = (a - SRAM_LO) >> 1;
+    return *i < sizeof gen.sram;
+}
+
+void gen68k_sram_open(const char *path) {
+    sram_path = path;
+    if (!path) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;                     /* no save yet: a fresh battery */
+    size_t n = fread(gen.sram, 1, sizeof gen.sram, f);
+    fclose(f);
+    printf("save: %zu byte(s) from %s\n", n, path);
+}
+
+/* Called when the game unmaps the battery, which is its own commit point, and
+ * again at the end of the run. Writing it there rather than only at exit is
+ * what makes a save survive a kill — the game has finished its 512 bytes by
+ * then and says so by putting the window back. */
+void gen68k_sram_commit(void) {
+    if (!gen.sram_dirty || !sram_path) return;
+    FILE *f = fopen(sram_path, "wb");
+    if (!f) { perror(sram_path); sram_path = NULL; return; }
+    fwrite(gen.sram, 1, sizeof gen.sram, f);
+    fclose(f);
+    gen.sram_dirty = 0;
+}
+
 /* ------------------------------------------------------------ Genesis VDP */
 /* What a DMA costs the 68000, in thousandths of a scanline.
  *
@@ -495,6 +552,11 @@ static int mars_reg_write(uint32_t a, uint16_t v) {
 unsigned int m68k_read_memory_8(unsigned int a) {
     a &= 0xFFFFFFu;
     if (a < sizeof gen.vecram) return gen.vecram[a];
+    unsigned si;
+    if (sram_index(a, &si)) {                      /* before the ROM it covers */
+        gen.sram_reads++;
+        return gen.sram[si];
+    }
     uint32_t o = rom_at(a);
     if (o != 0xFFFFFFFFu && o < mars.rom_size) return mars.rom[o];
     if (IN(a, 0xFF0000u, 0x1000000u)) return gen.ram[a & 0xFFFFu];
@@ -507,6 +569,8 @@ unsigned int m68k_read_memory_16(unsigned int a) {
     a &= 0xFFFFFEu;
     if (a < sizeof gen.vecram)
         return ((unsigned)gen.vecram[a] << 8) | gen.vecram[a + 1];
+    unsigned si;
+    if (sram_index(a + 1, &si)) return 0xFF00u | gen.sram[si];  /* odd half only */
     uint32_t o = rom_at(a);
     if (o != 0xFFFFFFFFu && o + 1 < mars.rom_size)
         return ((unsigned)mars.rom[o] << 8) | mars.rom[o + 1];
@@ -542,6 +606,14 @@ unsigned int m68k_read_memory_32(unsigned int a) {
 void m68k_write_memory_8(unsigned int a, unsigned int v) {
     a &= 0xFFFFFFu;
     if (a < sizeof gen.vecram) { gen.vecram[a] = (uint8_t)v; return; }
+    unsigned si;
+    if (sram_index(a, &si)) {
+        if (gen.sram_ctl & 2) return;             /* write-protected */
+        gen.sram[si] = (uint8_t)v;
+        gen.sram_writes++;
+        gen.sram_dirty = 1;
+        return;
+    }
     if (IN(a, 0xFF0000u, 0x1000000u)) { gen.ram[a & 0xFFFFu] = (uint8_t)v; return; }
     if (IN(a, 0xA10000u, 0xA10020u)) {
         unsigned i = (a & 0x1F) >> 1;
@@ -555,7 +627,13 @@ void m68k_write_memory_8(unsigned int a, unsigned int v) {
      * attenuation 15 on all four — silence. */
     if ((a & ~2u) == 0xC00011u) { sound_psg_write((uint8_t)v); return; }
     if (IN(a, 0xA11000u, 0xA11400u)) return;            /* the rest of the bus */
-    if (a == 0xA130F1) return;                          /* SRAM control */
+    if (a == 0xA130F1) {                                /* the mapper register */
+        gen.sram_ctl = (uint8_t)v;
+        /* Unmapping is the game's own commit: it has finished its 512 bytes and
+         * is putting the ROM back. */
+        if (!(v & 1)) gen68k_sram_commit();
+        return;
+    }
     uint16_t cur = (uint16_t)m68k_read_memory_16(a & ~1u);
     uint16_t nv = (a & 1) ? (uint16_t)((cur & 0xFF00) | (v & 0xFF))
                           : (uint16_t)((cur & 0x00FF) | ((v & 0xFF) << 8));

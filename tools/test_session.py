@@ -62,9 +62,9 @@ MOVIE = "roms/session.movie"
 # enforced — see the module docstring.
 BASELINE = {
     "frames": 27741,
-    "cmds_posted": 19644,
+    "cmds_posted": 19727,
     "cmds_serviced": 19427,
-    "cmd_kinds": {1: 13, 2: 19287, 3: 12, 4: 3, 7: 1, 8: 1, 9: 327},
+    "cmd_kinds": {1: 13, 2: 19287, 3: 12, 4: 3, 7: 1, 8: 84, 9: 327},
     "vints_32x": 6624,
     "fb_bytes": 72383,
     "line_table": 224,
@@ -74,7 +74,7 @@ BASELINE = {
     "unmapped_sh2": 0,
     "master_per_frame": 234994,
     "slave_per_frame": 380556,
-    "m68k_per_frame": 11976,
+    "m68k_per_frame": 11984,
 }
 
 # A tolerance only for the printout's "!" marker, not for pass/fail.
